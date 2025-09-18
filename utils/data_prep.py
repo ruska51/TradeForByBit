@@ -1,0 +1,93 @@
+import pandas as pd
+import numpy as np
+import logging
+from typing import Any, Iterable
+
+
+def _to_dataframe(obj: Any) -> pd.DataFrame:
+    """
+    Нормализует входные данные OHLCV: принимает DataFrame, Series, list[list] или
+    list[dict], возвращает pd.DataFrame с колонками
+    [timestamp, open, high, low, close, volume]. Если вход пустой или
+    некорректный, возвращает пустой DataFrame.
+    """
+    if obj is None:
+        return pd.DataFrame()
+    if isinstance(obj, pd.DataFrame):
+        return obj
+    if isinstance(obj, pd.Series):
+        return obj.to_frame().T
+    try:
+        if isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
+            rows = list(obj)
+            if not rows:
+                return pd.DataFrame()
+            if isinstance(rows[0], Iterable) and not isinstance(rows[0], (str, bytes)) and len(rows[0]) >= 6:
+                cols = ["timestamp", "open", "high", "low", "close", "volume"]
+                return pd.DataFrame(rows, columns=cols)
+            return pd.DataFrame(rows)
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def build_feature_dataframe(df_ohlcv: pd.DataFrame, symbol: str, thr: float = 0.002) -> pd.DataFrame:
+    """
+    Построить набор простых признаков и целевую метку для данного символа.
+    df_ohlcv должен иметь колонки [timestamp, open, high, low, close, volume].
+    """
+    df = _to_dataframe(df_ohlcv)
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
+    df = df.copy()
+    df["ret_1"] = df["close"].pct_change()
+    df["ret_5"] = df["close"].pct_change(5)
+    df["sma_10"] = df["close"].rolling(10).mean()
+    df["sma_50"] = df["close"].rolling(50).mean()
+    df["rsi_14"] = df["ret_1"].clip(lower=0).rolling(14).mean() / (
+        df["ret_1"].abs().rolling(14).mean() + 1e-9
+    )
+    # Target: 1 (long) если ret_5 > thr, 2 (short) если ret_5 < -thr, иначе 0
+    target = np.where(df["ret_5"] > thr, 1, np.where(df["ret_5"] < -thr, 2, 0))
+    feats = df[["ret_1", "ret_5", "sma_10", "sma_50", "rsi_14"]].copy()
+    feats["symbol_cat"] = hash(symbol) % 17
+    feats["target"] = target
+    feats.dropna(inplace=True)
+    return feats
+
+
+def fetch_and_prepare_training_data(adapter, symbols: list[str], base_tf: str = "15m", limit: int = 400):
+    """
+    Собирает OHLCV через adapter.fetch_ohlcv для каждого символа,
+    строит фичи и целевую метку. Возвращает (df_features, df_target, feature_cols).
+    Если нет данных ни по одному символу — поднимает ValueError.
+    """
+    try:
+        from exchange_adapter import fetch_ohlcv as _fetch_ohlcv  # type: ignore
+    except Exception:
+        _fetch_ohlcv = None
+    rows = []
+    for sym in symbols:
+        try:
+            df_raw = (
+                _fetch_ohlcv(sym, base_tf, limit=limit)
+                if _fetch_ohlcv is not None
+                else adapter.fetch_ohlcv(sym, base_tf, limit=limit)
+            )
+            feat = build_feature_dataframe(df_raw, sym)
+            if len(feat) > 0:
+                rows.append(feat)
+        except Exception as e:
+            logging.warning(
+                "data_prep | %s | failed to fetch/build features: %s (type=%s)",
+                sym,
+                e,
+                type(df_raw).__name__ if "df_raw" in locals() else "unknown",
+            )
+    if not rows:
+        raise ValueError("data_prep | no training data collected: all rows empty")
+    df_all = pd.concat(rows, ignore_index=True)
+    df_features = df_all.drop(columns=["target"])
+    df_target = df_all["target"]
+    feature_cols = list(df_features.columns)
+    return df_features, df_target, feature_cols
