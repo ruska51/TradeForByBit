@@ -17,7 +17,7 @@ def test_run_bot_loop_warn_once(monkeypatch, caplog):
         def load_markets(self, reload=False):
             return {}
 
-    monkeypatch.setattr(ccxt, "binance", DummyExchange)
+    monkeypatch.setattr(ccxt, "bybit", DummyExchange)
     import importlib
     sys.modules.pop("main", None)
     import main

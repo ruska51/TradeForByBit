@@ -109,7 +109,7 @@ Switch to `ccxt.pro` to use websockets and asyncio.
 import ccxt.pro as ccxt
 import asyncio
 
-exchange = ccxt.binance({'apiKey': API_KEY, 'secret': API_SECRET})
+exchange = ccxt.bybit({'apiKey': API_KEY, 'secret': API_SECRET, 'options': {'defaultType': 'swap', 'defaultSubType': 'linear'}})
 
 async def fetch_ohlcv_async(symbol, tf):
     return await exchange.watch_ohlcv(symbol, tf)

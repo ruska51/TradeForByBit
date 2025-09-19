@@ -44,7 +44,7 @@ def test_train_optuna_model(tmp_path, monkeypatch):
             self.markets_by_id = {}
             return self.markets
 
-    monkeypatch.setattr(ccxt, "binance", DummyExchange)
+    monkeypatch.setattr(ccxt, "bybit", DummyExchange)
     import main
     importlib.reload(main)
 

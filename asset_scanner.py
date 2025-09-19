@@ -30,11 +30,26 @@ def _get_adapter() -> ExchangeAdapter:
     return ADAPTER
 
 
+def _exchange_params(enable_rate_limit: bool = True) -> tuple[dict, bool]:
+    adapter = _get_adapter()
+    params: dict = {"enableRateLimit": enable_rate_limit}
+    params["options"] = {"defaultType": "swap", "defaultSubType": "linear"}
+    for key in ("apiKey", "secret"):
+        value = adapter.config.get(key)
+        if value:
+            params[key] = value
+    sandbox = getattr(adapter, "sandbox", False)
+    return params, sandbox
+
+
 def scan_markets(volume_threshold: float = 100_000,
                  timeframe: str = "1d",
                  limit: int = 90) -> List[str]:
     """Return a list of symbols that pass liquidity and performance filters."""
-    exchange = ccxt.binance()
+    params, sandbox = _exchange_params(enable_rate_limit=False)
+    exchange = ccxt.bybit(params)
+    if hasattr(exchange, "set_sandbox_mode"):
+        exchange.set_sandbox_mode(sandbox)
     try:
         markets = exchange.fetch_markets()
     finally:
@@ -89,11 +104,16 @@ async def scan_usdt_symbols(volume_threshold: float = 100_000,
     If ``top_n`` is provided, only the best ``top_n`` pairs ranked by ROI are
     returned.
     """
+    params, sandbox = _exchange_params()
     if HAS_PRO:
-        exchange = ccxtpro.binance()
+        exchange = ccxtpro.bybit(params)
+        if hasattr(exchange, "set_sandbox_mode"):
+            exchange.set_sandbox_mode(sandbox)
         markets = await exchange.fetch_markets()
     else:
-        exchange = ccxt.binance()
+        exchange = ccxt.bybit(params)
+        if hasattr(exchange, "set_sandbox_mode"):
+            exchange.set_sandbox_mode(sandbox)
         markets = await asyncio.to_thread(exchange.fetch_markets)
 
     usdt_markets = [m for m in markets if m.get("quote") == "USDT"]
@@ -173,11 +193,16 @@ async def scan_symbols(min_volume: float = 300_000,
     universe of symbols while still returning only the best ``top_n`` pairs
     ranked by ROI.
     """
+    params, sandbox = _exchange_params()
     if HAS_PRO:
-        exchange = ccxtpro.binance({"enableRateLimit": True})
+        exchange = ccxtpro.bybit(params)
+        if hasattr(exchange, "set_sandbox_mode"):
+            exchange.set_sandbox_mode(sandbox)
         markets = await exchange.fetch_markets()
     else:
-        exchange = ccxt.binance({"enableRateLimit": True})
+        exchange = ccxt.bybit(params)
+        if hasattr(exchange, "set_sandbox_mode"):
+            exchange.set_sandbox_mode(sandbox)
         markets = await asyncio.to_thread(exchange.fetch_markets)
 
     candidates: list[dict] = []

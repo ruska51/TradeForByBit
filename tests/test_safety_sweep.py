@@ -1,11 +1,16 @@
 from datetime import datetime, timezone
 
+import importlib
+import sys
 import pandas as pd
 
 import main
 
 
 def _setup_env(tmp_path, monkeypatch, *, confirm_trend=True, limiter_ok=True, cool_ok=True):
+    global main
+    module = sys.modules.get("main", main)
+    main = importlib.reload(module)
     symbol = "BTC/USDT"
     log_path = tmp_path / "trades.csv"
 
@@ -37,6 +42,15 @@ def _setup_env(tmp_path, monkeypatch, *, confirm_trend=True, limiter_ok=True, co
     class DummyExchange:
         def fetch_closed_orders(self, sym, since=None, limit=10):
             return [order]
+
+        def fetch_positions(self, symbols=None):
+            return []
+
+        def fetch_balance(self, params=None):
+            return {"total": {"USDT": 1000.0}}
+
+        def fetch_ticker(self, sym):
+            return {"last": 100.0}
 
     main.exchange = DummyExchange()
 

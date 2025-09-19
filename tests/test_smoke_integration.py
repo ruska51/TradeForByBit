@@ -1,5 +1,7 @@
 from datetime import datetime, timezone, timedelta
 
+import importlib
+import sys
 import pandas as pd
 import numpy as np
 
@@ -12,6 +14,13 @@ from risk_management import (
 )
 import logging_utils
 from reporting import build_profit_report, build_equity_curve
+
+
+
+def _reset_main():
+    global main
+    module = sys.modules.get("main", main)
+    main = importlib.reload(module)
 
 
 # [ANCHOR:SMOKE_TESTS]
@@ -117,6 +126,7 @@ def test_trailing_be_and_no_expansion(monkeypatch):
 
 
 def test_roi_closes_market_and_cleans_children(monkeypatch, tmp_path):
+    _reset_main()
     symbol = "BTC/USDT"
     log_path = tmp_path / "trades.csv"
 
@@ -164,6 +174,7 @@ def test_roi_closes_market_and_cleans_children(monkeypatch, tmp_path):
 
 
 def test_time_stop_closes_and_logs_once(tmp_path):
+    _reset_main()
     symbol = "ETH/USDT"
     log_path = tmp_path / "trades.csv"
 

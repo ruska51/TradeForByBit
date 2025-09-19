@@ -15,16 +15,19 @@ All runtime messages are written both to the console and to log files under
 
 ## Exchange backend
 
-The bot works with both [ccxt](https://github.com/ccxt/ccxt) and
-[python-binance](https://github.com/binance/binance-connector-python) via a
-unified ``ExchangeAdapter``. The backend is selected automatically or forced
-through the ``EXCHANGE_BACKEND`` environment variable
-(``auto``/``ccxt``/``binance_sdk``). In ``auto`` mode python-binance is used if
-installed, otherwise the adapter falls back to ccxt and logs one warning.
+The bot targets Bybit USDT-perpetual markets through
+[ccxt](https://github.com/ccxt/ccxt) and initialises the adapter in sandbox mode
+by default. A legacy [python-binance](https://github.com/binance/binance-connector-python)
+fallback is still available for users who rely on Binance endpoints; the
+backend is selected automatically or forced through the ``EXCHANGE_BACKEND``
+environment variable (``auto``/``ccxt``/``binance_sdk``). In ``auto`` mode the
+adapter first attempts the python-binance SDK when it is installed, otherwise it
+sticks with ccxt.
 
 Symbols are normalised to ccxt style (``ETH/USDT``) and testnet support is
-available for both backends. The ``python-binance`` dependency is optional – the
-project functions with ccxt alone.
+available for the default Bybit backend via ``set_sandbox_mode``. The
+``python-binance`` dependency remains optional – the project functions with ccxt
+alone.
 
 ## Improving trade coverage
 
@@ -97,26 +100,27 @@ If the log file is missing it will be recreated automatically when the first
 trade closes. You can also call `load_trades(create=True)` to generate an empty
 file with the correct headers.
 
-Each order must meet Binance's 10 USDT minimum notional requirement. If the
-calculated position size is smaller but the account balance has at least 10 USDT
-available, the bot will open a fixed 10 USDT trade instead of skipping. When a
-larger order fails due to insufficient funds, the bot also retries with a
-minimal 10 USDT position if the balance allows.
+Each order must satisfy the exchange-imposed minimum size. On Bybit USDT
+perpetuals this typically maps to a 10 USDT notional threshold, although the
+exact value is market specific. If the calculated position size is smaller but
+the account balance has enough margin, the bot falls back to the minimum trade
+size instead of skipping. When a larger order fails due to insufficient funds,
+the bot also retries with the reduced quantity when permitted.
 
-## Binance Futures order examples
+## Perpetual order examples
 
-When placing protective orders on Binance Futures, `reduceOnly` should only be
-used for orders that explicitly close an existing position. A stop loss or take
-profit placed right after entering a trade usually requires only the
-`closePosition` flag:
+When placing protective orders on Bybit USDT perpetuals, ``reduceOnly`` should
+only be used for orders that explicitly close an existing position. A stop loss
+or take profit placed right after entering a trade usually requires only the
+``closeOnTrigger`` flag:
 
 ```python
-order_params = {"stopPrice": stop_price, "closePosition": True}
+order_params = {"stopPx": stop_price, "closeOnTrigger": True}
 if is_manual_exit:
     order_params["reduceOnly"] = True
 
 exchange.create_order(
-    symbol, "TAKE_PROFIT_MARKET", side, amount, None, order_params
+    symbol, "take_profit", side, amount, None, order_params
 )
 ```
 
