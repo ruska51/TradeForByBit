@@ -2,7 +2,7 @@ class NetworkError(Exception):
     """Minimal stub for ccxt NetworkError."""
 
 
-class binance:
+class _BaseExchange:
     def __init__(self, *args, **kwargs):
         self.symbols = []
 
@@ -21,3 +21,12 @@ class binance:
 
     def create_order(self, symbol, type, side, amount, price=None, params=None):
         return {"id": "stub", "type": type, "side": side, "avgPrice": price or 0.0}
+
+
+class binance(_BaseExchange):
+    pass
+
+
+class bybit(_BaseExchange):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)

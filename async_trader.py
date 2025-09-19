@@ -18,7 +18,7 @@ from metrics_utils import backtest_metrics
 from pattern_detector import detect_pattern
 from main import predict_signal, log_trade
 from exchange_adapter import ExchangeAdapter, set_valid_leverage
-from main import ADAPTER  # type: ExchangeAdapter
+from main import ADAPTER, API_KEY, API_SECRET, SANDBOX_MODE  # type: ignore
 from model_utils import load_global_bundle
 import risk_management
 from volume_utils import _safe_vol_ratio, VOL_WINDOW
@@ -51,8 +51,23 @@ BEARISH_PATTERNS = {
 _GLOBAL_MODEL, _GLOBAL_SCALER, _GLOBAL_FEATURES, _GLOBAL_CLASSES = load_global_bundle()
 
 
+def _make_exchange():
+    params = {
+        "enableRateLimit": True,
+        "options": {"defaultType": "swap", "defaultSubType": "linear"},
+    }
+    if API_KEY:
+        params["apiKey"] = API_KEY
+    if API_SECRET:
+        params["secret"] = API_SECRET
+    exchange = ccxt.bybit(params)
+    if hasattr(exchange, "set_sandbox_mode"):
+        exchange.set_sandbox_mode(SANDBOX_MODE)
+    return exchange
+
+
 async def fetch_ticker(symbol: str) -> Dict:
-    exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+    exchange = _make_exchange()
     try:
         return await asyncio.to_thread(exchange.fetch_ticker, symbol)
     finally:
@@ -84,7 +99,7 @@ async def run_trade(
         log(logging.INFO, "trade", symbol, "cooldown active")
         return
 
-    exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+    exchange = _make_exchange()
     try:
         await asyncio.to_thread(exchange.load_markets)
         market = exchange.market(symbol)
@@ -375,7 +390,7 @@ async def process_symbol(
             return
         current_index = len(df_5m)
         lev = 10 if mode == "scalp" else 20
-        ex = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+        ex = _make_exchange()
         try:
             await asyncio.to_thread(ex.load_markets)
             await asyncio.to_thread(set_valid_leverage, ex, symbol, lev)

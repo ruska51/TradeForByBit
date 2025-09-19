@@ -32,10 +32,15 @@ class DummyExchangeSync:
     def close(self):
         pass
 
+    def set_sandbox_mode(self, mode):
+        self.sandbox = mode
+
 
 class DummyAdapter:
     def __init__(self):
         self.exchange = DummyExchangeSync()
+        self.config = {}
+        self.sandbox = False
 
     def fetch_ohlcv(self, symbol, timeframe="1d", limit=90):
         return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -62,7 +67,7 @@ class DummyExchange(DummyExchangeSync):
 
 def test_scan_markets(monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, "main", dummy_main)
-    monkeypatch.setattr(ccxt, "binance", lambda: DummyExchangeSync())
+    monkeypatch.setattr(ccxt, "bybit", lambda params=None: DummyExchangeSync())
     caplog.set_level("INFO")
     symbols = scan_markets(volume_threshold=100000, limit=10)
     assert symbols == ["AAA/USDT"]
@@ -72,10 +77,10 @@ def test_scan_markets(monkeypatch, caplog):
 
 def test_scan_symbols(monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, "main", dummy_main)
-    monkeypatch.setattr(ccxt, "binance", lambda *args, **kwargs: DummyExchangeSync())
+    monkeypatch.setattr(ccxt, "bybit", lambda *args, **kwargs: DummyExchangeSync())
     try:
         import ccxt.pro as ccxtpro  # type: ignore
-        monkeypatch.setattr(ccxtpro, "binance", lambda *args, **kwargs: DummyExchange())
+        monkeypatch.setattr(ccxtpro, "bybit", lambda *args, **kwargs: DummyExchange())
     except Exception:
         pass
     caplog.set_level("INFO")
@@ -114,10 +119,10 @@ def test_scan_symbols_top_n(monkeypatch):
         async def close(self):
             pass
 
-    monkeypatch.setattr(ccxt, "binance", lambda *args, **kwargs: ExchangeA())
+    monkeypatch.setattr(ccxt, "bybit", lambda *args, **kwargs: ExchangeA())
     try:
         import ccxt.pro as ccxtpro  # type: ignore
-        monkeypatch.setattr(ccxtpro, "binance", lambda *args, **kwargs: ExchangeAAsync())
+        monkeypatch.setattr(ccxtpro, "bybit", lambda *args, **kwargs: ExchangeAAsync())
     except Exception:
         pass
     symbols = asyncio.run(scan_symbols(min_volume=100000, limit=10, top_n=1))

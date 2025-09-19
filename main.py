@@ -1195,6 +1195,7 @@ try:
             "futures": True,
             "apiKey": API_KEY,
             "secret": API_SECRET,
+            "exchange_id": "bybit",
         }
     )
     exchange = ADAPTER.x  # legacy name to reduce changes in the rest of the file

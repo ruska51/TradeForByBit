@@ -1,12 +1,6 @@
 import os
 
 
-API_KEY = os.getenv(
-    "BINANCE_API_KEY",
-    "8e7c568ae93f8e89e76b742ff2ee7266cec12b620bb726c36a9fd8b70e28aa12",
-)
-API_SECRET = os.getenv(
-    "BINANCE_API_SECRET",
-    "8563730a71184594637cf492752aabf4990226db70f2f4e4f46b789af806ec25",
-)
+API_KEY = os.getenv("BYBIT_API_KEY", "")
+API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 

@@ -41,7 +41,7 @@ def test_run_bot_loop_invokes_predict(monkeypatch):
             self.markets_by_id = {}
             return self.markets
 
-    monkeypatch.setattr(ccxt, "binance", DummyExchange)
+    monkeypatch.setattr(ccxt, "bybit", DummyExchange)
 
     sys.modules.pop("main", None)
     import main

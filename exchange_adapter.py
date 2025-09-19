@@ -123,6 +123,11 @@ class ExchangeAdapter:
         self.config = config or {}
         self.sandbox = bool(self.config.get("sandbox", False))
         self.futures = bool(self.config.get("futures", False))
+        self.exchange_id = (
+            self.config.get("exchange_id")
+            or os.getenv("EXCHANGE_ID", "bybit")
+        ).lower()
+        self.config.setdefault("exchange_id", self.exchange_id)
         self.backend = "ccxt"
         self.ccxt_id: str | None = None
         self.last_warn_at: Dict[tuple[str, str], float] = {}
@@ -147,6 +152,14 @@ class ExchangeAdapter:
     def is_futures(self) -> bool:
         """Return whether the adapter is configured for futures trading."""
         return bool(self.futures)
+
+    # ------------------------------------------------------------------
+    def _get_ohlcv_cache(self) -> dict[tuple[str, str, int], tuple[float, list[list]]]:
+        cache = getattr(self, "_ohlcv_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_ohlcv_cache", cache)
+        return cache
 
     # ------------------------------------------------------------------
     def _detect_backend(self) -> None:
@@ -188,16 +201,34 @@ class ExchangeAdapter:
 
         candidates: list[tuple[str, Callable[[dict], Any]]] = []
 
-        options: dict[str, str] = (
-            {"defaultType": "future", "defaultSubType": "linear"}
-            if self.futures
-            else {"defaultType": "spot"}
-        )
+        if self.futures:
+            if self.exchange_id.startswith("bybit"):
+                options: dict[str, str] = {"defaultType": "swap", "defaultSubType": "linear"}
+            else:
+                options = {"defaultType": "future", "defaultSubType": "linear"}
+        else:
+            options = {"defaultType": "spot"}
 
-        if self.futures and hasattr(_ccxt, "binanceusdm"):
-            candidates.append(("binanceusdm", _ccxt.binanceusdm))
-        if hasattr(_ccxt, "binance"):
-            candidates.append(("binance", _ccxt.binance))
+        def add_candidate(name: str) -> None:
+            ctor = getattr(_ccxt, name, None)
+            if callable(ctor) and name not in {n for n, _ in candidates}:
+                candidates.append((name, ctor))
+
+        if self.exchange_id == "bybit":
+            add_candidate("bybit")
+        elif self.exchange_id in {"binance", "binanceusdm"}:
+            if self.futures and hasattr(_ccxt, "binanceusdm"):
+                add_candidate("binanceusdm")
+            add_candidate("binance")
+        elif self.exchange_id:
+            add_candidate(self.exchange_id)
+
+        # provide sensible fallbacks
+        if self.exchange_id != "bybit":
+            add_candidate("bybit")
+        if self.futures:
+            add_candidate("binanceusdm")
+        add_candidate("binance")
 
         cfg: dict[str, Any] = {"enableRateLimit": True}
         for key in ("apiKey", "secret"):
@@ -267,7 +298,7 @@ class ExchangeAdapter:
                 logging.warning("adapter | %s unusable: %r", name, exc)
 
         msg = (
-            f"No usable CCXT Binance class with fetch_ohlcv (ccxt={ccxt_version}). "
+            f"No usable CCXT exchange class with fetch_ohlcv (ccxt={ccxt_version}). "
             f"Tried: {tried}"
         )
         raise AdapterInitError(msg) from last_err
@@ -350,7 +381,8 @@ class ExchangeAdapter:
 
         cache_key = (symbol, timeframe, int(limit or 0))
         now = time.time()
-        cached = self._ohlcv_cache.get(cache_key)
+        cache = self._get_ohlcv_cache()
+        cached = cache.get(cache_key)
         if cached and now - cached[0] < 60:
             return [row[:] for row in cached[1]]
 
@@ -462,7 +494,8 @@ class ExchangeAdapter:
             snapshot = [list(row) for row in data]
         except Exception:
             snapshot = data
-        self._ohlcv_cache[key] = (time.time(), snapshot)
+        cache = self._get_ohlcv_cache()
+        cache[key] = (time.time(), snapshot)
 
     @staticmethod
     def _is_rate_limited(exc: Exception) -> bool:
