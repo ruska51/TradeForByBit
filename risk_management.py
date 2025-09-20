@@ -149,10 +149,20 @@ def save_pair_report(stats: dict, path: str = "pair_report.csv") -> None:
         path,
         ["symbol", "winrate", "avg_profit", "losing_streak", "timestamp"],
     )
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            logging.warning("pair_report | %s | failed to remove old report", path)
     df = pd.DataFrame(stats).T
     df["timestamp"] = datetime.now(timezone.utc)
-    write_header = not os.path.exists(path) or os.path.getsize(path) == 0
-    df.reset_index().rename(columns={"index": "symbol"}).to_csv(path, mode="a", header=write_header, index=False)
+    df = df.reset_index().rename(columns={"index": "symbol"})
+    columns = ["symbol", "winrate", "avg_profit", "losing_streak", "timestamp"]
+    if df.empty:
+        df = pd.DataFrame(columns=columns)
+    else:
+        df = df[columns]
+    df.to_csv(path, index=False)
 
 
 # ---------------------------------------------------------------------------
@@ -179,53 +189,49 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
 
 
 def calc_sl_tp(
-    entry_price: float,
+    price: float,
+    atr_val: float,
+    mode_params: dict | None,
     side: str,
-    atr_value: float,
-    atr_mult: float = 2.0,
-    tp_mult: float = 4.0,
+    *,
     tick_size: float | None = None,
 ) -> tuple[float, float, float]:
-    """Return take-profit price, stop-loss price and stop percentage.
+    """Return take-profit, stop-loss and stop percentage based on ATR."""
 
-    ``side`` is either ``"LONG"`` or ``"SHORT"``.  ``atr_mult`` controls the
-    stop distance while ``tp_mult`` sets the multiple for the take-profit
-    distance.  ``tick_size`` is optional rounding precision for price values.
-    The function returns ``(tp_price, sl_price, sl_pct)`` which can be used
-    directly for order placement and position sizing.
-    """
+    if price <= 0:
+        return price, price, 0.0
 
-    if entry_price <= 0:
-        return entry_price, entry_price, 0.0
+    params = mode_params or {}
+    try:
+        sl_mult = float(params.get("sl_mult", 2.0))
+    except (TypeError, ValueError, AttributeError):
+        sl_mult = 2.0
+    try:
+        tp_mult = float(params.get("tp_mult", 4.0))
+    except (TypeError, ValueError, AttributeError):
+        tp_mult = 4.0
 
-    atr_pct = atr_value / entry_price if entry_price else 0.0
-    sl_mult_adj = atr_mult
-    tp_mult_adj = tp_mult
-    if atr_pct and atr_pct < 0.005:
-        sl_mult_adj *= 3.0
-        tp_mult_adj *= 3.0
+    atr_pct = atr_val / price if price else 0.0
+    if atr_pct < 0.005:
+        sl_mult *= 3.0
+        tp_mult *= 3.0
 
-    raw_sl_pct = (sl_mult_adj * atr_value) / entry_price if entry_price else 0.0
-    raw_tp_pct = (tp_mult_adj * atr_value) / entry_price if entry_price else 0.0
+    sl_pct = max(sl_mult * atr_pct, 0.005)
+    tp_pct = max(tp_mult * atr_pct, 0.01)
 
-    sl_pct = max(raw_sl_pct, 0.005)
-    base_tp_pct = max(raw_tp_pct, 0.0)
-    scale = tp_mult_adj / sl_mult_adj if sl_mult_adj else tp_mult_adj
-    tp_pct = max(sl_pct * max(scale, 1.0), 0.01, base_tp_pct)
-
-    side_up = side.upper()
-    if side_up == "LONG":
-        sl_price = entry_price * (1 - sl_pct)
-        tp_price = entry_price * (1 + tp_pct)
-    else:  # SHORT
-        sl_price = entry_price * (1 + sl_pct)
-        tp_price = entry_price * (1 - tp_pct)
+    side_lower = str(side).lower()
+    if side_lower == "long":
+        sl_price = price * (1 - sl_pct)
+        tp_price = price * (1 + tp_pct)
+    else:
+        sl_price = price * (1 + sl_pct)
+        tp_price = price * (1 - tp_pct)
 
     if tick_size:
         sl_price = round(tick_size * round(sl_price / tick_size), 8)
         tp_price = round(tick_size * round(tp_price / tick_size), 8)
 
-    return tp_price, sl_price, sl_pct
+    return float(tp_price), float(sl_price), float(sl_pct)
 
 
 def compute_order_qty(

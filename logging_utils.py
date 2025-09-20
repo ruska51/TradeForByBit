@@ -166,34 +166,27 @@ def ensure_trades_csv_header(path: str) -> None:
     header = TRADES_CSV_HEADER
     path_obj = Path(path)
 
-    if not path_obj.exists() or path_obj.stat().st_size == 0:
+    if path_obj.exists():
+        with open(path_obj, "r", newline="", encoding="utf-8") as f:
+            lines = f.readlines()
+        header_line = lines[0].strip() if lines else ""
+        existing = header_line.split(",") if header_line else []
+        first_col = existing[0] if existing else ""
+        if first_col != "trade_id":
+            _rotate_legacy_file(path_obj, "misaligned")
+            with open(path_obj, "w", newline="", encoding="utf-8") as f:
+                f.write(",".join(header) + "\n")
+            return
+        missing = [c for c in header if c not in existing]
+        if not missing:
+            return
+        lines[0] = ",".join(existing + missing) + "\n"
         with open(path_obj, "w", newline="", encoding="utf-8") as f:
-            f.write(",".join(header) + "\n")
+            f.writelines(lines)
         return
 
-    with open(path_obj, "r", newline="", encoding="utf-8") as f:
-        lines = f.readlines()
-
-    if not lines:
-        with open(path_obj, "w", newline="", encoding="utf-8") as f:
-            f.write(",".join(header) + "\n")
-        return
-
-    existing = lines[0].strip().split(",")
-    first_col = existing[0] if existing else ""
-    if first_col != "trade_id":
-        _rotate_legacy_file(path_obj, "misaligned")
-        with open(path_obj, "w", newline="", encoding="utf-8") as f:
-            f.write(",".join(header) + "\n")
-        return
-
-    missing = [c for c in header if c not in existing]
-    if not missing:
-        return
-
-    lines[0] = ",".join(existing + missing) + "\n"
     with open(path_obj, "w", newline="", encoding="utf-8") as f:
-        f.writelines(lines)
+        f.write(",".join(header) + "\n")
 
 
 def ensure_report_schema(path: str, expected_header: list[str]) -> None:

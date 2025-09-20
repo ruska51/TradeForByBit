@@ -109,13 +109,16 @@ async def run_trade(
 
         price = await asyncio.to_thread(lambda: exchange.fetch_ticker(symbol)["last"])
         atr = risk_management.calc_atr(data["5m"])
+        mode_params = {
+            "sl_mult": config.get("atr_mult", 2.0),
+            "tp_mult": config.get("tp_mult", 4.0),
+        }
         tp_price, sl_price, sl_pct = risk_management.calc_sl_tp(
             price,
-            side,
             atr,
-            config.get("atr_mult", 2.0),
-            config.get("tp_mult", 4.0),
-            tick_size,
+            mode_params,
+            side.lower(),
+            tick_size=tick_size,
         )
 
         balance = await asyncio.to_thread(safe_fetch_balance, exchange)

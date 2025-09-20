@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -27,6 +28,11 @@ def build_profit_report(trades_log_path: str, out_path: str) -> pd.DataFrame:
             "max_dd",
         ],
     )
+    if os.path.exists(out_path):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
     df = pd.read_csv(trades_log_path) if pd.io.common.file_exists(trades_log_path) else pd.DataFrame()
     if df.empty:
         out = pd.DataFrame(columns=[
@@ -84,6 +90,11 @@ def build_profit_report(trades_log_path: str, out_path: str) -> pd.DataFrame:
 
 def build_equity_curve(trades_log_path: str, out_path: str) -> pd.DataFrame:
     ensure_report_schema(out_path, ["timestamp", "equity"])
+    if os.path.exists(out_path):
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
     df = pd.read_csv(trades_log_path) if pd.io.common.file_exists(trades_log_path) else pd.DataFrame()
     if df.empty:
         out = pd.DataFrame(columns=["timestamp", "equity"])

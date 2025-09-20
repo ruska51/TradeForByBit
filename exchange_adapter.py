@@ -214,26 +214,18 @@ class ExchangeAdapter:
             if callable(ctor) and name not in {n for n, _ in candidates}:
                 candidates.append((name, ctor))
 
+        # Используем строго указанный exchange_id. Без fallback на Binance.
         normalized_id = self.exchange_id or ""
-        is_bybit = normalized_id.startswith("bybit")
-
-        if is_bybit:
-            add_candidate("bybit")
+        if normalized_id == "bybit":
+            candidate_ids: list[str] = ["bybit"]
+        elif normalized_id:
+            candidate_ids = [normalized_id]
         else:
-            if normalized_id in {"binance", "binanceusdm"}:
-                if self.futures and hasattr(_ccxt, "binanceusdm"):
-                    add_candidate("binanceusdm")
-                add_candidate("binance")
-            elif normalized_id:
-                add_candidate(normalized_id)
-            else:
-                add_candidate("bybit")
+            # по умолчанию выбираем bybit для futures
+            candidate_ids = ["bybit"]
 
-            # Provide non-Bybit fallbacks to improve robustness on other exchanges.
-            add_candidate("bybit")
-            if self.futures and hasattr(_ccxt, "binanceusdm"):
-                add_candidate("binanceusdm")
-            add_candidate("binance")
+        for candidate_id in candidate_ids:
+            add_candidate(candidate_id)
 
         cfg: dict[str, Any] = {"enableRateLimit": True}
         for key in ("apiKey", "secret"):
