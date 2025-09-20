@@ -19,6 +19,7 @@ from typing import Callable, Dict, Optional
 import pandas as pd
 
 from exchange_adapter import ExchangeAdapter
+from logging_utils import ensure_report_schema
 
 MIN_NOTIONAL = getattr(sys.modules.get("main"), "MIN_NOTIONAL", 10.0)
 
@@ -144,9 +145,13 @@ def adjust_state_by_stats(state: Dict[str, PairState], stats: dict, config: dict
     return state
 
 def save_pair_report(stats: dict, path: str = "pair_report.csv") -> None:
+    ensure_report_schema(
+        path,
+        ["symbol", "winrate", "avg_profit", "losing_streak", "timestamp"],
+    )
     df = pd.DataFrame(stats).T
     df["timestamp"] = datetime.now(timezone.utc)
-    write_header = not os.path.exists(path)
+    write_header = not os.path.exists(path) or os.path.getsize(path) == 0
     df.reset_index().rename(columns={"index": "symbol"}).to_csv(path, mode="a", header=write_header, index=False)
 
 

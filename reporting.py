@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
+from logging_utils import ensure_report_schema
+
 
 def _resolve_timestamp_column(df: pd.DataFrame) -> pd.Series:
     for col in ("timestamp_exit", "timestamp_close", "timestamp"):
@@ -11,6 +13,20 @@ def _resolve_timestamp_column(df: pd.DataFrame) -> pd.Series:
 
 
 def build_profit_report(trades_log_path: str, out_path: str) -> pd.DataFrame:
+    ensure_report_schema(
+        out_path,
+        [
+            "timestamp",
+            "symbol",
+            "pnl_net",
+            "cum_pnl",
+            "winrate",
+            "avg_win",
+            "avg_loss",
+            "sharpe",
+            "max_dd",
+        ],
+    )
     df = pd.read_csv(trades_log_path) if pd.io.common.file_exists(trades_log_path) else pd.DataFrame()
     if df.empty:
         out = pd.DataFrame(columns=[
@@ -28,6 +44,8 @@ def build_profit_report(trades_log_path: str, out_path: str) -> pd.DataFrame:
         return out
 
     df = df.copy()
+    if "trade_id" in df.columns:
+        df["trade_id"] = df["trade_id"].astype(str)
     df["timestamp"] = _resolve_timestamp_column(df)
     df = df.sort_values("timestamp")
     df["pnl_net"] = df.get("pnl_net", df.get("profit", 0.0))
@@ -65,6 +83,7 @@ def build_profit_report(trades_log_path: str, out_path: str) -> pd.DataFrame:
 
 
 def build_equity_curve(trades_log_path: str, out_path: str) -> pd.DataFrame:
+    ensure_report_schema(out_path, ["timestamp", "equity"])
     df = pd.read_csv(trades_log_path) if pd.io.common.file_exists(trades_log_path) else pd.DataFrame()
     if df.empty:
         out = pd.DataFrame(columns=["timestamp", "equity"])
