@@ -196,13 +196,9 @@ def calc_sl_tp(
     atr_pct = atr_value / entry_price if entry_price else 0.0
     sl_mult_adj = atr_mult
     tp_mult_adj = tp_mult
-    if atr_pct:
-        if atr_pct < 0.0025:
-            sl_mult_adj *= 3.0
-            tp_mult_adj *= 3.0
-        elif atr_pct < 0.005:
-            sl_mult_adj *= 2.0
-            tp_mult_adj *= 2.0
+    if atr_pct and atr_pct < 0.005:
+        sl_mult_adj *= 3.0
+        tp_mult_adj *= 3.0
 
     raw_sl_pct = (sl_mult_adj * atr_value) / entry_price if entry_price else 0.0
     raw_tp_pct = (tp_mult_adj * atr_value) / entry_price if entry_price else 0.0

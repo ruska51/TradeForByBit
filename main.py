@@ -227,8 +227,10 @@ from exchange_adapter import (
 from typing import Dict, Tuple
 from logging_utils import (
     ensure_trades_csv_header,
+    TRADES_CSV_HEADER,
     log_entry,  # не менять сигнатуру, возвращает trade_id
     log_exit_from_order,
+    safe_fetch_balance,
 )
 from reporting import build_profit_report, build_equity_curve
 from risk_management import (
@@ -248,9 +250,22 @@ ENABLE_SYMBOL_BAN = True
 ENABLE_VOL_RATIO_FIX = True
 
 # [ANCHOR:STATE_INIT]
-touch_csv("trades_log.csv", ["timestamp", "symbol", "side", "qty", "price", "sl", "tp", "pnl"])
-touch_csv("profit_report.csv", ["date", "profit", "win_rate", "avg_r", "trades"])
-touch_csv("equity_curve.csv", ["ts", "equity"])
+touch_csv("trades_log.csv", TRADES_CSV_HEADER)
+touch_csv(
+    "profit_report.csv",
+    [
+        "timestamp",
+        "symbol",
+        "pnl_net",
+        "cum_pnl",
+        "winrate",
+        "avg_win",
+        "avg_loss",
+        "sharpe",
+        "max_dd",
+    ],
+)
+touch_csv("equity_curve.csv", ["timestamp", "equity"])
 touch_csv("decision_log.csv", ["timestamp", "symbol", "signal", "reason"])
 
 # лог-пути
@@ -296,8 +311,16 @@ def load_trades(csv_file: str = "trades_log.csv", create: bool = False) -> pd.Da
     return pd.read_csv(path)
 
 
+def _coerce_exit_type(df: pd.DataFrame) -> pd.DataFrame:
+    coerced = df.copy()
+    if "exit_type" in coerced.columns:
+        coerced["exit_type"] = coerced["exit_type"].astype(str)
+    return coerced
+
+
 def compute_metrics(df: pd.DataFrame) -> Dict[str, float]:
     """Calculate basic metrics from trade data."""
+    df = _coerce_exit_type(df)
     if "exit_type" in df.columns:
         df = df[df["exit_type"].str.upper() != "ENTRY"]
     sl_rate = 0.0
@@ -335,6 +358,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, float]:
 
 def analyze_errors(df: pd.DataFrame) -> List[str]:
     """Identify common mistakes based on statistics."""
+    df = _coerce_exit_type(df)
     issues = []
     if "exit_type" in df.columns:
         df = df[df["exit_type"].str.upper() != "ENTRY"]
@@ -356,6 +380,7 @@ def analyze_errors(df: pd.DataFrame) -> List[str]:
 
 def recommend_parameters(df: pd.DataFrame) -> Dict[str, float]:
     """Provide naive parameter recommendations from historical data."""
+    df = _coerce_exit_type(df)
     if "exit_type" in df.columns:
         df = df[df["exit_type"].str.upper() != "ENTRY"]
     entry_col = "entry" if "entry" in df.columns else "entry_price"
@@ -2546,8 +2571,9 @@ def run_trade(
     atr_val = safe_atr(df_trend["atr"] if "atr" in df_trend.columns else None, key=symbol) or 0.0
     if entry_ctx is None:
         entry_ctx = {}
-    balance_info = exchange.fetch_balance({"type": "future"})
-    balance = float(balance_info["total"]["USDT"])
+    balance_info = safe_fetch_balance(exchange, {"type": "future"})
+    totals = balance_info.get("total") if isinstance(balance_info, dict) else None
+    balance = float((totals or {}).get("USDT", 0.0))
     max_notional = balance * MAX_POSITION_PCT
     market = exchange.market(symbol)
     precision = market.get("precision", {}).get("amount", 0)
@@ -2811,7 +2837,7 @@ def attempt_direct_market_entry(
 
     balance = 0.0
     try:
-        bal_info = exchange.fetch_balance({"type": "future"})
+        bal_info = safe_fetch_balance(exchange, {"type": "future"})
         balance = float((bal_info.get("total") or {}).get("USDT", 0.0))
     except Exception as exc:
         logging.warning("fallback trade | %s | fetch_balance failed: %s", symbol, exc)
@@ -3398,11 +3424,26 @@ def ensure_exit_orders(symbol: str, position: dict | None) -> None:
         return
 
     ctx = open_trade_ctx.get(symbol, {})
-    try:
-        orders = exchange.fetch_open_orders(symbol)
-    except Exception as exc:
-        logging.warning("exit_guard | %s | fetch_open_orders failed: %s", symbol, exc)
-        orders = []
+    orders: list[dict] = []
+    for attempt in range(2):
+        try:
+            orders = exchange.fetch_open_orders(symbol)
+            break
+        except Exception as exc:
+            msg = str(exc).lower()
+            rate_limited = (
+                "too many requests" in msg
+                or "429" in msg
+                or "rate limit" in msg
+                or "-1003" in msg
+            )
+            if rate_limited and attempt == 0:
+                logging.warning("exit_guard | %s | fetch_open_orders rate limited: %s", symbol, exc)
+                time.sleep(1.0)
+                continue
+            logging.warning("exit_guard | %s | fetch_open_orders failed: %s", symbol, exc)
+            orders = []
+            break
 
     has_stop = False
     has_tp = False
@@ -3817,7 +3858,7 @@ def run_bot():
 
         balance = 0.0
         try:
-            bal_info = exchange.fetch_balance({"type": "future"})
+            bal_info = safe_fetch_balance(exchange, {"type": "future"})
             balance = float((bal_info.get("total") or {}).get("USDT", 0.0))
         except Exception as exc:
             logging.warning("health | %s | fetch_balance failed: %s", test_sym, exc)
@@ -4425,7 +4466,7 @@ def run_bot():
             else:
                 balance_total = 0.0
                 try:
-                    balance_info = exchange.fetch_balance({"type": "future"})
+                    balance_info = safe_fetch_balance(exchange, {"type": "future"})
                     balance_total = float((balance_info.get("total") or {}).get("USDT", 0.0))
                 except Exception as exc:
                     logging.warning("pattern trade | %s | fetch_balance failed: %s", symbol, exc)
@@ -4766,8 +4807,8 @@ def run_bot():
             "used_fallback": use_fallback,
             "reason": entry_reason,
         }
-        balance_info = exchange.fetch_balance({"type": "future"})
-        equity = float(balance_info["total"].get("USDT", 0.0))
+        balance_info = safe_fetch_balance(exchange, {"type": "future"})
+        equity = float((balance_info.get("total") or {}).get("USDT", 0.0))
         bar_index = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
         if not limiter.can_trade(symbol, equity):
             _inc_event("daily_loss_limit")

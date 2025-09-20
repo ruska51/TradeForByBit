@@ -883,6 +883,33 @@ def _normalize_order_qty(
 
     return float(qty_value), None
 
+
+def safe_fetch_balance(exchange, params: dict | None = None, *, retries: int = 1, delay: float = 1.0):
+    """Fetch account balance with basic rate limit handling."""
+
+    attempt = 0
+    while True:
+        try:
+            if params is None:
+                return exchange.fetch_balance()
+            return exchange.fetch_balance(params)
+        except Exception as exc:  # pragma: no cover - network errors
+            message = str(exc).lower()
+            is_rate_limited = (
+                "too many requests" in message
+                or "429" in message
+                or "rate limit" in message
+                or "-1003" in message
+            )
+            if attempt < retries and is_rate_limited:
+                logging.warning("exchange | fetch_balance rate limited: %s", exc)
+                time.sleep(max(delay, 0.1))
+                attempt += 1
+                continue
+            logging.warning("exchange | fetch_balance failed: %s", exc)
+            raise
+
+
 def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                       qty: float, price=None, params=None):
     """Create an order with retry and PERCENT_PRICE handling."""

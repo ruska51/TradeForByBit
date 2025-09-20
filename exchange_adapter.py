@@ -222,13 +222,15 @@ class ExchangeAdapter:
             add_candidate("binance")
         elif self.exchange_id:
             add_candidate(self.exchange_id)
+        else:
+            add_candidate("bybit")
 
-        # provide sensible fallbacks
+        # Provide fallbacks only when not explicitly trading on Bybit.
         if self.exchange_id != "bybit":
             add_candidate("bybit")
-        if self.futures:
-            add_candidate("binanceusdm")
-        add_candidate("binance")
+            if self.futures and hasattr(_ccxt, "binanceusdm"):
+                add_candidate("binanceusdm")
+            add_candidate("binance")
 
         cfg: dict[str, Any] = {"enableRateLimit": True}
         for key in ("apiKey", "secret"):
@@ -501,7 +503,13 @@ class ExchangeAdapter:
     def _is_rate_limited(exc: Exception) -> bool:
         msg = str(exc).lower()
         status_code = getattr(exc, "status_code", None)
-        return "too many requests" in msg or "429" in msg or status_code == 429
+        return (
+            "too many requests" in msg
+            or "429" in msg
+            or "rate limit" in msg
+            or "-1003" in msg
+            or status_code == 429
+        )
 
     def _fetch_ohlcv_from_csv(self, symbol: str, timeframe: str, limit: int) -> list[list]:
         path = self._csv_path(symbol, timeframe)
@@ -625,6 +633,22 @@ class ExchangeAdapter:
                 ids = [o.get("id") or o.get("orderId") for o in orders]
                 return len(ids), ids
         except Exception as exc:  # pragma: no cover - logging only
+            if self._is_rate_limited(exc):
+                logging.warning("adapter | fetch_open_orders rate limited: %s", exc)
+                time.sleep(1.0)
+                try:
+                    ex = getattr(self, "x", None)
+                    if ex and hasattr(ex, "fetch_open_orders"):
+                        orders = (
+                            ex.fetch_open_orders(symbol)
+                            if symbol
+                            else ex.fetch_open_orders()
+                        )
+                        orders = orders or []
+                        ids = [o.get("id") or o.get("orderId") for o in orders]
+                        return len(ids), ids
+                except Exception as retry_exc:  # pragma: no cover - logging only
+                    logging.warning("adapter | fetch_open_orders retry failed: %s", retry_exc)
             logging.warning("adapter | fetch_open_orders failed: %s", exc)
         return (0, [])
 
