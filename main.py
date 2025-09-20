@@ -2609,13 +2609,13 @@ def run_trade(
         sl_adj *= 1.2
         tp_adj *= 1.2
 
+    mode_params = {"sl_mult": float(sl_adj), "tp_mult": float(tp_adj)}
     tp_price_raw, sl_price_raw, sl_pct = risk_management.calc_sl_tp(
         price,
-        "LONG" if signal == "long" else "SHORT",
         atr_val,
-        sl_adj,
-        tp_adj,
-        tick_size,
+        mode_params,
+        "long" if signal == "long" else "short",
+        tick_size=tick_size,
     )
     sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
     tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
@@ -2783,6 +2783,17 @@ def run_trade(
     pair_state.setdefault(symbol, {})["trade_id"] = trade_id
     symbol_activity[symbol] = datetime.now(timezone.utc)
     log_decision(symbol, entry_ctx.get("reason", "model_confirmed"), decision="entry")
+    try:
+        ensure_exit_orders(
+            ADAPTER,
+            symbol,
+            "long" if signal == "long" else "short",
+            qty,
+            ctx.get("sl_price"),
+            ctx.get("tp_price"),
+        )
+    except Exception as exc:
+        logging.warning("exit_guard | %s | ensure_exit_orders failed: %s", symbol, exc)
     return True
 
 
@@ -2926,13 +2937,13 @@ def attempt_direct_market_entry(
         sl_mult *= 1.2
         tp_mult *= 1.2
 
+    mode_params_calc = {"sl_mult": float(sl_mult), "tp_mult": float(tp_mult)}
     tp_price_raw, sl_price_raw, _ = risk_management.calc_sl_tp(
         last_price,
-        "LONG" if direction == "long" else "SHORT",
         atr_val,
-        sl_mult,
-        tp_mult,
-        tick_size,
+        mode_params_calc,
+        "long" if direction == "long" else "short",
+        tick_size=tick_size,
     )
 
     try:
@@ -3026,6 +3037,17 @@ def attempt_direct_market_entry(
         )
     )
     log_decision(symbol, ctx.get("reason", "model_confirmed"), decision="entry")
+    try:
+        ensure_exit_orders(
+            ADAPTER,
+            symbol,
+            direction.lower(),
+            qty,
+            ctx_copy.get("sl_price"),
+            ctx_copy.get("tp_price"),
+        )
+    except Exception as exc:
+        logging.warning("exit_guard | %s | ensure_exit_orders failed: %s", symbol, exc)
     return True
 
 
@@ -3431,178 +3453,161 @@ def place_protected_exit(
     return None
 
 
-def ensure_exit_orders(symbol: str, position: dict | None) -> None:
-    """Ensure SL/TP orders exist for an open position."""
+def ensure_exit_orders(
+    adapter: ExchangeAdapter | Any,
+    symbol: str,
+    side: str,
+    qty: float | int | str,
+    sl_price: float | None,
+    tp_price: float | None,
+) -> None:
+    """Ensure stop-loss and take-profit orders exist for *symbol*."""
 
-    if position is None:
+    exchange_obj = getattr(adapter, "client", None) or getattr(adapter, "x", None) or adapter
+    if not exchange_obj or not hasattr(exchange_obj, "fetch_open_orders"):
         return
 
     try:
-        qty = float(position.get("contracts", 0) or 0)
+        qty_value = float(qty)
     except (TypeError, ValueError):
-        qty = 0.0
-    if qty <= 0:
+        qty_value = 0.0
+    if qty_value <= 0:
+        return
+
+    side_norm = str(side or "").lower()
+    exit_side = "sell" if side_norm == "long" else "buy"
+
+    try:
+        orders = exchange_obj.fetch_open_orders(symbol) or []
+    except Exception as exc:
+        logging.warning("exit_guard | %s | fetch_open_orders failed: %s", symbol, exc)
+        orders = []
+
+    def _order_type(order: dict) -> str:
+        if not isinstance(order, dict):
+            return ""
+        info = order.get("info") if isinstance(order.get("info"), dict) else {}
+        candidates = [
+            order.get("type"),
+            order.get("orderType"),
+            info.get("type"),
+            info.get("origType"),
+            info.get("orderType"),
+        ]
+        for cand in candidates:
+            if cand:
+                return str(cand).lower()
+        return ""
+
+    has_stop = any("stop" in _order_type(o) for o in orders)
+    has_tp = any(
+        "take_profit" in _order_type(o) or _order_type(o) == "tp" for o in orders
+    )
+
+    need_sl = sl_price is not None and not has_stop
+    need_tp = tp_price is not None and not has_tp
+    if not need_sl and not need_tp:
         return
 
     ctx = open_trade_ctx.get(symbol, {})
-    orders: list[dict] = []
-    for attempt in range(2):
-        try:
-            orders = exchange.fetch_open_orders(symbol)
-            break
-        except Exception as exc:
-            msg = str(exc).lower()
-            rate_limited = (
-                "too many requests" in msg
-                or "429" in msg
-                or "rate limit" in msg
-                or "-1003" in msg
-            )
-            if rate_limited and attempt == 0:
-                logging.warning("exit_guard | %s | fetch_open_orders rate limited: %s", symbol, exc)
-                time.sleep(1.0)
-                continue
-            logging.warning("exit_guard | %s | fetch_open_orders failed: %s", symbol, exc)
-            orders = []
-            break
-
-    has_stop = False
-    has_tp = False
-    for order in orders:
-        status = str(order.get("status") or order.get("info", {}).get("status", "")).lower()
-        if status in {"canceled", "cancelled", "closed"}:
-            continue
-        otype = str(
-            order.get("type")
-            or order.get("info", {}).get("type")
-            or order.get("info", {}).get("origType", "")
-        ).upper()
-        if "STOP" in otype:
-            has_stop = True
-        if "TAKE_PROFIT" in otype or otype == "TP":
-            has_tp = True
-
-    if has_stop and has_tp:
-        return
-
-    entry_price = float(ctx.get("entry_price") or position.get("entryPrice") or 0.0)
-    if entry_price <= 0:
-        try:
-            entry_price = float(position.get("markPrice") or 0.0)
-        except (TypeError, ValueError):
-            entry_price = 0.0
-    if entry_price <= 0:
-        try:
-            ticker = exchange.fetch_ticker(symbol)
-            if isinstance(ticker, dict):
-                for key in ("last", "close", "markPrice", "price"):
-                    val = ticker.get(key)
-                    if val is None:
-                        continue
-                    try:
-                        candidate = float(val)
-                    except (TypeError, ValueError):
-                        continue
-                    if math.isfinite(candidate) and candidate > 0:
-                        entry_price = candidate
-                        break
-        except Exception:
-            entry_price = 0.0
-    if entry_price <= 0:
-        logging.warning("exit_guard | %s | entry price unavailable", symbol)
-        return
-
-    atr_val = float(ctx.get("atr") or 0.0)
-    if atr_val <= 0:
-        df = fetch_ohlcv(symbol, "1h", limit=250)
-        if df is not None and not df.empty:
-            if "atr" in df.columns:
-                atr_val = safe_atr(df["atr"], key=f"{symbol}_ensure") or 0.0
-            else:
-                try:
-                    atr_val = risk_management.calc_atr(df.tail(100))
-                except Exception:
-                    atr_val = 0.0
-    tick_size = ctx.get("tick_size") or None
-    sl_mult = float(ctx.get("sl_mult") or 2.0)
-    tp_mult = float(ctx.get("tp_mult") or 4.0)
-    side = (ctx.get("side") or position.get("side") or "LONG").upper()
-    tp_price, sl_price, _ = risk_management.calc_sl_tp(
-        entry_price,
-        side,
-        atr_val,
-        sl_mult,
-        tp_mult,
-        tick_size,
-    )
-
     try:
-        qty_precise = float(exchange.amount_to_precision(symbol, qty))
-    except Exception:
-        qty_precise = qty
-    if qty_precise <= 0:
-        return
+        entry_price = float(ctx.get("entry_price") or 0.0)
+    except (TypeError, ValueError):
+        entry_price = 0.0
 
-    exit_side = "sell" if side == "LONG" else "buy"
-    placed = False
-    if not has_stop:
-        order_id = place_protected_exit(
-            symbol,
-            "STOP_MARKET",
-            exit_side,
-            qty_precise,
-            sl_price,
-            reduce_only=True,
-            close_all=True,
-            reference_price=entry_price,
-        )
-        if order_id:
-            logging.info(
-                "exit_guard | %s | stop restored id=%s price=%.6f qty=%.4f",
-                symbol,
-                order_id,
-                sl_price,
-                qty_precise,
-            )
-            placed = True
-    if not has_tp:
-        order_id = place_protected_exit(
-            symbol,
-            "TAKE_PROFIT_MARKET",
-            exit_side,
-            qty_precise,
-            tp_price,
-            reduce_only=True,
-            close_all=True,
-            reference_price=entry_price,
-        )
-        if order_id:
-            logging.info(
-                "exit_guard | %s | take-profit restored id=%s price=%.6f qty=%.4f",
-                symbol,
-                order_id,
-                tp_price,
-                qty_precise,
-            )
-            placed = True
+    def _widen(target: float | None) -> float | None:
+        if target is None:
+            return None
+        widened = target
+        if entry_price > 0:
+            diff = target - entry_price
+            widened = entry_price + diff * 1.5
+        else:
+            widened = target * 1.5
+        if widened <= 0 and target > 0:
+            widened = target * 1.5
+        return widened
 
-    if placed:
+    adj_sl = float(sl_price) if sl_price is not None else None
+    adj_tp = float(tp_price) if tp_price is not None else None
+    attempt = 0
+    placed_any = False
+
+    while attempt < 3 and (need_sl or need_tp):
+        widen_required = False
+
+        if need_sl and adj_sl is not None:
+            params = {"reduce_only": True, "stopPrice": adj_sl}
+            order_id, err = safe_create_order(
+                exchange_obj,
+                symbol,
+                "STOP_MARKET",
+                exit_side,
+                qty_value,
+                price=adj_sl,
+                params=params,
+            )
+            if order_id and not err:
+                need_sl = False
+                placed_any = True
+            elif err:
+                if "-2021" in err:
+                    widen_required = True
+                else:
+                    logging.warning(
+                        "exit_guard | %s | stop order rejected: %s", symbol, err
+                    )
+
+        if need_tp and adj_tp is not None:
+            params = {"reduce_only": True, "takeProfitPrice": adj_tp}
+            order_id, err = safe_create_order(
+                exchange_obj,
+                symbol,
+                "TAKE_PROFIT_MARKET",
+                exit_side,
+                qty_value,
+                price=adj_tp,
+                params=params,
+            )
+            if order_id and not err:
+                need_tp = False
+                placed_any = True
+            elif err:
+                if "-2021" in err:
+                    widen_required = True
+                else:
+                    logging.warning(
+                        "exit_guard | %s | take-profit rejected: %s", symbol, err
+                    )
+
+        if widen_required:
+            attempt += 1
+            if adj_sl is not None:
+                adj_sl = _widen(adj_sl)
+            if adj_tp is not None:
+                adj_tp = _widen(adj_tp)
+            continue
+        break
+
+    if placed_any:
         ctx.update(
             {
-                "sl_price": float(sl_price),
-                "tp_price": float(tp_price),
-                "atr": float(atr_val),
-                "sl_mult": float(sl_mult),
-                "tp_mult": float(tp_mult),
-                "qty": float(qty_precise),
+                "sl_price": float(adj_sl) if adj_sl is not None else ctx.get("sl_price"),
+                "tp_price": float(adj_tp) if adj_tp is not None else ctx.get("tp_price"),
+                "qty": float(qty_value),
             }
         )
         open_trade_ctx[symbol] = ctx
+        msg_parts: list[str] = []
+        if adj_sl is not None:
+            msg_parts.append(f"sl={adj_sl:.6f}")
+        if adj_tp is not None:
+            msg_parts.append(f"tp={adj_tp:.6f}")
         log(
             logging.INFO,
             "exit_guard",
             symbol,
-            f"restored exits sl={sl_price:.6f} tp={tp_price:.6f}",
+            "ensured exits " + " ".join(msg_parts) if msg_parts else "ensured exits",
         )
 
 def update_stop_loss(symbol: str, new_sl: float) -> None:
@@ -4103,9 +4108,46 @@ def run_bot():
             if float(pos.get("contracts", 0)) > 0:
                 entry_price = float(pos.get("entryPrice", 0))
                 last_price = float(pos.get("markPrice", 0))
-                side = pos.get("side", "").upper()
+                side = str(pos.get("side", "")).upper()
                 qty = float(pos.get("contracts", 0))
-                ensure_exit_orders(symbol, pos)
+                ctx = open_trade_ctx.get(symbol, {})
+                tick_hint = ctx.get("tick_size") or None
+                tick_size = float(tick_hint) if tick_hint else None
+                atr_ctx = float(ctx.get("atr") or 0.0)
+                mode_params_ctx = {
+                    "sl_mult": float(ctx.get("sl_mult") or 2.0),
+                    "tp_mult": float(ctx.get("tp_mult") or 4.0),
+                }
+                sl_price_ctx = ctx.get("sl_price")
+                tp_price_ctx = ctx.get("tp_price")
+                price_for_calc = entry_price if entry_price > 0 else last_price
+                if price_for_calc > 0 and atr_ctx > 0 and (
+                    sl_price_ctx is None or tp_price_ctx is None
+                ):
+                    tp_new, sl_new, _ = risk_management.calc_sl_tp(
+                        price_for_calc,
+                        atr_ctx,
+                        mode_params_ctx,
+                        "long" if side == "LONG" else "short",
+                        tick_size=tick_size,
+                    )
+                    if sl_price_ctx is None:
+                        sl_price_ctx = sl_new
+                    if tp_price_ctx is None:
+                        tp_price_ctx = tp_new
+                if sl_price_ctx is not None:
+                    ctx["sl_price"] = float(sl_price_ctx)
+                if tp_price_ctx is not None:
+                    ctx["tp_price"] = float(tp_price_ctx)
+                open_trade_ctx[symbol] = ctx
+                ensure_exit_orders(
+                    ADAPTER,
+                    symbol,
+                    "long" if side == "LONG" else "short",
+                    qty,
+                    sl_price_ctx,
+                    tp_price_ctx,
+                )
                 ctx = open_trade_ctx.get(symbol, {})
 
                 roi = 0.0
@@ -4547,13 +4589,16 @@ def run_bot():
                                 if atr_pct > 0.01:
                                     sl_mult *= 1.2
                                     tp_mult *= 1.2
+                                mode_params_pattern = {
+                                    "sl_mult": float(sl_mult),
+                                    "tp_mult": float(tp_mult),
+                                }
                                 tp_price_raw, sl_price_raw, _ = risk_management.calc_sl_tp(
                                     current_price,
-                                    "LONG" if model_signal == "long" else "SHORT",
                                     atr_val,
-                                    sl_mult,
-                                    tp_mult,
-                                    tick_size,
+                                    mode_params_pattern,
+                                    "long" if model_signal == "long" else "short",
+                                    tick_size=tick_size,
                                 )
                                 opp_side = "sell" if model_signal == "long" else "buy"
                                 place_protected_exit(
@@ -4604,6 +4649,21 @@ def run_bot():
                                     f"Pattern entry {model_signal} qty={qty:.6f} price≈{current_price:.6f}",
                                 )
                                 log_decision(symbol, "pattern_entry", decision="entry")
+                                try:
+                                    ensure_exit_orders(
+                                        ADAPTER,
+                                        symbol,
+                                        model_signal,
+                                        qty,
+                                        entry_ctx.get("sl_price"),
+                                        entry_ctx.get("tp_price"),
+                                    )
+                                except Exception as exc:
+                                    logging.warning(
+                                        "exit_guard | %s | ensure_exit_orders failed: %s",
+                                        symbol,
+                                        exc,
+                                    )
                                 recent_hits.append(True)
                                 recent_trade_times.append(now)
                                 fallback_cooldown[symbol] = entry_ctx["open_bar_index"] + 2

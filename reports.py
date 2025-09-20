@@ -42,8 +42,31 @@ def build_profit_report(trades_log: str, profit_report: str) -> None:
         ],
     )
 
+    if os.path.exists(profit_report):
+        try:
+            os.remove(profit_report)
+        except OSError:
+            pass
+
     df = _load_trades(trades_log)
     if df.empty:
+        empty = pd.DataFrame(
+            columns=
+            [
+                "trade_id",
+                "timestamp_entry",
+                "timestamp_exit",
+                "symbol",
+                "pnl_net",
+                "cum_pnl",
+                "winrate",
+                "avg_win",
+                "avg_loss",
+                "sharpe",
+                "dd",
+            ]
+        )
+        empty.to_csv(profit_report, index=False)
         return
 
     ts_exit_col = None
@@ -124,8 +147,15 @@ def build_equity_curve(trades_log: str, equity_curve: str) -> None:
 
     ensure_report_schema(equity_curve, ["timestamp", "equity"])
 
+    if os.path.exists(equity_curve):
+        try:
+            os.remove(equity_curve)
+        except OSError:
+            pass
+
     df = _load_trades(trades_log)
     if df.empty:
+        pd.DataFrame(columns=["timestamp", "equity"]).to_csv(equity_curve, index=False)
         return
 
     ts_exit_col = None

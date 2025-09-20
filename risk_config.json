@@ -9,6 +9,7 @@
   "max_daily_loss_per_symbol": 0.05,
   "cool_down_bars": 5,
   "max_open_trades": 5,
+  "time_stop_bars": 60,
   "VOL_WINDOW": 20,
   "VOL_RATIO_MAX": 10.0,
   "VOLUME_RATIO_MIN": 1.3,
