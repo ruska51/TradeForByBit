@@ -11,6 +11,7 @@ from logging_utils import (
     log,
     record_pattern,
     safe_create_order,
+    safe_fetch_balance,
     SOFT_ORDER_ERRORS,
     setup_logging,
 )
@@ -117,7 +118,7 @@ async def run_trade(
             tick_size,
         )
 
-        balance = await asyncio.to_thread(exchange.fetch_balance)
+        balance = await asyncio.to_thread(safe_fetch_balance, exchange)
         equity = balance["total"].get("USDT", 0.0)
         if not limiter.can_trade(symbol, equity):
             log(logging.INFO, "trade", symbol, "daily loss limit reached")
