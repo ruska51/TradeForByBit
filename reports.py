@@ -2,6 +2,8 @@ import os
 import pandas as pd
 import numpy as np
 
+from logging_utils import ensure_report_schema
+
 
 def _load_trades(trades_log: str) -> pd.DataFrame:
     """Return DataFrame from *trades_log* or empty DataFrame on error."""
@@ -22,6 +24,23 @@ def build_profit_report(trades_log: str, profit_report: str) -> None:
     performance metrics (``cum_pnl``, ``winrate``, ``avg_win``/``avg_loss``,
     daily ``sharpe`` and running drawdown ``dd``).
     """
+
+    ensure_report_schema(
+        profit_report,
+        [
+            "trade_id",
+            "timestamp_entry",
+            "timestamp_exit",
+            "symbol",
+            "pnl_net",
+            "cum_pnl",
+            "winrate",
+            "avg_win",
+            "avg_loss",
+            "sharpe",
+            "dd",
+        ],
+    )
 
     df = _load_trades(trades_log)
     if df.empty:
@@ -63,6 +82,9 @@ def build_profit_report(trades_log: str, profit_report: str) -> None:
         }
     )
 
+    if "trade_id" in df_report.columns:
+        df_report["trade_id"] = df_report["trade_id"].astype(str)
+
     df_report["cum_pnl"] = pnl.cumsum().round(2)
 
     wins = (pnl > 0).astype(float)
@@ -99,6 +121,8 @@ def build_profit_report(trades_log: str, profit_report: str) -> None:
 
 def build_equity_curve(trades_log: str, equity_curve: str) -> None:
     """Construct cumulative equity solely from ``trades_log``."""
+
+    ensure_report_schema(equity_curve, ["timestamp", "equity"])
 
     df = _load_trades(trades_log)
     if df.empty:

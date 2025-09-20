@@ -140,6 +140,20 @@ LOG_EXIT_FIELDS = [
 ]
 
 
+def _rotate_legacy_file(path_obj: Path, label: str = "legacy") -> Path:
+    """Rename existing file to a ``*_{label}`` variant avoiding overwrites."""
+
+    backup = path_obj.with_name(f"{path_obj.stem}_{label}{path_obj.suffix}")
+    counter = 1
+    while backup.exists():
+        backup = path_obj.with_name(
+            f"{path_obj.stem}_{label}{counter}{path_obj.suffix}"
+        )
+        counter += 1
+    path_obj.rename(backup)
+    return backup
+
+
 def ensure_trades_csv_header(path: str) -> None:
     """Ensure ``path`` exists with ``TRADES_CSV_HEADER`` columns.
 
@@ -168,14 +182,7 @@ def ensure_trades_csv_header(path: str) -> None:
     existing = lines[0].strip().split(",")
     first_col = existing[0] if existing else ""
     if first_col != "trade_id":
-        backup = path_obj.with_name(f"{path_obj.stem}_misaligned{path_obj.suffix}")
-        counter = 1
-        while backup.exists():
-            backup = path_obj.with_name(
-                f"{path_obj.stem}_misaligned{counter}{path_obj.suffix}"
-            )
-            counter += 1
-        path_obj.rename(backup)
+        _rotate_legacy_file(path_obj, "misaligned")
         with open(path_obj, "w", newline="", encoding="utf-8") as f:
             f.write(",".join(header) + "\n")
         return
@@ -187,6 +194,32 @@ def ensure_trades_csv_header(path: str) -> None:
     lines[0] = ",".join(existing + missing) + "\n"
     with open(path_obj, "w", newline="", encoding="utf-8") as f:
         f.writelines(lines)
+
+
+def ensure_report_schema(path: str, expected_header: list[str]) -> None:
+    """Reset *path* when the CSV header does not match ``expected_header``."""
+
+    path_obj = Path(path)
+    if not path_obj.exists():
+        return
+    try:
+        with open(path_obj, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+    except OSError:
+        return
+
+    if not first_line:
+        with open(path_obj, "w", newline="", encoding="utf-8") as f:
+            f.write(",".join(expected_header) + "\n")
+        return
+
+    existing = [col.strip() for col in first_line.split(",") if col.strip()]
+    if existing == expected_header:
+        return
+
+    _rotate_legacy_file(path_obj)
+    with open(path_obj, "w", newline="", encoding="utf-8") as f:
+        f.write(",".join(expected_header) + "\n")
 
 # [ANCHOR:ENTRY_LOG_UTILS]
 def _now_utc_iso():

@@ -227,6 +227,7 @@ from exchange_adapter import (
 from typing import Dict, Tuple
 from logging_utils import (
     ensure_trades_csv_header,
+    ensure_report_schema,
     TRADES_CSV_HEADER,
     log_entry,  # не менять сигнатуру, возвращает trade_id
     log_exit_from_order,
@@ -272,7 +273,27 @@ touch_csv("decision_log.csv", ["timestamp", "symbol", "signal", "reason"])
 trade_log_path = str(ROOT / "trades_log.csv")
 profit_report_path = str(ROOT / "profit_report.csv")
 equity_curve_path = str(ROOT / "equity_curve.csv")
+pair_report_path = str(ROOT / "pair_report.csv")
 ensure_trades_csv_header(trade_log_path)
+ensure_report_schema(
+    profit_report_path,
+    [
+        "timestamp",
+        "symbol",
+        "pnl_net",
+        "cum_pnl",
+        "winrate",
+        "avg_win",
+        "avg_loss",
+        "sharpe",
+        "max_dd",
+    ],
+)
+ensure_report_schema(equity_curve_path, ["timestamp", "equity"])
+ensure_report_schema(
+    pair_report_path,
+    ["symbol", "winrate", "avg_profit", "losing_streak", "timestamp"],
+)
 
 # кэш и сервисные структуры
 if "ohlcv_cache" not in globals():

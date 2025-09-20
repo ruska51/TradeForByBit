@@ -67,8 +67,8 @@ def test_ccxt_fallback_when_fetch_missing(monkeypatch):
     mod = types.SimpleNamespace(bybit=Bad, binance=Good)
     monkeypatch.setattr(exchange_adapter, "_ccxt", mod)
 
-    ad = ExchangeAdapter(config={"EXCHANGE_BACKEND": "ccxt", "exchange_id": "bybit"})
-    assert ad.ccxt_id == "binance"  # fell back to second candidate
+    with pytest.raises(exchange_adapter.AdapterInitError):
+        ExchangeAdapter(config={"EXCHANGE_BACKEND": "ccxt", "exchange_id": "bybit"})
 
 
 def test_multi_ohlcv_partial_fail():

@@ -8,6 +8,7 @@ from logging_utils import (
     log_entry,
     _ENTRY_CACHE,
     ensure_trades_csv_header,
+    ensure_report_schema,
     TRADES_CSV_HEADER,
     LOG_ENTRY_FIELDS,
 )
@@ -200,6 +201,21 @@ def test_ensure_trades_csv_header_creates(tmp_path):
     with open(path) as f:
         header = f.readline().strip().split(",")
     assert header == TRADES_CSV_HEADER
+
+
+def test_ensure_report_schema_resets(tmp_path):
+    path = tmp_path / "pair_report.csv"
+    with open(path, "w", newline="") as f:
+        f.write("foo,bar\n1,2\n")
+
+    ensure_report_schema(str(path), ["symbol", "winrate"])
+
+    with open(path) as f:
+        header = f.readline().strip().split(",")
+    assert header == ["symbol", "winrate"]
+
+    backup = tmp_path / "pair_report_legacy.csv"
+    assert backup.exists()
 
 
 def test_setup_logger_writes_file(tmp_path):
