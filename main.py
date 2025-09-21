@@ -917,17 +917,26 @@ THRESHOLD = 0.001  # 0.1% минимальное движение для сде�
 SL_PCT = 0.02  # 2% стоп-лосс
 TP_PCT = 0.04  # 4% тейк-профит
 MIN_RR = 1.5  # минимальное соотношение TP/SL
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+
+
 # Базовые и динамические фильтры вероятности/ADX
 BASE_PROBA_FILTER = 0.25
-PROBA_FILTER = float(os.getenv("PROBA_FILTER", str(BASE_PROBA_FILTER)))  # динамическое значение
+PROBA_FILTER = _env_float("PROBA_FILTER", BASE_PROBA_FILTER)  # динамическое значение
 # [ANCHOR:DYNA_THRESH_CONSTS]
 MIN_PROBA_FILTER = 0.20
 MIN_ADX_THRESHOLD = 1.0
 # Стратегия допускает сделки только при умеренном тренде
 BASE_ADX_THRESHOLD = 2.0
-ADX_THRESHOLD = float(os.getenv("ADX_THRESHOLD", str(BASE_ADX_THRESHOLD)))  # минимальный ADX для сделки
-RSI_OVERBOUGHT = 65.0  # порог перекупленности для long
-RSI_OVERSOLD = 35.0  # порог перепроданности для short
+ADX_THRESHOLD = _env_float("ADX_THRESHOLD", BASE_ADX_THRESHOLD)  # минимальный ADX для сделки
+RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 70.0)  # порог перекупленности для long
+RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 30.0)  # порог перепроданности для short
 PRED_HORIZON = 2  # число свечей вперёд для прогноза и бэктеста
 MAX_LOSS_ROI = 0.10  # допустимый убыток по позиции (10% ROI)
 ROI_TARGET_PCT = 1.5  # целевой ROI для автофиксации прибыли (в процентах)
