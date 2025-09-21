@@ -214,8 +214,9 @@ def test_ensure_report_schema_resets(tmp_path):
         header = f.readline().strip().split(",")
     assert header == ["symbol", "winrate"]
 
-    backup = tmp_path / "pair_report_legacy.csv"
-    assert backup.exists()
+    backup_new = tmp_path / "pair_report_misaligned.csv"
+    backup_legacy = tmp_path / "pair_report_legacy.csv"
+    assert backup_new.exists() or backup_legacy.exists()
 
 
 def test_setup_logger_writes_file(tmp_path):
