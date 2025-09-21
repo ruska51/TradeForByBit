@@ -47,8 +47,11 @@ def filter_supported_symbols(adapter, symbols: list[str], markets_cache) -> tupl
 
     try:
         now = time.time()
-        if ("set" not in markets_cache) or (now - markets_cache.get("ts", 0) > MARKET_TTL):
-            markets_cache["set"] = adapter.load_markets()
+        needs_reload = ("dict" not in markets_cache) or (now - markets_cache.get("ts", 0) > MARKET_TTL)
+        if needs_reload:
+            markets_dict = adapter.load_markets() or {}
+            markets_cache["dict"] = markets_dict
+            markets_cache["set"] = set(markets_dict)
             markets_cache["ts"] = now
         markets = markets_cache.get("set", set())
     except Exception as e:  # pragma: no cover - warning only
@@ -103,12 +106,23 @@ def filter_linear_markets(
 
     try:
         now = time.time()
-        needs_reload = force_reload or ("set" not in markets_cache)
+        needs_reload = force_reload or ("dict" not in markets_cache)
         needs_reload |= now - markets_cache.get("ts", 0.0) > MARKET_TTL
         if needs_reload:
-            markets_cache["set"] = adapter.load_markets()
+            markets_dict = adapter.load_markets() or {}
+            markets_cache["dict"] = markets_dict
+            markets_cache["set"] = set(markets_dict)
             markets_cache["ts"] = now
-        markets: dict = markets_cache.get("set", {}) or {}
+        markets: dict | set = markets_cache.get("dict") or markets_cache.get("set") or {}
+        if not isinstance(markets, dict):
+            try:
+                markets = adapter.load_markets() or {}
+            except Exception as exc:  # pragma: no cover - best effort logging
+                logging.warning("filter | linear markets unavailable: %s", exc)
+                return symbols[:], []
+            markets_cache["dict"] = markets
+            markets_cache["set"] = set(markets)
+            markets_cache["ts"] = now
     except Exception as exc:  # pragma: no cover - best effort logging
         logging.warning("filter | linear markets unavailable: %s", exc)
         return symbols[:], []
