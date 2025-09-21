@@ -212,6 +212,10 @@ def calc_sl_tp(
         tp_mult = 4.0
 
     atr_pct = atr_val / price if price else 0.0
+    if atr_pct < 0.5:
+        sl_mult *= 3.0
+        tp_mult *= 3.0
+    # если ATR менее 0.5%, множители увеличиваем в 3 раза
     if atr_pct < 0.005:
         sl_mult *= 3.0
         tp_mult *= 3.0

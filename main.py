@@ -343,6 +343,7 @@ def compute_metrics(df: pd.DataFrame) -> Dict[str, float]:
     """Calculate basic metrics from trade data."""
     df = _coerce_exit_type(df)
     if "exit_type" in df.columns:
+        df["exit_type"] = df["exit_type"].astype(str)
         df = df[df["exit_type"].str.upper() != "ENTRY"]
     sl_rate = 0.0
     tp_rate = 0.0
@@ -3487,6 +3488,13 @@ def ensure_exit_orders(
     exit_side = "sell" if side_norm == "long" else "buy"
 
     try:
+        qty_value = float(exchange_obj.amount_to_precision(symbol, qty_value))
+    except Exception:
+        qty_value = float(qty_value)
+    if qty_value <= 0:
+        return
+
+    try:
         orders = exchange_obj.fetch_open_orders(symbol) or []
     except Exception as exc:
         logging.warning("exit_guard | %s | fetch_open_orders failed: %s", symbol, exc)
@@ -3524,18 +3532,23 @@ def ensure_exit_orders(
     except (TypeError, ValueError):
         entry_price = 0.0
 
-    def _widen(target: float | None) -> float | None:
+    def _stretch_price(target: float | None, is_tp: bool) -> float | None:
         if target is None:
             return None
-        widened = target
-        if entry_price > 0:
-            diff = target - entry_price
-            widened = entry_price + diff * 1.5
+        base = entry_price if entry_price > 0 else None
+        if base and base != target:
+            diff = target - base
+            stretched = base + diff * 1.5
+        elif base and base == target:
+            adjust = abs(base) * 0.01 or 0.01
+            direction = 1.0 if (is_tp == (side_norm == "long")) else -1.0
+            stretched = base + adjust * direction * 1.5
         else:
-            widened = target * 1.5
-        if widened <= 0 and target > 0:
-            widened = target * 1.5
-        return widened
+            factor = 1.5
+            stretched = target * factor if target != 0 else target
+        if stretched <= 0 and target > 0:
+            stretched = max(target * 1.5, target + 0.01)
+        return stretched
 
     adj_sl = float(sl_price) if sl_price is not None else None
     adj_tp = float(tp_price) if tp_price is not None else None
@@ -3546,19 +3559,28 @@ def ensure_exit_orders(
         widen_required = False
 
         if need_sl and adj_sl is not None:
-            params = {"reduce_only": True, "stopPrice": adj_sl}
+            try:
+                sl_prec = float(exchange_obj.price_to_precision(symbol, adj_sl))
+            except Exception:
+                sl_prec = float(adj_sl)
+            params = {
+                "stopPrice": sl_prec,
+                "closePosition": True,
+                "reduceOnly": True,
+            }
             order_id, err = safe_create_order(
                 exchange_obj,
                 symbol,
                 "STOP_MARKET",
                 exit_side,
                 qty_value,
-                price=adj_sl,
+                price=sl_prec,
                 params=params,
             )
             if order_id and not err:
                 need_sl = False
                 placed_any = True
+                adj_sl = sl_prec
             elif err:
                 if "-2021" in err:
                     widen_required = True
@@ -3568,19 +3590,28 @@ def ensure_exit_orders(
                     )
 
         if need_tp and adj_tp is not None:
-            params = {"reduce_only": True, "takeProfitPrice": adj_tp}
+            try:
+                tp_prec = float(exchange_obj.price_to_precision(symbol, adj_tp))
+            except Exception:
+                tp_prec = float(adj_tp)
+            params = {
+                "stopPrice": tp_prec,
+                "closePosition": True,
+                "priceProtect": True,
+            }
             order_id, err = safe_create_order(
                 exchange_obj,
                 symbol,
                 "TAKE_PROFIT_MARKET",
                 exit_side,
                 qty_value,
-                price=adj_tp,
+                price=tp_prec,
                 params=params,
             )
             if order_id and not err:
                 need_tp = False
                 placed_any = True
+                adj_tp = tp_prec
             elif err:
                 if "-2021" in err:
                     widen_required = True
@@ -3592,9 +3623,9 @@ def ensure_exit_orders(
         if widen_required:
             attempt += 1
             if adj_sl is not None:
-                adj_sl = _widen(adj_sl)
+                adj_sl = _stretch_price(adj_sl, is_tp=False)
             if adj_tp is not None:
-                adj_tp = _widen(adj_tp)
+                adj_tp = _stretch_price(adj_tp, is_tp=True)
             continue
         break
 

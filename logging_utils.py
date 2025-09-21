@@ -207,6 +207,18 @@ def ensure_report_schema(path: str, expected_header: list[str]) -> None:
         return
 
     existing = [col.strip() for col in first_line.split(",") if col.strip()]
+    if not existing:
+        with open(path_obj, "w", newline="", encoding="utf-8") as f:
+            f.write(",".join(expected_header) + "\n")
+        return
+
+    first_col = existing[0]
+    if first_col != expected_header[0]:
+        _rotate_legacy_file(path_obj, "misaligned")
+        with open(path_obj, "w", newline="", encoding="utf-8") as f:
+            f.write(",".join(expected_header) + "\n")
+        return
+
     if existing == expected_header:
         return
 
