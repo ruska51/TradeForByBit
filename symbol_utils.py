@@ -1,6 +1,7 @@
 # [ANCHOR:SYMBOL_UTILS_HEADER]
 import time
 import logging
+from typing import Tuple
 
 MARKET_TTL = 300  # seconds
 
@@ -82,4 +83,62 @@ def filter_supported_symbols(adapter, symbols: list[str], markets_cache) -> tupl
         return symbols[:], [], True
 
     return supported, removed, False
+
+
+def filter_linear_markets(
+    adapter,
+    symbols: list[str],
+    markets_cache,
+    *,
+    force_reload: bool = False,
+) -> Tuple[list[str], list[str]]:
+    """Return ``symbols`` split into supported linear swaps and pending ones.
+
+    The function inspects the loaded CCXT markets and keeps only those where the
+    ``linear`` flag is truthy which corresponds to USDT-margined perpetual
+    contracts on Bybit.  Symbols that do not expose a linear contract are
+    returned separately so the caller can re-check them later without letting
+    them block trading cycles.
+    """
+
+    try:
+        now = time.time()
+        needs_reload = force_reload or ("set" not in markets_cache)
+        needs_reload |= now - markets_cache.get("ts", 0.0) > MARKET_TTL
+        if needs_reload:
+            markets_cache["set"] = adapter.load_markets()
+            markets_cache["ts"] = now
+        markets: dict = markets_cache.get("set", {}) or {}
+    except Exception as exc:  # pragma: no cover - best effort logging
+        logging.warning("filter | linear markets unavailable: %s", exc)
+        return symbols[:], []
+
+    supported: list[str] = []
+    pending: list[str] = []
+
+    for symbol in symbols:
+        market = markets.get(symbol)
+        if not market:
+            pending.append(symbol)
+            continue
+
+        linear_flag = market.get("linear")
+        info = market.get("info") or {}
+        contract_type = str(info.get("contractType") or info.get("contract_type") or "")
+        is_linear = False
+        if isinstance(linear_flag, bool):
+            is_linear = linear_flag
+        elif isinstance(linear_flag, (int, float)):
+            is_linear = bool(int(linear_flag))
+        elif isinstance(linear_flag, str):
+            is_linear = linear_flag.lower() in {"1", "true", "linear", "usdm"}
+        if not is_linear and contract_type:
+            is_linear = "linear" in contract_type.lower()
+
+        if is_linear:
+            supported.append(symbol)
+        else:
+            pending.append(symbol)
+
+    return supported, pending
 

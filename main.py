@@ -238,7 +238,7 @@ from risk_management import (
     trail_levels,
     should_activate_trailing,
 )
-from symbol_utils import filter_supported_symbols
+from symbol_utils import filter_supported_symbols, filter_linear_markets
 
 STRONG_BULL_PATTERNS = {"bull_flag", "cup_and_handle", "triple_bottom"}
 STRONG_BEAR_PATTERNS = {"bear_flag", "triple_top"}
@@ -305,6 +305,11 @@ if "pair_state" not in globals():
 # [ANCHOR:STATE_INIT_MARKETS_CACHE]
 if "markets_cache" not in globals():
     markets_cache = {"loaded": False, "ts": 0.0, "by_name": set(), "by_id": set()}
+if "symbol_data_health" not in globals():
+    symbol_data_health: dict[tuple[str, str], dict[str, float]] = {}
+if "linear_pending_symbols" not in globals():
+    linear_pending_symbols: list[str] = []
+    _next_linear_refresh = 0.0
 
 
 def load_trades(csv_file: str = "trades_log.csv", create: bool = False) -> pd.DataFrame:
@@ -542,29 +547,11 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
 
     dfs: dict[str, pd.DataFrame] = {}
     for tf in timeframes:
-        ohlcv = None
-        for attempt in range(3):
-            try:
-                ohlcv = ADAPTER.fetch_ohlcv(symbol, tf, limit=limit)
-                break
-            except AdapterOHLCVUnavailable as exc:
-                if attempt == 2:
-                    logging.warning(
-                        "data | %s | %s ohlcv unavailable: %s", symbol, tf, exc
-                    )
-                time.sleep(0.1 * (attempt + 1))
-            except Exception as exc:  # pragma: no cover - network errors
-                if attempt == 2:
-                    logging.warning("data | %s | %s fetch failed: %s", symbol, tf, exc)
-                time.sleep(0.1 * (attempt + 1))
-        if not ohlcv:
-            logging.warning("data | %s | %s returned no candles", symbol, tf)
+        df_tf = fetch_ohlcv(symbol, tf, limit=limit)
+        if df_tf is None or df_tf.empty:
+            logging.debug("data | %s | %s missing in multi-fetch", symbol, tf)
             continue
-        df = pd.DataFrame(
-            ohlcv,
-            columns=["timestamp", "open", "high", "low", "close", "volume"],
-        )
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df = df_tf.copy()
         df = df.rename(columns=lambda c: f"{c}_{tf}")
         dfs[tf] = df
     if not dfs:
@@ -576,7 +563,7 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
             logging.info(
                 "data | %s | no OHLCV for required timeframes; skipping", symbol
             )
-        log_decision(symbol, "ohlcv_unavailable")
+        mark_symbol_no_data(symbol, "multi", reason="no_data", log_skip=True)
         return pd.DataFrame()
 
     ordered = [tf for tf in timeframes if tf in dfs]
@@ -927,6 +914,33 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+# Retry / fallback configuration
+NO_DATA_RETRY_SEC = float(os.getenv("NO_DATA_RETRY_SEC", "180"))
+NO_DATA_LOG_INTERVAL = float(os.getenv("NO_DATA_LOG_INTERVAL", "180"))
+FALLBACK_MODE_ENABLED = os.getenv("FALLBACK_MODE", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+INACTIVITY_RELAX_CYCLES = max(1, _env_int("INACTIVITY_RELAX_CYCLES", 3))
+PROBA_RELAX_STEP = _env_float("INACTIVITY_PROBA_STEP", 0.05)
+MIN_DYNAMIC_PROBA = _env_float("MIN_DYNAMIC_PROBA", 0.4)
+ADX_RELAX_STEP = _env_float("INACTIVITY_ADX_STEP", 1.0)
+INACTIVITY_ADX_FLOOR = _env_float("INACTIVITY_ADX_FLOOR", 10.0)
+RSI_RELAX_STEP = _env_float("INACTIVITY_RSI_STEP", 2.0)
+RSI_RELAX_MAX = _env_float("INACTIVITY_RSI_MAX", 80.0)
+RSI_RELAX_MIN = _env_float("INACTIVITY_RSI_MIN", 20.0)
+LINEAR_RECHECK_INTERVAL = max(60, _env_int("LINEAR_RECHECK_INTERVAL", 900))
+
+
 # Базовые и динамические фильтры вероятности/ADX
 BASE_PROBA_FILTER = 0.25
 PROBA_FILTER = _env_float("PROBA_FILTER", BASE_PROBA_FILTER)  # динамическое значение
@@ -1164,6 +1178,8 @@ open_trade_ctx: Dict[str, Dict[str, Any]] = {}
 fallback_cooldown: Dict[str, int] = {}
 tf_skip_counters: Dict[str, int] = defaultdict(int)
 TF_SKIP_THRESHOLD = 3
+symbol_inactivity_cycles: Dict[str, int] = defaultdict(int)
+symbol_relax_steps: Dict[str, int] = defaultdict(int)
 
 
 def inc_tf_skip(symbol: str) -> None:
@@ -1177,6 +1193,13 @@ def reset_tf_skip(symbol: str) -> None:
     if tf_skip_counters.get(symbol):
         tf_skip_counters[symbol] = 0
         memory_manager.add_event("tf_skip_reset", {"symbol": symbol})
+
+
+def reset_inactivity(symbol: str) -> None:
+    """Clear inactivity counters for ``symbol``."""
+
+    symbol_inactivity_cycles[symbol] = 0
+    symbol_relax_steps[symbol] = 0
 
 
 def load_last_trade_times(
@@ -1195,43 +1218,81 @@ def load_last_trade_times(
 
 
 symbol_activity = load_last_trade_times()
+for _sym in symbol_activity:
+    reset_inactivity(_sym)
 
 
 def adjust_filters_for_inactivity(
     symbol: str,
-) -> tuple[float, float, bool, bool, float]:
-    """Return adjusted (proba_filter, adx_threshold, allow_conditional,
-    use_fallback, inactivity_hours)."""
+) -> tuple[float, float, bool, bool, float, float, float]:
+    """Return adjusted thresholds for ``symbol`` based on inactivity.
+
+    Returns ``(proba_filter, adx_threshold, allow_conditional, use_fallback,
+    inactivity_hours, rsi_overbought, rsi_oversold)`` allowing the caller to
+    widen the RSI band alongside the probability/ADX relaxations.
+    """
+
     last = symbol_activity.get(symbol)
     if last is None:
-        symbol_activity[symbol] = datetime.now(timezone.utc)
+        now_dt = datetime.now(timezone.utc)
+        symbol_activity[symbol] = now_dt
+        reset_inactivity(symbol)
         inactivity = 0.0
     else:
         delta = datetime.now(timezone.utc) - pd.to_datetime(last, utc=True)
-        inactivity = delta.total_seconds() / 3600
-    adj_proba = PROBA_FILTER
-    adj_adx = ADX_THRESHOLD
-    allow_conditional = False
-    use_fallback = False
+        inactivity = max(0.0, delta.total_seconds() / 3600)
+
+    cycles = symbol_inactivity_cycles.get(symbol, 0)
     if inactivity >= INACTIVITY_ADAPT_HOURS:
-        adj_proba -= 0.05
-        adj_adx -= 3
-    if inactivity >= INACTIVITY_CONDITIONAL_HOURS:
-        allow_conditional = True
-    if inactivity >= INACTIVITY_FALLBACK_HOURS:
-        use_fallback = True
+        cycles += 1
+    else:
+        cycles = 0
+        reset_inactivity(symbol)
+    symbol_inactivity_cycles[symbol] = cycles
+
+    steps = cycles // INACTIVITY_RELAX_CYCLES
+    symbol_relax_steps[symbol] = steps
+
+    base_proba = float(PROBA_FILTER)
+    base_adx = float(ADX_THRESHOLD)
+    base_rsi_over = float(RSI_OVERBOUGHT)
+    base_rsi_under = float(RSI_OVERSOLD)
+
+    proba_floor = min(base_proba, MIN_DYNAMIC_PROBA)
+    proba_range = max(0.0, base_proba - proba_floor)
+    adj_proba = base_proba - min(proba_range, PROBA_RELAX_STEP * steps)
+    adx_floor = max(float(MIN_ADX_THRESHOLD), INACTIVITY_ADX_FLOOR)
+    max_adx_drop = max(0.0, base_adx - adx_floor)
+    adj_adx = base_adx - min(max_adx_drop, ADX_RELAX_STEP * steps)
+    rsi_over_adj = min(RSI_RELAX_MAX, base_rsi_over + RSI_RELAX_STEP * steps)
+    rsi_under_adj = max(RSI_RELAX_MIN, base_rsi_under - RSI_RELAX_STEP * steps)
+
+    allow_conditional = inactivity >= INACTIVITY_CONDITIONAL_HOURS
+    use_fallback = FALLBACK_MODE_ENABLED or inactivity >= INACTIVITY_FALLBACK_HOURS
+
     # [ANCHOR:DYNA_THRESH_CLAMP]
     adj_proba = max(MIN_PROBA_FILTER, float(adj_proba))
-    adj_adx = max(MIN_ADX_THRESHOLD, int(adj_adx))
+    adj_adx = max(MIN_ADX_THRESHOLD, float(adj_adx))
     # [ANCHOR:DYNA_THRESH_LOG]
     logging.info(
-        "adj | %s | inactive %.1fh → PROBA %.2f, ADX %d",
+        "adj | %s | inactive %.1fh → PROBA %.2f, ADX %.1f, RSI %.1f/%.1f (steps=%d)",
         symbol,
         inactivity,
         adj_proba,
         adj_adx,
+        rsi_over_adj,
+        rsi_under_adj,
+        steps,
     )
-    return adj_proba, adj_adx, allow_conditional, use_fallback, inactivity
+    return (
+        adj_proba,
+        adj_adx,
+        allow_conditional,
+        use_fallback,
+        inactivity,
+        rsi_over_adj,
+        rsi_under_adj,
+    )
 
 
 # stop_loss_pct = 0.008  # === больше не используется, см. выше ===
@@ -1302,10 +1363,28 @@ symbols = initialize_symbols()
 symbols, _removed, degraded = filter_supported_symbols(ADAPTER, symbols, markets_cache)
 if degraded:
     logging.info("filter | degraded mode enabled; proceeding with original symbols to avoid idle")
+linear_supported, pending_linear = filter_linear_markets(ADAPTER, symbols, markets_cache)
+if linear_supported:
+    symbols = linear_supported
+if pending_linear:
+    logging.info("filter | linear contracts unavailable for: %s", ", ".join(pending_linear))
+    for sym in pending_linear:
+        if sym not in linear_pending_symbols:
+            linear_pending_symbols.append(sym)
 BASE_SYMBOL_COUNT = len(symbols)
 reserve_symbols, _res_removed, _res_degraded = filter_supported_symbols(
     ADAPTER, risk_config.get("reserve_symbols", []), markets_cache
 )
+reserve_linear, reserve_pending = filter_linear_markets(ADAPTER, reserve_symbols, markets_cache)
+if reserve_pending:
+    logging.info(
+        "filter | reserve symbols awaiting linear contracts: %s", ", ".join(reserve_pending)
+    )
+    for sym in reserve_pending:
+        if sym not in linear_pending_symbols:
+            linear_pending_symbols.append(sym)
+reserve_symbols = reserve_linear
+_next_linear_refresh = time.time() + LINEAR_RECHECK_INTERVAL
 
 SYMBOL_CATEGORIES = {s: i for i, s in enumerate(symbols)}
 PATTERN_LABELS = {name: i for i, name in enumerate(pattern_classes)}
@@ -1411,6 +1490,57 @@ def _safe_df(data) -> pd.DataFrame | None:
 FETCH_CACHE: dict[tuple[int, str, str, int], pd.DataFrame | None] = {}
 
 
+def _no_data_key(symbol: str, timeframe: str | None) -> tuple[str, str]:
+    tf = timeframe or "unknown"
+    return (symbol, tf)
+
+
+def mark_symbol_no_data(
+    symbol: str,
+    timeframe: str | None,
+    *,
+    reason: str = "no_data",
+    log_skip: bool = True,
+    retry_seconds: float | None = None,
+) -> None:
+    """Record that ``symbol`` lacks candle data for ``timeframe``.
+
+    The information is cached in :data:`symbol_data_health` so repeated calls
+    within ``retry_seconds`` simply return without spamming the exchange.
+    Optionally logs the skip reason to ``decision_log.csv`` when
+    ``log_skip`` is ``True``.
+    """
+
+    retry = retry_seconds if retry_seconds is not None else NO_DATA_RETRY_SEC
+    now = time.time()
+    key = _no_data_key(symbol, timeframe)
+    entry = symbol_data_health.get(key, {})
+    last_logged = float(entry.get("last_logged", 0.0))
+    should_log = log_skip and (now - last_logged >= NO_DATA_LOG_INTERVAL)
+    entry.update({
+        "state": "no_data",
+        "retry_after": now + max(30.0, retry),
+        "updated": now,
+    })
+    if should_log:
+        log_decision(symbol, reason)
+        entry["last_logged"] = now
+    else:
+        entry["last_logged"] = last_logged
+    symbol_data_health[key] = entry
+
+
+def clear_symbol_no_data(symbol: str, timeframe: str | None) -> None:
+    """Clear ``no_data`` status for ``symbol`` if previously set."""
+
+    key = _no_data_key(symbol, timeframe)
+    entry = symbol_data_health.get(key)
+    if not entry:
+        return
+    if entry.get("state") == "no_data":
+        symbol_data_health.pop(key, None)
+
+
 def _fetch_ohlcv(symbol, tf, limit=10000):
     """Fetch OHLCV with a short-lived in-cycle cache."""
     cycle = int(time.time() // 300)
@@ -1422,13 +1552,27 @@ def _fetch_ohlcv(symbol, tf, limit=10000):
     if key in FETCH_CACHE:
         return FETCH_CACHE[key]
 
+    health = symbol_data_health.get(_no_data_key(symbol, tf))
+    if health and health.get("state") == "no_data":
+        retry_after = float(health.get("retry_after", 0.0))
+        now = time.time()
+        if retry_after and now < retry_after:
+            logging.debug(
+                "data | %s | %s marked no_data; retry in %.0fs",
+                symbol,
+                tf,
+                max(0.0, retry_after - now),
+            )
+            FETCH_CACHE[key] = None
+            return None
+
     try:
         ohlcv = ADAPTER.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
     except Exception:
         ohlcv = None
     if not ohlcv:
         log_candle_status(symbol, tf, None)
-        log_decision(symbol, "missing_data")
+        mark_symbol_no_data(symbol, tf)
         FETCH_CACHE[key] = None
         return None
 
@@ -1436,9 +1580,10 @@ def _fetch_ohlcv(symbol, tf, limit=10000):
     count = len(df) if df is not None else None
     if count is None or count == 0:
         log_candle_status(symbol, tf, None)
-        log_decision(symbol, "missing_data")
+        mark_symbol_no_data(symbol, tf)
         FETCH_CACHE[key] = None
         return None
+    clear_symbol_no_data(symbol, tf)
     log_candle_status(symbol, tf, count)
     result = calculate_indicators(df)
     FETCH_CACHE[key] = result
@@ -2271,6 +2416,7 @@ def log_trade(
     df = pd.DataFrame([row], columns=logging_utils.LOG_EXIT_FIELDS)
     df.to_csv(log_path, mode="a", header=write_header, index=False)
     symbol_activity[symbol] = timestamp
+    reset_inactivity(symbol)
 
     if ctx:
         ctx |= {
@@ -2792,6 +2938,7 @@ def run_trade(
     trade_id = log_entry(symbol, ctx, trade_log_path)
     pair_state.setdefault(symbol, {})["trade_id"] = trade_id
     symbol_activity[symbol] = datetime.now(timezone.utc)
+    reset_inactivity(symbol)
     log_decision(symbol, entry_ctx.get("reason", "model_confirmed"), decision="entry")
     try:
         ensure_exit_orders(
@@ -3039,6 +3186,7 @@ def attempt_direct_market_entry(
     trade_id = log_entry(symbol, ctx_copy, trade_log_path)
     pair_state.setdefault(symbol, {})["trade_id"] = trade_id
     symbol_activity[symbol] = now
+    reset_inactivity(symbol)
 
     logging.info(
         colorize(
@@ -3251,15 +3399,15 @@ def save_candle_chart(df, symbol, filename="chart.png"):
     """
 
     if df is None or df.empty:
-        logging.warning(f"chart | {symbol} | No data to plot")
-        record_error(symbol, "chart data missing")
+        logging.info(f"chart | {symbol} | No data to plot")
+        mark_symbol_no_data(symbol, "chart", log_skip=False)
         return
 
     if "close" not in df.columns:
-        logging.warning(
+        logging.info(
             f"chart | {symbol} | Missing close column; skipping chart generation"
         )
-        record_error(symbol, "chart data missing close column")
+        mark_symbol_no_data(symbol, "chart", log_skip=False)
         return
 
     try:
@@ -3283,7 +3431,7 @@ def save_candle_chart(df, symbol, filename="chart.png"):
         fig.savefig(filename)
     except Exception as e:
         logging.warning(f"chart | {symbol} | plotting failed: {e}")
-        record_error(symbol, f"chart plotting failed: {e}")
+        mark_symbol_no_data(symbol, "chart", log_skip=False)
     finally:
         try:
             plt.close(fig)  # type: ignore[name-defined]
@@ -4365,6 +4513,8 @@ def run_bot():
             allow_conditional,
             fb_mode,
             inactivity_hours,
+            rsi_overbought_adj,
+            rsi_oversold_adj,
         ) = adjust_filters_for_inactivity(symbol)
         _inc_event("inactivity_hours", inactivity_hours)
         current_bar = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
@@ -4695,6 +4845,7 @@ def run_bot():
                                 trade_id = log_entry(symbol, entry_ctx, trade_log_path)
                                 pair_state.setdefault(symbol, {})["trade_id"] = trade_id
                                 symbol_activity[symbol] = now
+                                reset_inactivity(symbol)
                                 log(
                                     logging.INFO,
                                     "order",
@@ -4867,11 +5018,13 @@ def run_bot():
         # === Дополнительная фильтрация по тренду и паттернам ===
         rsi_val = df_trend["rsi"].iloc[-1]
         set_valid_leverage(exchange, symbol, mode_lev)
+        rsi_upper_limit = float(rsi_overbought_adj)
+        rsi_lower_limit = float(rsi_oversold_adj)
         if not use_fallback:
-            if signal_to_use == "long" and rsi_val > RSI_OVERBOUGHT:
+            if signal_to_use == "long" and rsi_val > rsi_upper_limit:
                 log_decision(symbol, "rsi_overbought")
                 continue
-            if signal_to_use == "short" and rsi_val < RSI_OVERSOLD:
+            if signal_to_use == "short" and rsi_val < rsi_lower_limit:
                 log_decision(symbol, "rsi_oversold")
                 continue
 
@@ -5257,6 +5410,27 @@ def run_bot_loop():
     last_analysis = time.time()
     analysis_interval = 60 * 60 * 3  # 3 hours
     while True:
+        global symbols, SYMBOL_CATEGORIES, linear_pending_symbols, _next_linear_refresh
+        now_ts = time.time()
+        if linear_pending_symbols and now_ts >= _next_linear_refresh:
+            refreshed, still_pending = filter_linear_markets(
+                ADAPTER, linear_pending_symbols, markets_cache, force_reload=True
+            )
+            if refreshed:
+                logging.info(
+                    "filter | newly enabled linear symbols: %s", ", ".join(refreshed)
+                )
+                for sym in refreshed:
+                    if sym not in symbols:
+                        symbols.append(sym)
+                    if sym in reserve_symbols:
+                        try:
+                            reserve_symbols.remove(sym)
+                        except ValueError:
+                            pass
+                SYMBOL_CATEGORIES = {s: i for i, s in enumerate(symbols)}
+            linear_pending_symbols = still_pending
+            _next_linear_refresh = now_ts + LINEAR_RECHECK_INTERVAL
         ensure_model_loaded(ADAPTER, symbols)
         try:
             run_bot()
