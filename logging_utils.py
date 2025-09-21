@@ -7,9 +7,11 @@ import time
 import sys
 from datetime import datetime, timezone
 from collections import defaultdict
+from collections.abc import Mapping
 from threading import Lock
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from memory_utils import memory_manager
 
@@ -922,15 +924,65 @@ def _normalize_order_qty(
     return float(qty_value), None
 
 
+def ensure_balance_dict(data: Any, *, context: str = "fetch_balance") -> dict:
+    """Normalize *data* to a dictionary, logging when coercion fails."""
+
+    if isinstance(data, Mapping):
+        return dict(data)
+
+    if data is None:
+        logging.warning("exchange | %s returned None; using empty balance", context)
+        return {}
+
+    if hasattr(data, "to_dict"):
+        try:
+            converted = data.to_dict()
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.warning(
+                "exchange | %s to_dict() failed for %s: %s",
+                context,
+                type(data).__name__,
+                exc,
+            )
+        else:
+            if isinstance(converted, Mapping):
+                return dict(converted)
+            data = converted
+
+    try:
+        converted = dict(data)
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.warning(
+            "exchange | %s returned %s; unable to coerce to dict: %s",
+            context,
+            type(data).__name__,
+            exc,
+        )
+        return {}
+
+    if isinstance(converted, dict):
+        return converted
+
+    logging.warning(
+        "exchange | %s returned unexpected %s; using empty balance",
+        context,
+        type(data).__name__,
+    )
+    return {}
+
+
 def safe_fetch_balance(exchange, params: dict | None = None, *, retries: int = 1, delay: float = 1.0):
     """Fetch account balance with basic rate limit handling."""
 
     attempt = 0
+    context = f"{getattr(exchange, 'id', 'exchange')}.fetch_balance"
     while True:
         try:
             if params is None:
-                return exchange.fetch_balance()
-            return exchange.fetch_balance(params)
+                raw_balance = exchange.fetch_balance()
+            else:
+                raw_balance = exchange.fetch_balance(params)
+            return ensure_balance_dict(raw_balance, context=context)
         except Exception as exc:  # pragma: no cover - network errors
             message = str(exc).lower()
             is_rate_limited = (
