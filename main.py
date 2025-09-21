@@ -3217,7 +3217,7 @@ def cancel_all_child_orders(symbol: str) -> None:
 def market_close(symbol: str) -> dict:
     """Close open position for symbol using a protected exit."""
     try:
-        positions = exchange.fetch_positions([symbol])
+        positions = exchange.fetch_positions([symbol], {"category": "linear"})
         for pos in positions:
             if float(pos.get("contracts", 0)) > 0:
                 side = pos.get("side", "").upper()
@@ -3244,14 +3244,22 @@ def market_close(symbol: str) -> dict:
 def save_candle_chart(df, symbol, filename="chart.png"):
     """Save a simple closing price chart for ``symbol``.
 
-    If ``df`` is ``None`` or empty no file is written and an error is logged.
+    Missing or incomplete data is treated as a soft failure: the function logs
+    a warning and returns without raising, allowing the caller to continue.
     The function gracefully skips plotting when ``matplotlib`` is unavailable
     or lacks the required APIs.
     """
 
     if df is None or df.empty:
-        logging.error(f"chart | {symbol} | No data to plot")
+        logging.warning(f"chart | {symbol} | No data to plot")
         record_error(symbol, "chart data missing")
+        return
+
+    if "close" not in df.columns:
+        logging.warning(
+            f"chart | {symbol} | Missing close column; skipping chart generation"
+        )
+        record_error(symbol, "chart data missing close column")
         return
 
     try:
@@ -3276,6 +3284,11 @@ def save_candle_chart(df, symbol, filename="chart.png"):
     except Exception as e:
         logging.warning(f"chart | {symbol} | plotting failed: {e}")
         record_error(symbol, f"chart plotting failed: {e}")
+    finally:
+        try:
+            plt.close(fig)  # type: ignore[name-defined]
+        except Exception:
+            pass
 
 
 def get_percent_price_limits(symbol):
@@ -4136,7 +4149,7 @@ def run_bot():
         cancel_stale_orders(symbol)
 
         try:
-            positions = exchange.fetch_positions([symbol])
+            positions = exchange.fetch_positions([symbol], {"category": "linear"})
         except Exception as e:
             record_error(symbol, f"positions fetch failed: {e}")
             logging.error(f"Failed to fetch positions for {symbol}: {e}")
@@ -4315,7 +4328,7 @@ def run_bot():
             continue
         # === Проверка открытых позиций и автоматическая фиксация прибыли ===
         try:
-            positions = exchange.fetch_positions([symbol])
+            positions = exchange.fetch_positions([symbol], {"category": "linear"})
         except Exception as e:
             record_error(symbol, f"positions fetch failed: {e}")
             logging.error(f"Failed to fetch positions for {symbol}: {e}")
@@ -4325,7 +4338,7 @@ def run_bot():
 
         # Получим список позиций повторно, чтобы не считать только что закрытую как открытую
         try:
-            positions = exchange.fetch_positions([symbol])
+            positions = exchange.fetch_positions([symbol], {"category": "linear"})
         except Exception as e:
             record_error(symbol, f"positions re-fetch failed: {e}")
             logging.error(f"Failed to re-fetch positions for {symbol}: {e}")
@@ -4895,7 +4908,7 @@ def run_bot():
 
         # [ANCHOR:NORMALIZE_DECLINE_REASONS]
         if signal_to_use == "hold":
-            positions = exchange.fetch_positions([symbol])
+            positions = exchange.fetch_positions([symbol], {"category": "linear"})
             pos_exists = any(float(pos.get("contracts", 0)) > 0 for pos in positions)
             reason = "hold_position_exists" if pos_exists else "hold_no_position"
             reset_tf_skip(symbol)
@@ -5041,7 +5054,7 @@ def run_bot():
             if fallback_cooldown.get(symbol, 0) > current_bar:
                 continue
             try:
-                positions = exchange.fetch_positions([symbol])
+                positions = exchange.fetch_positions([symbol], {"category": "linear"})
             except Exception:
                 continue
             if any(float(p.get("contracts", 0)) > 0 for p in positions):
