@@ -232,6 +232,7 @@ from logging_utils import (
     log_entry,  # не менять сигнатуру, возвращает trade_id
     log_exit_from_order,
     safe_fetch_balance,
+    ensure_balance_dict,
 )
 from reporting import build_profit_report, build_equity_curve
 from risk_management import (
@@ -553,6 +554,12 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
             continue
         df = df_tf.copy()
         df = df.rename(columns=lambda c: f"{c}_{tf}")
+        ts_col = f"timestamp_{tf}"
+        if ts_col not in df.columns:
+            df[ts_col] = range(len(df))
+        vol_col = f"volume_{tf}"
+        if vol_col not in df.columns:
+            df[vol_col] = 0.0
         dfs[tf] = df
     if not dfs:
         if warn:
@@ -2748,8 +2755,11 @@ def run_trade(
     atr_val = safe_atr(df_trend["atr"] if "atr" in df_trend.columns else None, key=symbol) or 0.0
     if entry_ctx is None:
         entry_ctx = {}
-    balance_info = safe_fetch_balance(exchange, {"type": "future"})
-    totals = balance_info.get("total") if isinstance(balance_info, dict) else None
+    balance_info = ensure_balance_dict(
+        safe_fetch_balance(exchange, {"type": "future"}),
+        context="entry.fetch_balance",
+    )
+    totals = balance_info.get("total")
     balance = float((totals or {}).get("USDT", 0.0))
     max_notional = balance * MAX_POSITION_PCT
     market = exchange.market(symbol)
@@ -3026,7 +3036,10 @@ def attempt_direct_market_entry(
 
     balance = 0.0
     try:
-        bal_info = safe_fetch_balance(exchange, {"type": "future"})
+        bal_info = ensure_balance_dict(
+            safe_fetch_balance(exchange, {"type": "future"}),
+            context="fallback.fetch_balance",
+        )
         balance = float((bal_info.get("total") or {}).get("USDT", 0.0))
     except Exception as exc:
         logging.warning("fallback trade | %s | fetch_balance failed: %s", symbol, exc)
@@ -4085,7 +4098,10 @@ def run_bot():
 
         balance = 0.0
         try:
-            bal_info = safe_fetch_balance(exchange, {"type": "future"})
+            bal_info = ensure_balance_dict(
+                safe_fetch_balance(exchange, {"type": "future"}),
+                context="health.fetch_balance",
+            )
             balance = float((bal_info.get("total") or {}).get("USDT", 0.0))
         except Exception as exc:
             logging.warning("health | %s | fetch_balance failed: %s", test_sym, exc)
@@ -4732,7 +4748,10 @@ def run_bot():
             else:
                 balance_total = 0.0
                 try:
-                    balance_info = safe_fetch_balance(exchange, {"type": "future"})
+                    balance_info = ensure_balance_dict(
+                        safe_fetch_balance(exchange, {"type": "future"}),
+                        context="pattern.fetch_balance",
+                    )
                     balance_total = float((balance_info.get("total") or {}).get("USDT", 0.0))
                 except Exception as exc:
                     logging.warning("pattern trade | %s | fetch_balance failed: %s", symbol, exc)
@@ -5094,7 +5113,10 @@ def run_bot():
             "used_fallback": use_fallback,
             "reason": entry_reason,
         }
-        balance_info = safe_fetch_balance(exchange, {"type": "future"})
+        balance_info = ensure_balance_dict(
+            safe_fetch_balance(exchange, {"type": "future"}),
+            context="entry_loop.fetch_balance",
+        )
         equity = float((balance_info.get("total") or {}).get("USDT", 0.0))
         bar_index = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
         if not limiter.can_trade(symbol, equity):
