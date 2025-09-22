@@ -49,9 +49,14 @@ def filter_supported_symbols(adapter, symbols: list[str], markets_cache) -> tupl
         now = time.time()
         needs_reload = ("dict" not in markets_cache) or (now - markets_cache.get("ts", 0) > MARKET_TTL)
         if needs_reload:
-            markets_dict = adapter.load_markets() or {}
-            markets_cache["dict"] = markets_dict
-            markets_cache["set"] = set(markets_dict)
+            markets_raw = adapter.load_markets() or {}
+            if isinstance(markets_raw, dict):
+                markets_cache["dict"] = markets_raw
+                iterable = markets_raw
+            else:
+                markets_cache.pop("dict", None)
+                iterable = markets_raw if isinstance(markets_raw, (set, list, tuple)) else []
+            markets_cache["set"] = set(iterable)
             markets_cache["ts"] = now
         markets = markets_cache.get("set", set())
     except Exception as e:  # pragma: no cover - warning only
@@ -109,12 +114,17 @@ def filter_linear_markets(
         needs_reload = force_reload or ("dict" not in markets_cache)
         needs_reload |= now - markets_cache.get("ts", 0.0) > MARKET_TTL
         if needs_reload:
-            markets_dict = adapter.load_markets() or {}
-            markets_cache["dict"] = markets_dict
-            markets_cache["set"] = set(markets_dict)
+            markets_raw = adapter.load_markets() or {}
+            if isinstance(markets_raw, dict):
+                markets_cache["dict"] = markets_raw
+                iterable = markets_raw
+            else:
+                markets_cache.pop("dict", None)
+                iterable = markets_raw if isinstance(markets_raw, (set, list, tuple)) else []
+            markets_cache["set"] = set(iterable)
             markets_cache["ts"] = now
         markets: dict | None = markets_cache.get("dict")
-        if not isinstance(markets, dict):
+        if not isinstance(markets, dict) or not markets:
             markets = None
         if markets is None:
             cached_set = markets_cache.get("set")
@@ -127,11 +137,31 @@ def filter_linear_markets(
                 # market description so callers receive the expected mapping.
                 markets = None
             if markets is None:
-                try:
-                    markets = adapter.load_markets() or {}
-                except Exception as exc:  # pragma: no cover - best effort logging
-                    logging.warning("filter | linear markets unavailable: %s", exc)
-                    return symbols[:], []
+                markets = {}
+                ccxt_adapter = getattr(adapter, "x", None)
+                if ccxt_adapter is not None:
+                    ccxt_markets = getattr(ccxt_adapter, "markets", None)
+                    if isinstance(ccxt_markets, dict) and ccxt_markets:
+                        markets = ccxt_markets
+                    elif hasattr(ccxt_adapter, "load_markets"):
+                        try:
+                            ccxt_loaded = ccxt_adapter.load_markets(False) or {}
+                        except Exception as exc:  # pragma: no cover - best effort logging
+                            logging.warning("filter | linear markets unavailable: %s", exc)
+                            return symbols[:], []
+                        if isinstance(ccxt_loaded, dict):
+                            markets = ccxt_loaded
+                if not markets:
+                    try:
+                        markets_raw = adapter.load_markets() or {}
+                    except Exception as exc:  # pragma: no cover - best effort logging
+                        logging.warning("filter | linear markets unavailable: %s", exc)
+                        return symbols[:], []
+                    if isinstance(markets_raw, dict):
+                        markets = markets_raw
+                    else:
+                        logging.warning("filter | linear metadata unavailable, skipping linear filter")
+                        return symbols[:], []
                 markets_cache["dict"] = markets
                 markets_cache["set"] = set(markets)
                 markets_cache["ts"] = now
