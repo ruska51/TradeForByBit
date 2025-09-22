@@ -113,16 +113,28 @@ def filter_linear_markets(
             markets_cache["dict"] = markets_dict
             markets_cache["set"] = set(markets_dict)
             markets_cache["ts"] = now
-        markets: dict | set = markets_cache.get("dict") or markets_cache.get("set") or {}
+        markets: dict | None = markets_cache.get("dict")
         if not isinstance(markets, dict):
-            try:
-                markets = adapter.load_markets() or {}
-            except Exception as exc:  # pragma: no cover - best effort logging
-                logging.warning("filter | linear markets unavailable: %s", exc)
-                return symbols[:], []
-            markets_cache["dict"] = markets
-            markets_cache["set"] = set(markets)
-            markets_cache["ts"] = now
+            markets = None
+        if markets is None:
+            cached_set = markets_cache.get("set")
+            if isinstance(cached_set, dict):  # pragma: no cover - defensive
+                markets = cached_set
+            elif cached_set:
+                # ``cached_set`` originates from ``set(markets_dict)`` and is
+                # therefore insufficient for accessing per-symbol metadata.
+                # When it is the only cached value we must reload the full
+                # market description so callers receive the expected mapping.
+                markets = None
+            if markets is None:
+                try:
+                    markets = adapter.load_markets() or {}
+                except Exception as exc:  # pragma: no cover - best effort logging
+                    logging.warning("filter | linear markets unavailable: %s", exc)
+                    return symbols[:], []
+                markets_cache["dict"] = markets
+                markets_cache["set"] = set(markets)
+                markets_cache["ts"] = now
     except Exception as exc:  # pragma: no cover - best effort logging
         logging.warning("filter | linear markets unavailable: %s", exc)
         return symbols[:], []
