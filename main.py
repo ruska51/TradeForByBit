@@ -601,12 +601,13 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
     return result
 
 
-def _health_check(symbols: list[str]) -> None:
-    """Verify model availability and basic data fetch before trading."""
+def _health_check(symbols: list[str]) -> list[str]:
+    """Verify model availability and ensure at least one symbol has candles."""
 
     ignore_errors = IGNORE_HEALTH_CHECK_ERRORS
     issues: list[str] = []
     data_issues: list[str] = []
+    healthy: list[str] = []
     bad_syms: list[str] = []
 
     if (
@@ -616,26 +617,27 @@ def _health_check(symbols: list[str]) -> None:
     ):
         issues.append("model_unavailable")
 
-    for sym in list(symbols):
+    probe_tf = "5m"
+    for sym in symbols:
         try:
-            df = fetch_multi_ohlcv(sym, timeframes, limit=5, warn=False)
+            candles = ADAPTER.fetch_ohlcv(sym, probe_tf, limit=10)
         except Exception as exc:  # pragma: no cover - defensive
             logging.warning("health | %s | OHLCV fetch failed: %s", sym, exc)
             data_issues.append(f"data:{sym}:{exc}")
             bad_syms.append(sym)
+            mark_symbol_no_data(sym, probe_tf, reason="health_fetch_failed", log_skip=False)
             continue
 
-        if df.empty or "close_15m" not in df.columns:
+        if not candles:
             logging.warning("health | %s | no OHLCV data", sym)
             data_issues.append(f"data:{sym}")
             bad_syms.append(sym)
+            mark_symbol_no_data(sym, probe_tf, reason="health_no_data", log_skip=False)
             continue
 
+        clear_symbol_no_data(sym, probe_tf)
         clear_symbol_no_data(sym, "multi")
-
-    for sym in bad_syms:
-        if sym in symbols:
-            symbols.remove(sym)
+        healthy.append(sym)
 
     if bad_syms:
         logging.info(
@@ -644,23 +646,83 @@ def _health_check(symbols: list[str]) -> None:
             ", ".join(bad_syms),
         )
 
-    if not symbols:
+    if not healthy:
         msg = "health check failed: no tradable symbols"
+        logging.warning("health | no tradable symbols after data probe")
         if ignore_errors:
-            logging.error("%s (ignored)", msg)
-        else:
-            logging.error(msg)
-            raise RuntimeError(msg)
+            logging.warning("%s (ignored)", msg)
+            return []
+        logging.error(msg)
+        raise RuntimeError(msg)
 
     if issues or data_issues:
         msg = "health check failed: " + ", ".join(issues + data_issues)
         if ignore_errors:
-            logging.error("%s (ignored)", msg)
+            logging.warning("%s (ignored)", msg)
         elif issues:
             logging.error(msg)
             raise RuntimeError(msg)
         else:
             logging.warning(msg)
+
+    return healthy
+
+
+def _refresh_tradable_symbols(banned: list[str]) -> list[str]:
+    """Attempt to reload markets and find alternative tradable symbols."""
+
+    logging.warning("health | attempting to refresh tradable symbol list")
+    try:
+        ADAPTER.load_markets_safe()
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.warning("health | load_markets_safe failed: %s", exc)
+
+    candidates: list[str] = []
+    try:
+        candidates = asyncio.run(scan_symbols(top_n=BASE_SYMBOL_COUNT))
+    except RuntimeError as exc:
+        logging.warning("health | scan_symbols unavailable: %s", exc)
+        try:
+            loop: asyncio.AbstractEventLoop | None = None
+            prev_loop: asyncio.AbstractEventLoop | None = None
+            try:
+                prev_loop = asyncio.get_event_loop()
+            except RuntimeError:
+                prev_loop = None
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            candidates = loop.run_until_complete(scan_symbols(top_n=BASE_SYMBOL_COUNT))
+        except Exception as exc2:  # pragma: no cover - defensive
+            logging.warning("health | scan_symbols retry failed: %s", exc2)
+        finally:
+            try:
+                if loop is not None:
+                    loop.close()
+            except Exception:
+                pass
+            if prev_loop is not None:
+                asyncio.set_event_loop(prev_loop)
+            else:
+                asyncio.set_event_loop(None)
+    except Exception as exc:  # pragma: no cover - network issues
+        logging.warning("health | scan_symbols failed: %s", exc)
+
+    if not candidates:
+        return []
+
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for sym in candidates:
+        if sym in seen or sym in banned:
+            continue
+        seen.add(sym)
+        filtered.append(sym)
+    if filtered:
+        logging.info(
+            "health | recovered %d symbol(s) from scan", len(filtered)
+        )
+    return filtered
+
 
 # === Подгружаем обученную модель CNN ===
 # Если файл отсутствует, создаём небольшую обучающую выборку
@@ -4099,11 +4161,33 @@ def run_bot():
     _LOGGED_EXIT_IDS.clear()
 
     skip_summary = {"model": [], "data": []}
+    def _attempt_symbol_recovery() -> list[str]:
+        recovered_candidates = _refresh_tradable_symbols(banned)
+        if not recovered_candidates:
+            return []
+        try:
+            return _health_check(recovered_candidates)
+        except Exception as exc:
+            logging.warning("health | recovery check failed: %s", exc)
+            return []
+
     try:
-        _health_check(active_symbols)
+        active_symbols = _health_check(active_symbols)
     except Exception as e:
         logging.warning("health | pre-run check failed: %s", e)
-        return
+        recovered = _attempt_symbol_recovery()
+        if not recovered:
+            return
+        active_symbols = recovered
+
+    if not active_symbols:
+        recovered = _attempt_symbol_recovery()
+        if recovered:
+            active_symbols = recovered
+        elif not IGNORE_HEALTH_CHECK_ERRORS:
+            logging.warning("health | no tradable symbols after recovery; aborting run")
+            return
+
     if active_symbols:
         test_sym = "ETH/USDT" if "ETH/USDT" in active_symbols else active_symbols[0]
 

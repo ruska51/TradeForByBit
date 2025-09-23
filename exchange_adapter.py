@@ -203,7 +203,7 @@ class ExchangeAdapter:
 
         if self.futures:
             if self.exchange_id.startswith("bybit"):
-                options: dict[str, str] = {"defaultType": "linear"}
+                options: dict[str, str] = {"defaultType": "swap", "defaultSubType": "linear"}
             else:
                 options = {"defaultType": "future", "defaultSubType": "linear"}
         else:
