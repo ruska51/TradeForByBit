@@ -82,10 +82,17 @@ def set_valid_leverage(exchange, symbol: str, desired: int):
     L = int((L // step) * step)
 
     try:
+        params = {"category": "linear"} if getattr(exchange, "id", "") == "bybit" else {}
         if hasattr(exchange, "set_leverage"):
-            exchange.set_leverage(L, symbol)
+            try:
+                exchange.set_leverage(L, symbol, params)
+            except TypeError:
+                exchange.set_leverage(L, symbol)
         else:
-            exchange.setLeverage(L, symbol)  # type: ignore[attr-defined]
+            try:
+                exchange.setLeverage(L, symbol, params)  # type: ignore[attr-defined]
+            except TypeError:
+                exchange.setLeverage(L, symbol)  # type: ignore[attr-defined]
         logging.info("leverage | %s | set %s", symbol, L)
     except Exception as e:  # pragma: no cover - network errors
         logging.warning(

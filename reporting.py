@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from logging_utils import ensure_report_schema
+from utils.csv_utils import read_csv_safe
 
 
 def _resolve_timestamp_column(df: pd.DataFrame) -> pd.Series:
@@ -34,7 +35,7 @@ def build_profit_report(trades_log_path: str, out_path: str) -> pd.DataFrame:
             os.remove(out_path)
         except OSError:
             pass
-    df = pd.read_csv(trades_log_path) if pd.io.common.file_exists(trades_log_path) else pd.DataFrame()
+    df = read_csv_safe(trades_log_path)
     if df.empty:
         out = pd.DataFrame(columns=[
             "timestamp",
@@ -96,7 +97,7 @@ def build_equity_curve(trades_log_path: str, out_path: str) -> pd.DataFrame:
             os.remove(out_path)
         except OSError:
             pass
-    df = pd.read_csv(trades_log_path) if pd.io.common.file_exists(trades_log_path) else pd.DataFrame()
+    df = read_csv_safe(trades_log_path)
     if df.empty:
         out = pd.DataFrame(columns=["timestamp", "equity"])
         out.to_csv(out_path, index=False)

@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import requests
-import pandas as pd
 from fastapi import FastAPI
+
+from utils.csv_utils import read_csv_safe
 
 
 def send_telegram_alert(text: str, token: str, chat_id: str) -> None:
@@ -18,5 +19,5 @@ app = FastAPI()
 @app.get("/equity")
 async def equity_curve() -> list[dict]:
     """Return equity log as a list of records for plotting."""
-    df = pd.read_csv("equity_log.csv")
+    df = read_csv_safe("equity_log.csv")
     return df.to_dict("records")

@@ -5,6 +5,7 @@ import sys
 import pandas as pd
 
 import main
+from utils.csv_utils import read_csv_safe
 
 
 def _setup_env(tmp_path, monkeypatch, *, confirm_trend=True, limiter_ok=True, cool_ok=True):
@@ -142,14 +143,14 @@ def test_safety_sweep_logs_once(tmp_path, monkeypatch):
     )
 
     main.run_bot()
-    df = pd.read_csv(log_path)
+    df = read_csv_safe(log_path)
     assert len(df) == 1
     assert df["exit_type"].iloc[0] == "SL"
     assert reverse_calls == []
 
     # second run: no duplicates
     main.run_bot()
-    df2 = pd.read_csv(log_path)
+    df2 = read_csv_safe(log_path)
     assert len(df2) == 1
 
 
@@ -159,7 +160,7 @@ def test_safety_sweep_triggers_reverse(tmp_path, monkeypatch):
     )
 
     main.run_bot()
-    df = pd.read_csv(log_path)
+    df = read_csv_safe(log_path)
     assert len(df) == 1
     assert len(reverse_calls) == 1
     # side of reverse is opposite

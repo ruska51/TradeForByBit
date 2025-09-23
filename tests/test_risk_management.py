@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 
 from risk_management import confirm_trend, maybe_invert_position
+from utils.csv_utils import read_csv_safe
 
 
 def _make_df(direction: str, n: int = 250) -> pd.DataFrame:
@@ -59,7 +60,7 @@ def test_confirm_trend_weak_trend_logged(tmp_path, monkeypatch):
     ok, reason = confirm_trend(data, 'LONG', symbol='BTC/USDT', return_reason=True)
     assert ok is True
     assert reason == 'weak_trend'
-    log = pd.read_csv(tmp_path / 'decision_log.csv')
+    log = read_csv_safe(tmp_path / 'decision_log.csv')
     assert 'weak_trend' in log['reason'].tolist()
 
 

@@ -20,6 +20,7 @@ import pandas as pd
 
 from exchange_adapter import ExchangeAdapter
 from logging_utils import ensure_report_schema
+from utils.csv_utils import read_csv_safe
 
 MIN_NOTIONAL = getattr(sys.modules.get("main"), "MIN_NOTIONAL", 10.0)
 
@@ -107,7 +108,7 @@ def save_state(state: Dict[str, PairState]) -> None:
 def update_pair_stats(log_path: str = 'trades_log.csv', lookback: int = 10) -> dict:
     if not os.path.exists(log_path):
         return {}
-    df = pd.read_csv(log_path)
+    df = read_csv_safe(log_path)
     stats = {}
     for symbol, grp in df.groupby('symbol'):
         last = grp.tail(lookback)

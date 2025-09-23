@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta, timezone
-from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
 from reporting import build_profit_report, build_equity_curve
+from utils.csv_utils import read_csv_safe
 
 
 def _iso(dt: datetime) -> str:
@@ -41,8 +41,8 @@ def test_profit_and_equity_reports(tmp_path):
     build_profit_report(str(trades_path), str(profit_path))
     build_equity_curve(str(trades_path), str(equity_path))
 
-    df_profit = pd.read_csv(profit_path)
-    df_equity = pd.read_csv(equity_path)
+    df_profit = read_csv_safe(profit_path)
+    df_equity = read_csv_safe(equity_path)
 
     assert df_profit["pnl_net"].round(2).tolist() == [10.0, -5.0, 15.0]
     assert df_profit["cum_pnl"].round(2).tolist() == [10.0, 5.0, 20.0]
