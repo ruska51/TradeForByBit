@@ -16,11 +16,43 @@ sys.modules.pop("asset_scanner", None)
 class DummyExchangeSync:
     def fetch_markets(self):
         return [
-            {"symbol": "AAA/USDT", "quote": "USDT", "base": "AAA", "info": {"status": "TRADING", "quoteVolume": "200000"}},
-            {"symbol": "BBB/USDT", "quote": "USDT", "base": "BBBUP", "info": {"status": "TRADING", "quoteVolume": "500000"}},
-            {"symbol": "CCC/USDT", "quote": "USDT", "base": "CCC", "info": {"status": "BREAK", "quoteVolume": "150000"}},
-            {"symbol": "DDD/USDT", "quote": "USDT", "base": "DDD", "info": {"status": "TRADING", "quoteVolume": "90000"}},
+            {
+                "symbol": "AAA/USDT",
+                "quote": "USDT",
+                "base": "AAA",
+                "contract": True,
+                "linear": True,
+                "info": {"status": "TRADING", "quoteVolume": "200000"},
+            },
+            {
+                "symbol": "BBB/USDT",
+                "quote": "USDT",
+                "base": "BBBUP",
+                "contract": True,
+                "linear": True,
+                "info": {"status": "TRADING", "quoteVolume": "500000"},
+            },
+            {
+                "symbol": "CCC/USDT",
+                "quote": "USDT",
+                "base": "CCC",
+                "contract": True,
+                "linear": True,
+                "info": {"status": "BREAK", "quoteVolume": "150000"},
+            },
+            {
+                "symbol": "DDD/USDT",
+                "quote": "USDT",
+                "base": "DDD",
+                "contract": True,
+                "linear": True,
+                "info": {"status": "TRADING", "quoteVolume": "90000"},
+            },
         ]
+
+    def load_markets(self):
+        markets = self.fetch_markets()
+        return {m["symbol"]: m for m in markets}
 
     def fetch_ohlcv(self, symbol, timeframe="1d", limit=90):
         prices = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5]
@@ -54,6 +86,9 @@ from asset_scanner import scan_markets, scan_symbols  # pylint: disable=wrong-im
 class DummyExchange(DummyExchangeSync):
     async def fetch_markets(self):
         return super().fetch_markets()
+
+    async def load_markets(self):
+        return super().load_markets()
 
     async def fetch_ohlcv(self, symbol, timeframe="1d", limit=90):
         return super().fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -95,9 +130,27 @@ def test_scan_symbols_top_n(monkeypatch):
     class ExchangeA(DummyExchangeSync):
         def fetch_markets(self):
             return [
-                {"symbol": "AAA/USDT", "quote": "USDT", "base": "AAA", "info": {"status": "TRADING", "quoteVolume": "200000"}},
-                {"symbol": "EEE/USDT", "quote": "USDT", "base": "EEE", "info": {"status": "TRADING", "quoteVolume": "200000"}},
+                {
+                    "symbol": "AAA/USDT",
+                    "quote": "USDT",
+                    "base": "AAA",
+                    "contract": True,
+                    "linear": True,
+                    "info": {"status": "TRADING", "quoteVolume": "200000"},
+                },
+                {
+                    "symbol": "EEE/USDT",
+                    "quote": "USDT",
+                    "base": "EEE",
+                    "contract": True,
+                    "linear": True,
+                    "info": {"status": "TRADING", "quoteVolume": "200000"},
+                },
             ]
+
+        def load_markets(self):
+            markets = self.fetch_markets()
+            return {m["symbol"]: m for m in markets}
 
         def fetch_ohlcv(self, symbol, timeframe="1d", limit=90):
             if symbol == "AAA/USDT":
@@ -109,6 +162,9 @@ def test_scan_symbols_top_n(monkeypatch):
     class ExchangeAAsync(ExchangeA):
         async def fetch_markets(self):
             return super().fetch_markets()
+
+        async def load_markets(self):
+            return super().load_markets()
 
         async def fetch_ohlcv(self, symbol, timeframe="1d", limit=90):
             return super().fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -122,6 +178,7 @@ def test_scan_symbols_top_n(monkeypatch):
     monkeypatch.setattr(ccxt, "bybit", lambda *args, **kwargs: ExchangeA())
     try:
         import ccxt.pro as ccxtpro  # type: ignore
+
         monkeypatch.setattr(ccxtpro, "bybit", lambda *args, **kwargs: ExchangeAAsync())
     except Exception:
         pass

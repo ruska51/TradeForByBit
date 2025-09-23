@@ -198,16 +198,25 @@ async def scan_symbols(min_volume: float = 300_000,
         exchange = ccxtpro.bybit(params)
         if hasattr(exchange, "set_sandbox_mode"):
             exchange.set_sandbox_mode(sandbox)
-        markets = await exchange.fetch_markets()
+        markets = await exchange.load_markets()
     else:
         exchange = ccxt.bybit(params)
         if hasattr(exchange, "set_sandbox_mode"):
             exchange.set_sandbox_mode(sandbox)
-        markets = await asyncio.to_thread(exchange.fetch_markets)
+        markets = await asyncio.to_thread(exchange.load_markets)
+
+    if isinstance(markets, dict):
+        market_list = list(markets.values())
+    else:
+        market_list = list(markets or [])
 
     candidates: list[dict] = []
-    for m in markets:
+    for m in market_list:
         if m.get("quote") != "USDT":
+            continue
+        if not m.get("contract"):
+            continue
+        if not m.get("linear"):
             continue
         status = m.get("info", {}).get("status") or m.get("active")
         if status not in {"TRADING", True}:

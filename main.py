@@ -570,7 +570,7 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
             logging.info(
                 "data | %s | no OHLCV for required timeframes; skipping", symbol
             )
-        mark_symbol_no_data(symbol, "multi", reason="no_data", log_skip=True)
+        mark_symbol_no_data(symbol, "multi", reason="no_data", log_skip=warn)
         return pd.DataFrame()
 
     ordered = [tf for tf in timeframes if tf in dfs]
@@ -584,6 +584,8 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
             right_on=f"timestamp_{tf}",
             direction="backward",
         )
+
+    clear_symbol_no_data(symbol, "multi")
 
     missing = [tf for tf in timeframes if tf not in dfs]
     if missing:
@@ -601,24 +603,64 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
 
 def _health_check(symbols: list[str]) -> None:
     """Verify model availability and basic data fetch before trading."""
+
+    ignore_errors = IGNORE_HEALTH_CHECK_ERRORS
     issues: list[str] = []
+    data_issues: list[str] = []
+    bad_syms: list[str] = []
+
     if (
         GLOBAL_MODEL is None
         or not hasattr(GLOBAL_MODEL, "classes_")
         or len(getattr(GLOBAL_MODEL, "classes_", [])) < 3
     ):
         issues.append("model_unavailable")
-    for sym in symbols:
+
+    for sym in list(symbols):
         try:
             df = fetch_multi_ohlcv(sym, timeframes, limit=5, warn=False)
-            if df.empty or "close_15m" not in df.columns:
-                issues.append(f"data:{sym}")
-        except Exception as e:  # pragma: no cover - defensive
-            issues.append(f"data:{sym}:{e}")
-    if issues:
-        msg = "health check failed: " + ", ".join(issues)
-        logging.error(msg)
-        raise RuntimeError(msg)
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.warning("health | %s | OHLCV fetch failed: %s", sym, exc)
+            data_issues.append(f"data:{sym}:{exc}")
+            bad_syms.append(sym)
+            continue
+
+        if df.empty or "close_15m" not in df.columns:
+            logging.warning("health | %s | no OHLCV data", sym)
+            data_issues.append(f"data:{sym}")
+            bad_syms.append(sym)
+            continue
+
+        clear_symbol_no_data(sym, "multi")
+
+    for sym in bad_syms:
+        if sym in symbols:
+            symbols.remove(sym)
+
+    if bad_syms:
+        logging.info(
+            "health | removed %d symbol(s) without OHLCV: %s",
+            len(bad_syms),
+            ", ".join(bad_syms),
+        )
+
+    if not symbols:
+        msg = "health check failed: no tradable symbols"
+        if ignore_errors:
+            logging.error("%s (ignored)", msg)
+        else:
+            logging.error(msg)
+            raise RuntimeError(msg)
+
+    if issues or data_issues:
+        msg = "health check failed: " + ", ".join(issues + data_issues)
+        if ignore_errors:
+            logging.error("%s (ignored)", msg)
+        elif issues:
+            logging.error(msg)
+            raise RuntimeError(msg)
+        else:
+            logging.warning(msg)
 
 # === Подгружаем обученную модель CNN ===
 # Если файл отсутствует, создаём небольшую обучающую выборку
@@ -937,6 +979,9 @@ FALLBACK_MODE_ENABLED = os.getenv("FALLBACK_MODE", "0").strip().lower() in {
     "yes",
     "on",
 }
+IGNORE_HEALTH_CHECK_ERRORS = os.getenv(
+    "IGNORE_HEALTH_CHECK_ERRORS", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 INACTIVITY_RELAX_CYCLES = max(1, _env_int("INACTIVITY_RELAX_CYCLES", 3))
 PROBA_RELAX_STEP = _env_float("INACTIVITY_PROBA_STEP", 0.05)
 MIN_DYNAMIC_PROBA = _env_float("MIN_DYNAMIC_PROBA", 0.4)
