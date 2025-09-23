@@ -4,13 +4,13 @@ from datetime import datetime, timedelta, timezone
 import types
 import sys
 
-import pandas as pd
 import pytest
 
 from logging_utils import log_entry, log_exit_from_order, _ENTRY_CACHE
 from reporting import build_profit_report, build_equity_curve
 from risk_management import should_activate_trailing, trail_levels
 from memory_utils import memory_manager
+from utils.csv_utils import read_csv_safe
 
 
 def _iso(base: datetime, offset_min: int) -> str:
@@ -78,8 +78,8 @@ def test_dry_cycle_builds_reports(tmp_path, monkeypatch):
 
     assert trail_vals == sorted(trail_vals)
 
-    df_entries = pd.read_csv(entries_log)
-    df_trades = pd.read_csv(trades_log)
+    df_entries = read_csv_safe(entries_log)
+    df_trades = read_csv_safe(trades_log)
     df_trades.rename(
         columns={"timestamp_exit": "timestamp_close", "timestamp_entry": "entry_time"},
         inplace=True,
@@ -96,8 +96,8 @@ def test_dry_cycle_builds_reports(tmp_path, monkeypatch):
     build_profit_report(str(trades_log), str(profit_report))
     build_equity_curve(str(trades_log), str(equity_curve))
 
-    df_profit = pd.read_csv(profit_report)
-    df_equity = pd.read_csv(equity_curve)
+    df_profit = read_csv_safe(profit_report)
+    df_equity = read_csv_safe(equity_curve)
 
     assert len(df_profit) == len(trades)
     total_pnl = df_trades["pnl_net"].sum()

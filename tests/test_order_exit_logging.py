@@ -1,13 +1,11 @@
 from datetime import datetime, timezone
-import types
 import sys
 import types
-from datetime import datetime, timezone
 
-import pandas as pd
 import pytest
 
 from logging_utils import log_exit_from_order
+from utils.csv_utils import read_csv_safe
 
 
 _processed_order_ids: set[str] = set()
@@ -44,7 +42,7 @@ def test_log_exit_from_stop_order(tmp_path, main_ctx):
     }
     order = {"type": "STOP_MARKET", "avgPrice": 95.0}
     assert log_exit_from_order(symbol, order, 0.0006, str(path))
-    df = pd.read_csv(path)
+    df = read_csv_safe(path)
     assert df.iloc[0]["exit_type"] == "SL"
     assert df.iloc[0]["trade_id"] == "t1"
     assert "timestamp_entry" in df.columns
@@ -71,7 +69,7 @@ def test_log_exit_trailing_stop(tmp_path, main_ctx):
     }
     order = {"type": "STOP_MARKET", "avgPrice": 102.0}
     assert log_exit_from_order(symbol, order, 0.0006, str(path))
-    df = pd.read_csv(path)
+    df = read_csv_safe(path)
     assert df.iloc[0]["exit_type"] == "TRAIL_STOP"
     assert df.iloc[0]["trail_triggered"]
     assert not df.iloc[0]["time_stop_triggered"]
@@ -93,7 +91,7 @@ def test_log_exit_take_profit(tmp_path, main_ctx):
     }
     order = {"type": "TAKE_PROFIT", "avgPrice": 105.0}
     assert log_exit_from_order(symbol, order, 0.0006, str(path))
-    df = pd.read_csv(path)
+    df = read_csv_safe(path)
     assert df.iloc[0]["exit_type"] == "TP"
 
 
@@ -113,7 +111,7 @@ def test_log_exit_time_stop(tmp_path, main_ctx):
     }
     order = {"type": "MARKET", "avgPrice": 99.0}
     assert log_exit_from_order(symbol, order, 0.0006, str(path))
-    df = pd.read_csv(path)
+    df = read_csv_safe(path)
     assert df.iloc[0]["exit_type"] == "TIME"
 
 
@@ -144,6 +142,6 @@ def test_sweep_idempotent(tmp_path, main_ctx):
 
     assert sweep_once()
     assert not sweep_once()
-    df = pd.read_csv(path)
+    df = read_csv_safe(path)
     assert len(df) == 1
 

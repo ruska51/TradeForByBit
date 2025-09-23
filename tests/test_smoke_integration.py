@@ -14,6 +14,7 @@ from risk_management import (
 )
 import logging_utils
 from reporting import build_profit_report, build_equity_curve
+from utils.csv_utils import read_csv_safe
 
 
 
@@ -164,7 +165,7 @@ def test_roi_closes_market_and_cleans_children(monkeypatch, tmp_path):
         pair_state.pop(symbol, None)
     main.trailing_memory.pop(f"{symbol}_long", None)
 
-    df = pd.read_csv(log_path)
+    df = read_csv_safe(log_path)
     assert len(df) == 1
     assert df.iloc[0]["exit_type"] == "TP"
     assert cancelled == [symbol]
@@ -192,7 +193,7 @@ def test_time_stop_closes_and_logs_once(tmp_path):
     assert main.log_exit_from_order(symbol, order, 0.0, str(log_path))
     assert not main.log_exit_from_order(symbol, order, 0.0, str(log_path))
 
-    df = pd.read_csv(log_path)
+    df = read_csv_safe(log_path)
     assert len(df) == 1
     assert df.iloc[0]["exit_type"] == "TIME"
 
@@ -222,7 +223,7 @@ def test_symbol_ban_and_soft_risk(tmp_path):
     }
     main.log_trade(base + timedelta(minutes=80), symbol, "LONG", 100.0, 101.0, 1.0, 1.0, "MANUAL", str(log_path))
 
-    df = pd.read_csv(log_path)
+    df = read_csv_safe(log_path)
     assert df["reduced_risk"].iloc[0] == 1
     assert "entry_time" in df.columns
     assert "source" in df.columns
@@ -241,9 +242,9 @@ def test_reports_from_trades_log_consistent(tmp_path):
     build_profit_report(str(trades_log), str(profit_report))
     build_equity_curve(str(trades_log), str(equity_curve))
 
-    df_trades = pd.read_csv(trades_log)
-    df_profit = pd.read_csv(profit_report)
-    df_equity = pd.read_csv(equity_curve)
+    df_trades = read_csv_safe(trades_log)
+    df_profit = read_csv_safe(profit_report)
+    df_equity = read_csv_safe(equity_curve)
 
     assert df_profit["pnl_net"].round(2).tolist() == df_trades["profit"].round(2).tolist()
     assert df_equity["equity"].iloc[-1] == round(df_trades["profit"].sum(), 2)

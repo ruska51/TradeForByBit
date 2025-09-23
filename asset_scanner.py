@@ -20,6 +20,7 @@ from metrics_utils import backtest_metrics
 from exchange_adapter import ExchangeAdapter
 
 ADAPTER: ExchangeAdapter | None = None
+SKIPPED_SYMBOLS: set[str] = set()
 
 
 def _get_adapter() -> ExchangeAdapter:
@@ -232,6 +233,20 @@ async def scan_symbols(min_volume: float = 300_000,
     async def check_symbol(m: dict) -> None:
         symbol = m.get("symbol")
         if not symbol or ":" in symbol:
+            return
+        if symbol in SKIPPED_SYMBOLS:
+            return
+        try:
+            probe = await asyncio.to_thread(_get_adapter().fetch_ohlcv, symbol, "5m", 10)
+        except Exception as exc:  # pragma: no cover - network errors
+            if symbol not in SKIPPED_SYMBOLS:
+                log(logging.WARNING, "scan", symbol, f"probe failed: {exc}")
+                SKIPPED_SYMBOLS.add(symbol)
+            return
+        if not probe:
+            if symbol not in SKIPPED_SYMBOLS:
+                log(logging.WARNING, "scan", symbol, "probe empty; skipping")
+                SKIPPED_SYMBOLS.add(symbol)
             return
         if HAS_PRO:
             try:

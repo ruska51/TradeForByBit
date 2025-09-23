@@ -1,7 +1,7 @@
-import pandas as pd
 from datetime import datetime, timedelta, timezone
 
 import main
+from utils.csv_utils import read_csv_safe
 
 
 def test_calm_market_replay(tmp_path):
@@ -30,7 +30,7 @@ def test_calm_market_replay(tmp_path):
     main.log_trade(
         datetime.now(timezone.utc), symbol, "long", 100, 101, 1, 1, "TEST", str(log_path)
     )
-    df = pd.read_csv(log_path)
+    df = read_csv_safe(log_path)
     assert len(df) >= 1
     assert main.symbol_inactivity_cycles[symbol] == 0
 

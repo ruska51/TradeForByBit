@@ -31,7 +31,7 @@ import time
 from datetime import datetime, timezone
 import asyncio
 import math
-from typing import Callable, Dict, List, Any
+from typing import Callable, Dict, List, Any, Tuple
 from dataclasses import dataclass, asdict
 import optuna
 try:
@@ -76,6 +76,7 @@ from sklearn.preprocessing import StandardScaler
 from collections import Counter, defaultdict
 from uuid import uuid4
 from utils.data_prep import fetch_and_prepare_training_data
+from utils.csv_utils import read_csv_safe, ensure_csv_integrity
 
 try:
     import torch
@@ -224,7 +225,6 @@ from exchange_adapter import (
     set_valid_leverage,
     safe_fetch_closed_orders,
 )
-from typing import Dict, Tuple
 from logging_utils import (
     ensure_trades_csv_header,
     ensure_report_schema,
@@ -270,6 +270,23 @@ touch_csv(
 touch_csv("equity_curve.csv", ["timestamp", "equity"])
 touch_csv("decision_log.csv", ["timestamp", "symbol", "signal", "reason"])
 
+ensure_csv_integrity(ROOT / "trades_log.csv", TRADES_CSV_HEADER)
+ensure_csv_integrity(
+    ROOT / "profit_report.csv",
+    [
+        "timestamp",
+        "symbol",
+        "pnl_net",
+        "cum_pnl",
+        "winrate",
+        "avg_win",
+        "avg_loss",
+        "sharpe",
+        "max_dd",
+    ],
+)
+ensure_csv_integrity(ROOT / "equity_curve.csv", ["timestamp", "equity"])
+
 # лог-пути
 trade_log_path = str(ROOT / "trades_log.csv")
 profit_report_path = str(ROOT / "profit_report.csv")
@@ -311,6 +328,8 @@ if "symbol_data_health" not in globals():
 if "linear_pending_symbols" not in globals():
     linear_pending_symbols: list[str] = []
     _next_linear_refresh = 0.0
+if "skipped_symbols" not in globals():
+    skipped_symbols: set[str] = set()
 
 
 def load_trades(csv_file: str = "trades_log.csv", create: bool = False) -> pd.DataFrame:
@@ -335,7 +354,7 @@ def load_trades(csv_file: str = "trades_log.csv", create: bool = False) -> pd.Da
             pd.DataFrame(columns=cols).to_csv(path, index=False)
         else:
             raise FileNotFoundError(csv_file)
-    return pd.read_csv(path)
+    return read_csv_safe(path, expected_columns=TRADES_CSV_HEADER)
 
 
 def _coerce_exit_type(df: pd.DataFrame) -> pd.DataFrame:
@@ -601,6 +620,60 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
     return result
 
 
+def _filter_symbols_with_history(
+    symbols: list[str],
+    *,
+    probe_tf: str = "5m",
+    limit: int = 10,
+    reason: str = "probe",
+) -> tuple[list[str], list[str]]:
+    """Return symbols with available history and list of skipped ones."""
+
+    fetcher = getattr(ADAPTER, "fetch_ohlcv", None)
+    if not callable(fetcher):
+        return symbols[:], []
+
+    available: list[str] = []
+    newly_skipped: list[str] = []
+    marker = globals().get("mark_symbol_no_data")
+    for sym in symbols:
+        if sym in skipped_symbols and sym not in open_trade_ctx:
+            continue
+        try:
+            candles = fetcher(sym, probe_tf, limit=limit)
+        except Exception as exc:  # pragma: no cover - defensive network guard
+            if sym not in skipped_symbols:
+                logging.warning("data | %s | %s fetch failed: %s", sym, probe_tf, exc)
+                skipped_symbols.add(sym)
+                if callable(marker):
+                    marker(sym, probe_tf, reason=f"{reason}_fetch_failed", log_skip=False)
+                if sym not in open_trade_ctx:
+                    newly_skipped.append(sym)
+            if sym not in open_trade_ctx:
+                continue
+            logging.debug("data | %s | keeping symbol with open trade despite probe failure", sym)
+        probe_empty = False
+        if candles is None:
+            probe_empty = True
+        elif hasattr(candles, "empty"):
+            probe_empty = bool(getattr(candles, "empty"))
+        else:
+            probe_empty = not bool(candles)
+        if probe_empty:
+            if sym not in skipped_symbols:
+                logging.warning("data | %s | %s empty; skipping", sym, probe_tf)
+                skipped_symbols.add(sym)
+                if callable(marker):
+                    marker(sym, probe_tf, reason=f"{reason}_empty", log_skip=False)
+                if sym not in open_trade_ctx:
+                    newly_skipped.append(sym)
+            if sym not in open_trade_ctx:
+                continue
+            logging.debug("data | %s | keeping symbol with open trade despite empty probe", sym)
+        available.append(sym)
+    return available, newly_skipped
+
+
 def _health_check(symbols: list[str]) -> list[str]:
     """Verify model availability and ensure at least one symbol has candles."""
 
@@ -620,7 +693,7 @@ def _health_check(symbols: list[str]) -> list[str]:
     probe_tf = "5m"
     for sym in symbols:
         try:
-            candles = ADAPTER.fetch_ohlcv(sym, probe_tf, limit=10)
+            candles = fetch_ohlcv(sym, probe_tf, limit=10)
         except Exception as exc:  # pragma: no cover - defensive
             logging.warning("health | %s | OHLCV fetch failed: %s", sym, exc)
             data_issues.append(f"data:{sym}:{exc}")
@@ -628,7 +701,14 @@ def _health_check(symbols: list[str]) -> list[str]:
             mark_symbol_no_data(sym, probe_tf, reason="health_fetch_failed", log_skip=False)
             continue
 
-        if not candles:
+        is_empty = False
+        if candles is None:
+            is_empty = True
+        elif hasattr(candles, "empty"):
+            is_empty = bool(getattr(candles, "empty"))
+        else:
+            is_empty = not bool(candles)
+        if is_empty:
             logging.warning("health | %s | no OHLCV data", sym)
             data_issues.append(f"data:{sym}")
             bad_syms.append(sym)
@@ -795,7 +875,7 @@ def ensure_patterns_dataset(data_dir: str) -> None:
 
         csv_path = os.path.join(data_dir, "Patterns.csv")
         if os.path.exists(csv_path):
-            df = pd.read_csv(csv_path)
+            df = read_csv_safe(csv_path)
             for cls_name, group in df.groupby("ClassName"):
                 folder = os.path.join(data_dir, cls_name.lower().replace(" ", "_"))
                 os.makedirs(folder, exist_ok=True)
@@ -1322,7 +1402,7 @@ def load_last_trade_times(
     """Load last trade timestamp for each symbol from trade log."""
     if os.path.exists(log_path):
         try:
-            df = pd.read_csv(log_path)
+            df = read_csv_safe(log_path)
             if "timestamp" in df.columns and "symbol" in df.columns:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
                 return df.groupby("symbol")["timestamp"].max().to_dict()
@@ -1485,6 +1565,9 @@ if pending_linear:
     for sym in pending_linear:
         if sym not in linear_pending_symbols:
             linear_pending_symbols.append(sym)
+symbols, startup_skipped = _filter_symbols_with_history(symbols, reason="startup")
+if startup_skipped:
+    logging.info("filter | removed symbols lacking 5m data: %s", ", ".join(startup_skipped))
 BASE_SYMBOL_COUNT = len(symbols)
 reserve_symbols, _res_removed, _res_degraded = filter_supported_symbols(
     ADAPTER, risk_config.get("reserve_symbols", []), markets_cache
@@ -1498,6 +1581,9 @@ if reserve_pending:
         if sym not in linear_pending_symbols:
             linear_pending_symbols.append(sym)
 reserve_symbols = reserve_linear
+reserve_symbols, reserve_skipped = _filter_symbols_with_history(reserve_symbols, reason="reserve")
+if reserve_skipped:
+    logging.info("filter | reserve symbols removed due to missing 5m data: %s", ", ".join(reserve_skipped))
 _next_linear_refresh = time.time() + LINEAR_RECHECK_INTERVAL
 
 SYMBOL_CATEGORIES = {s: i for i, s in enumerate(symbols)}
@@ -1787,7 +1873,7 @@ features_used = [
 
 # ---- Мультифрейм! ----
 # include 30m and 4h timeframes for broader signal analysis
-timeframes = ["5m", "15m", "30m", "1h", "4h", "12h", "1d"]
+timeframes = ["5m", "15m", "30m", "1h", "4h"]
 try:
     GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = load_global_bundle()
     logging.info("main | loaded global bundle | classes=%s", GLOBAL_CLASSES)
@@ -1972,7 +2058,7 @@ def prepare_profit_dataset(symbol: str, profit_csv: str = "profit_report.csv") -
     if not path.exists() or path.stat().st_size == 0:
         return pd.DataFrame()
     try:
-        trades = pd.read_csv(path)
+        trades = read_csv_safe(path)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
     if "symbol" in trades.columns:
@@ -2454,7 +2540,7 @@ def backtest(symbol, tf="15m", horizon: int | None = None):
     )
     header = not os.path.exists(report_path)
     if not header:
-        prev = pd.read_csv(report_path)
+        prev = read_csv_safe(report_path)
         if "return" in prev.columns:
             cumulative = (prev["return"] + 1).prod() - 1
         else:
@@ -4161,6 +4247,11 @@ def run_bot():
     _LOGGED_EXIT_IDS.clear()
 
     skip_summary = {"model": [], "data": []}
+
+    def _record_skip(category: str, symbol: str) -> None:
+        if symbol not in skip_summary[category]:
+            skip_summary[category].append(symbol)
+
     def _attempt_symbol_recovery() -> list[str]:
         recovered_candidates = _refresh_tradable_symbols(banned)
         if not recovered_candidates:
@@ -4170,6 +4261,10 @@ def run_bot():
         except Exception as exc:
             logging.warning("health | recovery check failed: %s", exc)
             return []
+
+    active_symbols, probe_skipped = _filter_symbols_with_history(active_symbols, reason="cycle")
+    for sym in probe_skipped:
+        _record_skip("data", sym)
 
     try:
         active_symbols = _health_check(active_symbols)
@@ -4303,7 +4398,7 @@ def run_bot():
             )
             log_decision(symbol, "ohlcv_unavailable")
             if not has_open:
-                skip_summary["data"].append(symbol)
+                _record_skip("data", symbol)
                 continue
             preview = pd.DataFrame()
         if (preview.empty or "close_15m" not in preview.columns) and not has_open:
@@ -4311,7 +4406,7 @@ def run_bot():
                 "data | %s | no OHLCV for required timeframes; skipping", symbol
             )
             log_decision(symbol, "ohlcv_unavailable")
-            skip_summary["data"].append(symbol)
+            _record_skip("data", symbol)
             continue
 
         metrics = {}
@@ -4346,8 +4441,8 @@ def run_bot():
                     f"backtest data unavailable backend={getattr(ADAPTER, 'backend', '?')} futures={getattr(ADAPTER, 'futures', getattr(ADAPTER, 'is_futures', False))} limit=300 tfs={timeframes}",
                 )
                 log_decision(symbol, "backtest_unavailable")
-                skip_summary["data"].append(symbol)
-                continue
+            _record_skip("data", symbol)
+            continue
 
         df_for_chart = fetch_ohlcv(symbol, tf="15m", limit=300)
         pattern_info = {"pattern_name": "none", "source": "none", "confidence": 0.0}

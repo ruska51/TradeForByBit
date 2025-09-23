@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 
 from logging_utils import ensure_report_schema
+from utils.csv_utils import read_csv_safe
 
 
 def _load_trades(trades_log: str) -> pd.DataFrame:
@@ -10,7 +11,7 @@ def _load_trades(trades_log: str) -> pd.DataFrame:
     if not os.path.exists(trades_log):
         return pd.DataFrame()
     try:
-        return pd.read_csv(trades_log)
+        return read_csv_safe(trades_log)
     except Exception:
         return pd.DataFrame()
 
