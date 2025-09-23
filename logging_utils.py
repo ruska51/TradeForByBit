@@ -422,6 +422,7 @@ _candle_status: defaultdict[str, dict[str, int | None]] = defaultdict(dict)
 _order_status: defaultdict[str, list[str]] = defaultdict(list)
 _info_status: defaultdict[str, dict[str, str]] = defaultdict(dict)
 _error_status: defaultdict[str, list[str]] = defaultdict(list)
+_no_data_status: defaultdict[str, dict[str, str]] = defaultdict(dict)
 
 
 def record_summary(symbol: str, mode: str, atr: float, adx: float, vol_ratio: float, signal: str) -> None:
@@ -649,6 +650,26 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
 def record_candle_status(symbol: str, tf: str, count: int | None) -> None:
     """Store candle fetch status for later summary."""
     _candle_status[symbol][tf] = count
+
+
+def record_no_data(symbol: str, scope: str, message: str | None = None) -> None:
+    """Track missing data without polluting the error log."""
+
+    details = _no_data_status[symbol]
+    if scope not in details:
+        details[scope] = message or ""
+        memory_manager.add_event(
+            "no_data",
+            {"symbol": symbol, "scope": scope, "message": message or ""},
+        )
+
+
+def clear_no_data(symbol: str, scope: str) -> None:
+    """Remove stored no-data marker when candles become available again."""
+
+    details = _no_data_status.get(symbol)
+    if details and scope in details:
+        details.pop(scope, None)
 
 
 def record_backtest(symbol: str, pct: float) -> None:

@@ -110,6 +110,8 @@ from logging_utils import (
     log,
     log_decision,
     record_candle_status,
+    record_no_data,
+    clear_no_data,
     record_backtest,
     record_pattern,
     record_error,
@@ -931,13 +933,19 @@ def _env_float(name: str, default: float) -> float:
 BASE_PROBA_FILTER = 0.25
 PROBA_FILTER = _env_float("PROBA_FILTER", BASE_PROBA_FILTER)  # динамическое значение
 # [ANCHOR:DYNA_THRESH_CONSTS]
-MIN_PROBA_FILTER = 0.20
-MIN_ADX_THRESHOLD = 1.0
+MIN_PROBA_FILTER = _env_float(
+    "MIN_PROBA_FILTER", min(0.4, float(PROBA_FILTER))
+)
 # Стратегия допускает сделки только при умеренном тренде
 BASE_ADX_THRESHOLD = 2.0
 ADX_THRESHOLD = _env_float("ADX_THRESHOLD", BASE_ADX_THRESHOLD)  # минимальный ADX для сделки
+MIN_ADX_THRESHOLD = _env_float(
+    "MIN_ADX_THRESHOLD", min(12.0, float(ADX_THRESHOLD))
+)
 RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 70.0)  # порог перекупленности для long
 RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 30.0)  # порог перепроданности для short
+RSI_OVERBOUGHT_MAX = max(RSI_OVERBOUGHT, _env_float("RSI_OVERBOUGHT_MAX", 80.0))
+RSI_OVERSOLD_MIN = min(RSI_OVERSOLD, _env_float("RSI_OVERSOLD_MIN", 20.0))
 PRED_HORIZON = 2  # число свечей вперёд для прогноза и бэктеста
 MAX_LOSS_ROI = 0.10  # допустимый убыток по позиции (10% ROI)
 ROI_TARGET_PCT = 1.5  # целевой ROI для автофиксации прибыли (в процентах)
@@ -965,6 +973,13 @@ BREAKEVEN_BUFFER_ATR = 0.2
 INACTIVITY_ADAPT_HOURS = 0.5
 INACTIVITY_CONDITIONAL_HOURS = 1
 INACTIVITY_FALLBACK_HOURS = 2
+BOT_CYCLE_MINUTES = _env_float("BOT_CYCLE_MINUTES", 5.0)
+INACTIVITY_ADAPT_CYCLES = int(os.getenv("INACTIVITY_ADAPT_CYCLES", "6"))
+INACTIVITY_PROBA_STEP = _env_float("INACTIVITY_PROBA_STEP", 0.05)
+INACTIVITY_ADX_STEP = _env_float("INACTIVITY_ADX_STEP", 1.0)
+INACTIVITY_RSI_STEP = _env_float("INACTIVITY_RSI_STEP", 1.0)
+FALLBACK_MODE_ENABLED = os.getenv("FALLBACK_MODE", "0").lower() in {"1", "true", "yes"}
+NO_DATA_RETRY_SEC = int(os.getenv("NO_DATA_RETRY_SEC", "180"))
 
 # --- No-trade telemetry ---
 from collections import defaultdict, deque
@@ -1199,39 +1214,68 @@ symbol_activity = load_last_trade_times()
 
 def adjust_filters_for_inactivity(
     symbol: str,
-) -> tuple[float, float, bool, bool, float]:
-    """Return adjusted (proba_filter, adx_threshold, allow_conditional,
-    use_fallback, inactivity_hours)."""
+) -> tuple[float, float, bool, bool, float, float, float]:
+    """Return adjusted filter thresholds based on symbol inactivity."""
+
     last = symbol_activity.get(symbol)
     if last is None:
         symbol_activity[symbol] = datetime.now(timezone.utc)
         inactivity = 0.0
     else:
         delta = datetime.now(timezone.utc) - pd.to_datetime(last, utc=True)
-        inactivity = delta.total_seconds() / 3600
-    adj_proba = PROBA_FILTER
-    adj_adx = ADX_THRESHOLD
+        inactivity = max(delta.total_seconds(), 0.0) / 3600
+
     allow_conditional = False
     use_fallback = False
-    if inactivity >= INACTIVITY_ADAPT_HOURS:
-        adj_proba -= 0.05
-        adj_adx -= 3
+
+    cycle_minutes = max(BOT_CYCLE_MINUTES, 1.0)
+    cycles = int((inactivity * 60.0) / cycle_minutes)
+    adapt_cycles = max(INACTIVITY_ADAPT_CYCLES, 1)
+    steps = max(cycles // adapt_cycles, 0)
+    if inactivity < INACTIVITY_ADAPT_HOURS:
+        steps = 0
+
+    adj_proba = max(
+        MIN_PROBA_FILTER,
+        float(PROBA_FILTER) - float(steps) * float(INACTIVITY_PROBA_STEP),
+    )
+    adj_adx = max(
+        float(MIN_ADX_THRESHOLD),
+        float(ADX_THRESHOLD) - float(steps) * float(INACTIVITY_ADX_STEP),
+    )
+    adj_rsi_overbought = min(
+        float(RSI_OVERBOUGHT_MAX),
+        float(RSI_OVERBOUGHT) + float(steps) * float(INACTIVITY_RSI_STEP),
+    )
+    adj_rsi_oversold = max(
+        float(RSI_OVERSOLD_MIN),
+        float(RSI_OVERSOLD) - float(steps) * float(INACTIVITY_RSI_STEP),
+    )
+
     if inactivity >= INACTIVITY_CONDITIONAL_HOURS:
         allow_conditional = True
     if inactivity >= INACTIVITY_FALLBACK_HOURS:
         use_fallback = True
-    # [ANCHOR:DYNA_THRESH_CLAMP]
-    adj_proba = max(MIN_PROBA_FILTER, float(adj_proba))
-    adj_adx = max(MIN_ADX_THRESHOLD, int(adj_adx))
+
     # [ANCHOR:DYNA_THRESH_LOG]
     logging.info(
-        "adj | %s | inactive %.1fh → PROBA %.2f, ADX %d",
+        "adj | %s | inactive %.1fh → PROBA %.2f, ADX %.1f, RSI %.1f/%.1f",
         symbol,
         inactivity,
         adj_proba,
         adj_adx,
+        adj_rsi_overbought,
+        adj_rsi_oversold,
     )
-    return adj_proba, adj_adx, allow_conditional, use_fallback, inactivity
+    return (
+        adj_proba,
+        adj_adx,
+        allow_conditional,
+        use_fallback,
+        inactivity,
+        adj_rsi_overbought,
+        adj_rsi_oversold,
+    )
 
 
 # stop_loss_pct = 0.008  # === больше не используется, см. выше ===
@@ -1409,6 +1453,7 @@ def _safe_df(data) -> pd.DataFrame | None:
 
 
 FETCH_CACHE: dict[tuple[int, str, str, int], pd.DataFrame | None] = {}
+_NO_DATA_RETRY: dict[tuple[str, str], float] = {}
 
 
 def _fetch_ohlcv(symbol, tf, limit=10000):
@@ -1422,13 +1467,24 @@ def _fetch_ohlcv(symbol, tf, limit=10000):
     if key in FETCH_CACHE:
         return FETCH_CACHE[key]
 
+    now = time.time()
+    retry_after = _NO_DATA_RETRY.get((symbol, tf))
+    if retry_after and now < retry_after:
+        log_candle_status(symbol, tf, None)
+        FETCH_CACHE[key] = None
+        return None
+
     try:
         ohlcv = ADAPTER.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
-    except Exception:
+    except Exception as exc:
         ohlcv = None
+        record_no_data(symbol, tf, f"exception: {exc}")
+        _NO_DATA_RETRY[(symbol, tf)] = now + NO_DATA_RETRY_SEC
     if not ohlcv:
         log_candle_status(symbol, tf, None)
-        log_decision(symbol, "missing_data")
+        if (symbol, tf) not in _NO_DATA_RETRY:
+            _NO_DATA_RETRY[(symbol, tf)] = now + NO_DATA_RETRY_SEC
+        record_no_data(symbol, tf, "empty_fetch")
         FETCH_CACHE[key] = None
         return None
 
@@ -1436,10 +1492,13 @@ def _fetch_ohlcv(symbol, tf, limit=10000):
     count = len(df) if df is not None else None
     if count is None or count == 0:
         log_candle_status(symbol, tf, None)
-        log_decision(symbol, "missing_data")
+        _NO_DATA_RETRY[(symbol, tf)] = now + NO_DATA_RETRY_SEC
+        record_no_data(symbol, tf, "empty_df")
         FETCH_CACHE[key] = None
         return None
     log_candle_status(symbol, tf, count)
+    _NO_DATA_RETRY.pop((symbol, tf), None)
+    clear_no_data(symbol, tf)
     result = calculate_indicators(df)
     FETCH_CACHE[key] = result
     return result
@@ -3251,15 +3310,15 @@ def save_candle_chart(df, symbol, filename="chart.png"):
     """
 
     if df is None or df.empty:
-        logging.warning(f"chart | {symbol} | No data to plot")
-        record_error(symbol, "chart data missing")
+        logging.info(f"chart | {symbol} | No data to plot (soft skip)")
+        record_no_data(symbol, "chart", "empty_dataframe")
         return
 
     if "close" not in df.columns:
-        logging.warning(
+        logging.info(
             f"chart | {symbol} | Missing close column; skipping chart generation"
         )
-        record_error(symbol, "chart data missing close column")
+        record_no_data(symbol, "chart", "missing_close")
         return
 
     try:
@@ -3270,10 +3329,10 @@ def save_candle_chart(df, symbol, filename="chart.png"):
         try:
             fig, ax = plt.subplots(figsize=(6, 3))
         except Exception:
-            logging.warning(
+            logging.info(
                 f"chart | {symbol} | matplotlib lacks figure/subplots; skipping chart"
             )
-            record_error(symbol, "chart plotting skipped: no figure API")
+            record_no_data(symbol, "chart", "no_figure_api")
             return
 
         ax.plot(df["close"], label="Close")
@@ -4365,16 +4424,20 @@ def run_bot():
             allow_conditional,
             fb_mode,
             inactivity_hours,
+            adj_rsi_overbought,
+            adj_rsi_oversold,
         ) = adjust_filters_for_inactivity(symbol)
         _inc_event("inactivity_hours", inactivity_hours)
         current_bar = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
+        fallback_allowed = fb_mode or FALLBACK_MODE_ENABLED
         if fallback_cooldown.get(symbol, 0) > current_bar:
-            fb_mode = False
+            fallback_allowed = False
 
         # Получаем тренд и режим торговли заранее, чтобы они логировались даже при пропуске
         df_trend = fetch_ohlcv(symbol, "1h", limit=250)
         if df_trend is None or df_trend.empty:
-            log_decision(symbol, "trend_data_missing")
+            logging.info("data | %s | missing timeframe 1h", symbol)
+            log_decision(symbol, "no_data")
             continue
 
         trend_state = determine_trend(df_trend)
@@ -4386,7 +4449,8 @@ def run_bot():
         df_5m = fetch_ohlcv(symbol, "5m", limit=100)
         df_15m = fetch_ohlcv(symbol, "15m", limit=100)
         if df_5m is None or df_15m is None:
-            log_decision(symbol, "trend_data_missing")
+            logging.info("data | %s | missing lower timeframe data", symbol)
+            log_decision(symbol, "no_data")
             continue
         trend_dfs["5m"] = df_5m
         trend_dfs["15m"] = df_15m
@@ -4404,7 +4468,8 @@ def run_bot():
             )
             multi_df = pd.DataFrame()
         if multi_df.empty:
-            log_decision(symbol, "tf_data_missing")
+            logging.info("data | %s | insufficient multi-timeframe data", symbol)
+            log_decision(symbol, "no_data")
             continue
         tf_signals = {tf: timeframe_direction(multi_df, tf) for tf in ["5m", "15m", "30m"]}
         global_dir = timeframe_direction(multi_df, "4h")
@@ -4740,7 +4805,11 @@ def run_bot():
         signal_to_use = model_signal
         fallback_attempted = False
         fb_confirm = False
-        if fb_mode and not pattern_conflict and (model_signal == "hold" or (confidence < 0.5 and strong_pattern)):
+        if (
+            fallback_allowed
+            and not pattern_conflict
+            and (model_signal == "hold" or (confidence < 0.5 and strong_pattern))
+        ):
             fb_sig = fallback_signal(symbol)
             if fb_sig in ["long", "short"]:
                 fallback_attempted = True
@@ -4868,10 +4937,10 @@ def run_bot():
         rsi_val = df_trend["rsi"].iloc[-1]
         set_valid_leverage(exchange, symbol, mode_lev)
         if not use_fallback:
-            if signal_to_use == "long" and rsi_val > RSI_OVERBOUGHT:
+            if signal_to_use == "long" and rsi_val > adj_rsi_overbought:
                 log_decision(symbol, "rsi_overbought")
                 continue
-            if signal_to_use == "short" and rsi_val < RSI_OVERSOLD:
+            if signal_to_use == "short" and rsi_val < adj_rsi_oversold:
                 log_decision(symbol, "rsi_oversold")
                 continue
 
