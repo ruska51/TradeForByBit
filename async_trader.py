@@ -314,7 +314,7 @@ async def process_symbol(
 ) -> None:
     try:
         data_raw = await fetch_multi_ohlcv_async(
-            symbol, ["5m", "15m", "30m", "1h", "4h", "1d"], limit=200
+            symbol, ["5m", "15m", "30m", "1h", "4h"], limit=200
         )
         if not data_raw:
             log(logging.ERROR, "data", symbol, "no data")

@@ -566,6 +566,7 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
     """
 
     dfs: dict[str, pd.DataFrame] = {}
+    base_required = [tf for tf in ("5m", "15m", "30m", "1h") if tf in timeframes]
     for tf in timeframes:
         df_tf = fetch_ohlcv(symbol, tf, limit=limit)
         if df_tf is None or df_tf.empty:
@@ -606,6 +607,21 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
 
     clear_symbol_no_data(symbol, "multi")
 
+    missing_base = [tf for tf in base_required if tf not in dfs]
+    if missing_base:
+        msg = "data | %s | missing base timeframes: %s" % (
+            symbol,
+            ",".join(missing_base),
+        )
+        if warn:
+            logging.warning(msg)
+        else:
+            logging.info(msg)
+        for tf in missing_base:
+            mark_symbol_no_data(symbol, tf, reason=f"missing_{tf}", log_skip=warn)
+        mark_symbol_no_data(symbol, "multi", reason="missing_base", log_skip=warn)
+        return pd.DataFrame()
+
     missing = [tf for tf in timeframes if tf not in dfs]
     if missing:
         msg = "data | %s | partial OHLCV; missing %s" % (
@@ -636,8 +652,46 @@ def _filter_symbols_with_history(
     available: list[str] = []
     newly_skipped: list[str] = []
     marker = globals().get("mark_symbol_no_data")
+    adapter_obj = getattr(ADAPTER, "x", None)
+    markets_map: dict[str, Any] = {}
+    markets_loaded = False
+    if adapter_obj is not None:
+        try:
+            markets_loaded = ADAPTER.load_markets_safe()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logging.debug("data | market metadata unavailable: %s", exc)
+        raw_markets = getattr(adapter_obj, "markets", {})
+        if isinstance(raw_markets, dict) and raw_markets:
+            markets_map = raw_markets
     for sym in symbols:
         if sym in skipped_symbols and sym not in open_trade_ctx:
+            continue
+        market = markets_map.get(sym) if markets_map else None
+        if market:
+            contract_flag = market.get("contract")
+            linear_flag = market.get("linear")
+            if not contract_flag or not linear_flag:
+                if sym not in skipped_symbols:
+                    logging.warning(
+                        "data | %s | unsupported market (contract=%s linear=%s); skipping",
+                        sym,
+                        contract_flag,
+                        linear_flag,
+                    )
+                    skipped_symbols.add(sym)
+                    if callable(marker):
+                        marker(sym, None, reason=f"{reason}_unsupported", log_skip=False)
+                    if sym not in open_trade_ctx:
+                        newly_skipped.append(sym)
+                if sym not in open_trade_ctx:
+                    continue
+        elif markets_loaded and sym not in open_trade_ctx:
+            if sym not in skipped_symbols:
+                logging.warning("data | %s | absent from loaded markets; skipping", sym)
+                skipped_symbols.add(sym)
+                if callable(marker):
+                    marker(sym, None, reason=f"{reason}_absent", log_skip=False)
+                newly_skipped.append(sym)
             continue
         try:
             candles = fetcher(sym, probe_tf, limit=limit)
@@ -4256,8 +4310,16 @@ def run_bot():
         recovered_candidates = _refresh_tradable_symbols(banned)
         if not recovered_candidates:
             return []
+        filtered, skipped = _filter_symbols_with_history(
+            recovered_candidates,
+            reason="recovery",
+        )
+        for sym in skipped:
+            _record_skip("data", sym)
+        if not filtered:
+            return []
         try:
-            return _health_check(recovered_candidates)
+            return _health_check(filtered)
         except Exception as exc:
             logging.warning("health | recovery check failed: %s", exc)
             return []
