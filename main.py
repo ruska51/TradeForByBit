@@ -669,14 +669,12 @@ def _filter_symbols_with_history(
         market = markets_map.get(sym) if markets_map else None
         if market:
             contract_flag = market.get("contract")
-            linear_flag = market.get("linear")
-            if not contract_flag or not linear_flag:
+            if not contract_flag:
                 if sym not in skipped_symbols:
                     logging.warning(
-                        "data | %s | unsupported market (contract=%s linear=%s); skipping",
+                        "data | %s | unsupported market (contract=%s); skipping",
                         sym,
                         contract_flag,
-                        linear_flag,
                     )
                     skipped_symbols.add(sym)
                     if callable(marker):

@@ -15,9 +15,13 @@ All runtime messages are written both to the console and to log files under
 
 ## Exchange backend
 
-The bot targets Bybit USDT-perpetual markets through
+The bot targets Bybit perpetual futures through
 [ccxt](https://github.com/ccxt/ccxt) and initialises the adapter in sandbox mode
-by default. A legacy [python-binance](https://github.com/binance/binance-connector-python)
+by default. Both USDT-margined (linear) and coin-margined (inverse) contracts are
+supported as long as the instrument is exposed as a perpetual contract in
+Bybit's market metadata. The scanner keeps focusing on liquid USDT quotes, but
+health checks no longer discard symbols solely because the exchange marks them
+as non-linear. A legacy [python-binance](https://github.com/binance/binance-connector-python)
 fallback is still available for users who rely on Binance endpoints; the
 backend is selected automatically or forced through the ``EXCHANGE_BACKEND``
 environment variable (``auto``/``ccxt``/``binance_sdk``). In ``auto`` mode the
@@ -27,7 +31,9 @@ sticks with ccxt.
 Symbols are normalised to ccxt style (``ETH/USDT``) and testnet support is
 available for the default Bybit backend via ``set_sandbox_mode``. The
 ``python-binance`` dependency remains optional – the project functions with ccxt
-alone.
+alone. If the exchange does not provide daily candles (``1d`` timeframe) for a
+listed contract, the scanner automatically falls back to a 4‑hour history and
+logs a warning instead of removing the instrument.
 
 ## Improving trade coverage
 
@@ -168,3 +174,6 @@ to run without installing PyTorch. When running the bot in a real environment,
 make sure the actual `torch` and `torchvision` packages take precedence in
 Python's import path. Keeping the stub directories renamed as shipped prevents
 conflicts with the real libraries.
+To soften startup validation, set ``IGNORE_HEALTH_CHECK_ERRORS=1`` – the bot will
+still log missing data, yet it will continue running and rely on runtime probes
+to recover once the market becomes available.

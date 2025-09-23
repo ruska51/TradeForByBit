@@ -68,10 +68,15 @@ def set_valid_leverage(exchange, symbol: str, desired: int):
 
     import logging
 
+    market: dict[str, Any] = {}
     try:
-        limits = (exchange.market(symbol) or {}).get("limits", {}) or {}
+        maybe_market = exchange.market(symbol)  # type: ignore[attr-defined]
+        if isinstance(maybe_market, dict):
+            market = maybe_market
     except Exception:  # pragma: no cover - defensive
-        limits = {}
+        market = {}
+
+    limits = (market.get("limits", {}) or {}) if isinstance(market, dict) else {}
     lev = limits.get("leverage", {}) or {}
 
     min_l = int(lev.get("min") or 1)
@@ -81,8 +86,33 @@ def set_valid_leverage(exchange, symbol: str, desired: int):
     L = max(min(desired, max_l), min_l)
     L = int((L // step) * step)
 
+    market_type = market.get("type") if isinstance(market, dict) else None
+    category: str | None = None
+    if isinstance(market_type, str):
+        lower_type = market_type.lower()
+        if lower_type in {"linear", "inverse"}:
+            category = lower_type
+    if category is None and isinstance(market, dict):
+        if bool(market.get("linear")):
+            category = "linear"
+        elif bool(market.get("inverse")):
+            category = "inverse"
+        else:
+            info = market.get("info") if isinstance(market.get("info"), dict) else {}
+            if isinstance(info, dict):
+                raw_category = str(
+                    info.get("category")
+                    or info.get("contractType")
+                    or info.get("contract_type")
+                    or ""
+                ).lower()
+                if raw_category in {"linear", "inverse"}:
+                    category = raw_category
+
+    params: dict[str, Any] = {}
+    if getattr(exchange, "id", "").lower() == "bybit" and category:
+        params = {"category": category}
     try:
-        params = {"category": "linear"} if getattr(exchange, "id", "") == "bybit" else {}
         if hasattr(exchange, "set_leverage"):
             try:
                 exchange.set_leverage(L, symbol, params)

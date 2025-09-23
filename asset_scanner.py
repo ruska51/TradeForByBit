@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from logging_utils import log
-from typing import List
+from typing import List, Tuple
 
 import ccxt
 try:  # ccxt.pro is optional
@@ -21,6 +21,7 @@ from exchange_adapter import ExchangeAdapter
 
 ADAPTER: ExchangeAdapter | None = None
 SKIPPED_SYMBOLS: set[str] = set()
+_FALLBACK_TIMEFRAMES: dict[str, Tuple[str, int]] = {"1d": ("4h", 6)}
 
 
 def _get_adapter() -> ExchangeAdapter:
@@ -29,6 +30,29 @@ def _get_adapter() -> ExchangeAdapter:
         from main import ADAPTER as MAIN_ADAPTER  # type: ignore
         ADAPTER = MAIN_ADAPTER
     return ADAPTER
+
+
+def _fetch_ohlcv_with_fallback(symbol: str, timeframe: str, limit: int) -> tuple[list, str]:
+    """Fetch OHLCV data and fall back when the requested timeframe is unavailable."""
+
+    adapter = _get_adapter()
+    try:
+        data = adapter.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        return data, timeframe
+    except Exception as exc:  # pragma: no cover - network / exchange errors
+        fallback = _FALLBACK_TIMEFRAMES.get(timeframe)
+        if not fallback:
+            raise
+        alt_tf, multiplier = fallback
+        fallback_limit = max(1, min(int(limit * multiplier), 1500))
+        log(
+            logging.WARNING,
+            "scan",
+            symbol,
+            f"{timeframe} timeframe unavailable, falling back to {alt_tf}: {exc}",
+        )
+        data = adapter.fetch_ohlcv(symbol, timeframe=alt_tf, limit=fallback_limit)
+        return data, alt_tf
 
 
 def _exchange_params(enable_rate_limit: bool = True) -> tuple[dict, bool]:
@@ -80,7 +104,7 @@ def scan_markets(volume_threshold: float = 100_000,
         if not symbol or ":" in symbol:
             continue
         try:
-            ohlcv = _get_adapter().fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            ohlcv, used_tf = _fetch_ohlcv_with_fallback(symbol, timeframe, limit)
         except Exception as e:  # pragma: no cover - network errors
             log(logging.ERROR, "scan", symbol, f"fetch failed: {e}")
             continue
@@ -89,8 +113,12 @@ def scan_markets(volume_threshold: float = 100_000,
         metrics = backtest_metrics(df["close"])
         sharpe = metrics["sharpe"]
         drawdown = metrics["max_drawdown"]
-        log(logging.INFO, "scan", symbol,
-            f"ROI={roi:.2%}, Sharpe={sharpe:.2f}, DD={drawdown:.2%}")
+        log(
+            logging.INFO,
+            "scan",
+            symbol,
+            f"ROI={roi:.2%}, Sharpe={sharpe:.2f}, DD={drawdown:.2%}, tf={used_tf}",
+        )
         if roi > 0.005 and sharpe > 0.3 and drawdown > -0.05:
             pairs.append(symbol)
     return pairs
@@ -143,8 +171,8 @@ async def scan_usdt_symbols(volume_threshold: float = 100_000,
         if not symbol or ":" in symbol:
             return
         try:
-            ohlcv = await asyncio.to_thread(
-                _get_adapter().fetch_ohlcv, symbol, timeframe, limit
+            ohlcv, used_tf = await asyncio.to_thread(
+                _fetch_ohlcv_with_fallback, symbol, timeframe, limit
             )
         except Exception as e:
             log(logging.ERROR, "scan", symbol, f"fetch failed: {e}")
@@ -154,8 +182,12 @@ async def scan_usdt_symbols(volume_threshold: float = 100_000,
         metrics = backtest_metrics(df["close"])
         sharpe = metrics["sharpe"]
         drawdown = metrics["max_drawdown"]
-        log(logging.INFO, "scan", symbol,
-            f"ROI={roi:.2%}, Sharpe={sharpe:.2f}, DD={drawdown:.2%}")
+        log(
+            logging.INFO,
+            "scan",
+            symbol,
+            f"ROI={roi:.2%}, Sharpe={sharpe:.2f}, DD={drawdown:.2%}, tf={used_tf}",
+        )
         if roi > 0.005 and sharpe > 0.3 and drawdown > -0.05:
             pairs_info.append((symbol, roi))
 
@@ -217,7 +249,8 @@ async def scan_symbols(min_volume: float = 300_000,
             continue
         if not m.get("contract"):
             continue
-        if not m.get("linear"):
+        symbol_name = str(m.get("symbol") or "")
+        if symbol_name and not symbol_name.upper().endswith("USDT"):
             continue
         status = m.get("info", {}).get("status") or m.get("active")
         if status not in {"TRADING", True}:
@@ -275,8 +308,8 @@ async def scan_symbols(min_volume: float = 300_000,
             return
 
         try:
-            ohlcv = await asyncio.to_thread(
-                _get_adapter().fetch_ohlcv, symbol, timeframe, limit
+            ohlcv, used_tf = await asyncio.to_thread(
+                _fetch_ohlcv_with_fallback, symbol, timeframe, limit
             )
         except Exception as e:  # pragma: no cover - network errors
             log(logging.ERROR, "scan", symbol, f"fetch failed: {e}")
@@ -295,7 +328,7 @@ async def scan_symbols(min_volume: float = 300_000,
             logging.INFO,
             "scan",
             symbol,
-            f"ROI={roi:.2%}, Sharpe={sharpe:.2f}, Drawdown={drawdown:.2%}, Vol={vol:.2%}",
+            f"ROI={roi:.2%}, Sharpe={sharpe:.2f}, Drawdown={drawdown:.2%}, Vol={vol:.2%}, tf={used_tf}",
         )
         if (
             roi > 0.005

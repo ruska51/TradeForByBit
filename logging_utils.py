@@ -6,7 +6,7 @@ import logging
 import time
 import sys
 from datetime import datetime, timezone
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Mapping
 from threading import Lock
 from logging.handlers import RotatingFileHandler
@@ -40,43 +40,59 @@ colorama_init(autoreset=True)
 MIN_NOTIONAL = getattr(sys.modules.get("main"), "MIN_NOTIONAL", 10.0)
 
 
+class DedupFilter(logging.Filter):
+    """Filter that suppresses repeated log messages."""
+
+    def __init__(self, capacity: int = 50) -> None:
+        super().__init__()
+        self.last_msgs: deque[str] = deque(maxlen=capacity)
+
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple state
+        msg = record.getMessage()
+        if msg in self.last_msgs:
+            return False
+        self.last_msgs.append(msg)
+        return True
+
+
 def setup_logging(level: int = logging.INFO, to_console: bool = True) -> None:
     """Configure rotating file and optional console logging."""
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    fmt = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(module)s | %(message)s"
-    )
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    keep_handlers: list[logging.Handler] = []
+    for handler in list(root.handlers):
+        if handler.__class__.__name__ == "LogCaptureHandler" or hasattr(handler, "records"):
+            keep_handlers.append(handler)
+    root.handlers.clear()
+    for handler in keep_handlers:
+        root.addHandler(handler)
+
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(module)s | %(message)s")
 
     app = RotatingFileHandler(
         LOG_DIR / "app.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
     )
     app.setLevel(level)
     app.setFormatter(fmt)
+    app.addFilter(DedupFilter())
+    root.addHandler(app)
 
     err = RotatingFileHandler(
         LOG_DIR / "errors.log", maxBytes=5_000_000, backupCount=5, encoding="utf-8"
     )
     err.setLevel(logging.WARNING)
     err.setFormatter(fmt)
-
-    root = logging.getLogger()
-    root.setLevel(level)
-
-    for h in list(root.handlers):
-        # Preserve pytest's LogCaptureHandler to avoid breaking caplog-based tests.
-        handler_name = h.__class__.__name__
-        if handler_name == "LogCaptureHandler" or hasattr(h, "records"):
-            continue
-        root.removeHandler(h)
-
-    root.addHandler(app)
+    err.addFilter(DedupFilter())
     root.addHandler(err)
 
     if to_console:
         sh = logging.StreamHandler(stream=sys.stdout)
         sh.setLevel(level)
         sh.setFormatter(fmt)
+        sh.addFilter(DedupFilter())
         root.addHandler(sh)
 
     logging.getLogger("ccxt.base.exchange").setLevel(logging.WARNING)
@@ -352,49 +368,29 @@ def setup_logger(
         Deprecated. Stream redirection is disabled; the root logger always
         outputs to ``sys.stdout`` and the log file simultaneously.
     """
-    try:
-        from colorlog import ColoredFormatter
-    except Exception:  # pragma: no cover - colorlog optional
-        import sys
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s | %(levelname)s | %(module)s | %(message)s"
-            )
-        )
-    else:
-        import sys
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(
-            ColoredFormatter(
-                "%(log_color)s%(asctime)s | %(levelname)s | %(message)s",
-                log_colors={
-                    'DEBUG': 'cyan',
-                    'INFO': 'white',
-                    'WARNING': 'yellow',
-                    'ERROR': 'red',
-                    'CRITICAL': 'bold_red',
-                },
-            )
-        )
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(module)s | %(message)s")
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    stream_handler.addFilter(DedupFilter())
 
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
+    logger.handlers.clear()
 
-    handlers: list[logging.Handler] = [handler]
+    handlers: list[logging.Handler] = [stream_handler]
 
     if log_file:
         log_dir = os.path.dirname(log_file)
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
-        formatter = logging.Formatter(
-            "%(asctime)s | %(levelname)s | %(module)s | %(message)s",
-        )
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(DedupFilter())
         handlers.append(file_handler)
 
-    logger.handlers = handlers
+    for handler in handlers:
+        logger.addHandler(handler)
 
 
 def log(level: int, context: str, *parts) -> None:

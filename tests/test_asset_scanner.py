@@ -9,6 +9,8 @@ import ccxt_stub as ccxt
 import types
 import sys
 
+import asset_scanner
+
 sys.modules["ccxt"] = ccxt
 sys.modules.pop("asset_scanner", None)
 
@@ -103,11 +105,59 @@ class DummyExchange(DummyExchangeSync):
 def test_scan_markets(monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, "main", dummy_main)
     monkeypatch.setattr(ccxt, "bybit", lambda params=None: DummyExchangeSync())
+    asset_scanner.ADAPTER = None
+    asset_scanner.SKIPPED_SYMBOLS.clear()
+    import logging
+
+    logging.getLogger().addHandler(caplog.handler)
     caplog.set_level("INFO")
     symbols = scan_markets(volume_threshold=100000, limit=10)
     assert symbols == ["AAA/USDT"]
-    logged = caplog.text
-    assert "scan | AAA/USDT" in logged
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("scan | AAA/USDT" in msg for msg in messages)
+
+
+def test_scan_markets_uses_timeframe_fallback(monkeypatch, caplog):
+    import importlib
+    import sys
+
+    sys.modules.pop("asset_scanner", None)
+    scanner_mod = importlib.import_module("asset_scanner")
+
+    def run_scan_markets(*args, **kwargs):
+        return scanner_mod.scan_markets(*args, **kwargs)
+
+    class MissingDailyAdapter(DummyAdapter):
+        def __init__(self):
+            super().__init__()
+            self.calls: list[str] = []
+
+        def fetch_ohlcv(self, symbol, timeframe="1d", limit=90):
+            self.calls.append(timeframe)
+            if timeframe == "1d":
+                raise RuntimeError("unsupported timeframe")
+            return super().fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+
+    adapter = MissingDailyAdapter()
+    monkeypatch.setitem(
+        sys.modules,
+        "main",
+        types.SimpleNamespace(ADAPTER=adapter),
+    )
+    monkeypatch.setattr(ccxt, "bybit", lambda params=None: DummyExchangeSync())
+    scanner_mod.ADAPTER = adapter
+    monkeypatch.setattr(scanner_mod, "_get_adapter", lambda: adapter)
+    scanner_mod.SKIPPED_SYMBOLS.clear()
+    import logging
+
+    logging.getLogger().addHandler(caplog.handler)
+    caplog.set_level("INFO")
+    symbols = run_scan_markets(volume_threshold=100000, limit=10)
+    assert symbols == ["AAA/USDT"]
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("falling back to 4h" in msg for msg in messages), f"messages={messages!r} calls={adapter.calls!r}"
+    assert "1d" in adapter.calls
+    assert any(tf != "1d" for tf in adapter.calls)
 
 
 def test_scan_symbols(monkeypatch, caplog):
@@ -118,6 +168,8 @@ def test_scan_symbols(monkeypatch, caplog):
         monkeypatch.setattr(ccxtpro, "bybit", lambda *args, **kwargs: DummyExchange())
     except Exception:
         pass
+    asset_scanner.ADAPTER = None
+    asset_scanner.SKIPPED_SYMBOLS.clear()
     caplog.set_level("INFO")
     symbols = asyncio.run(scan_symbols(min_volume=100000, limit=10))
     assert "AAA/USDT" in symbols
@@ -182,5 +234,7 @@ def test_scan_symbols_top_n(monkeypatch):
         monkeypatch.setattr(ccxtpro, "bybit", lambda *args, **kwargs: ExchangeAAsync())
     except Exception:
         pass
+    asset_scanner.ADAPTER = None
+    asset_scanner.SKIPPED_SYMBOLS.clear()
     symbols = asyncio.run(scan_symbols(min_volume=100000, limit=10, top_n=1))
     assert symbols == ["AAA/USDT"]
