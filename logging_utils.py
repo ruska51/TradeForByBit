@@ -1067,6 +1067,18 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                 return order_id, None
         except Exception as e:
             err_str = str(e)
+            err_lower = err_str.lower()
+            if "170131" in err_str or "insufficient balance" in err_lower:
+                msg = "order_insufficient_balance"
+                if msg not in _order_status[symbol]:
+                    _order_status[symbol].append(msg)
+                log(
+                    logging.WARNING,
+                    "order",
+                    symbol,
+                    "insufficient balance while creating order",
+                )
+                return None, "insufficient_balance"
             if "-4131" in err_str and not is_market_like:
                 if attempt == 0:
                     log(logging.WARNING, "order", symbol, "Order failed due to percent price filter, retrying...")
@@ -1120,8 +1132,10 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
         if attempt < attempts - 1:
             time.sleep(2)
             continue
-        record_error(symbol, "leverage not set")
-        log(logging.ERROR, "leverage", symbol, f"Failed to set leverage {leverage}")
+        log(logging.WARNING, "leverage", symbol, f"Failed to set leverage {leverage} (soft)")
+        tag = "leverage_failed_soft"
+        if tag not in _order_status[symbol]:
+            _order_status[symbol].append(tag)
         return False
 
 

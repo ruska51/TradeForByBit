@@ -55,7 +55,7 @@ _GLOBAL_MODEL, _GLOBAL_SCALER, _GLOBAL_FEATURES, _GLOBAL_CLASSES = load_global_b
 def _make_exchange():
     params = {
         "enableRateLimit": True,
-        "options": {"defaultType": "swap", "defaultSubType": "linear"},
+        "options": {"defaultType": "swap"},
     }
     if API_KEY:
         params["apiKey"] = API_KEY

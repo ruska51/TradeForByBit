@@ -27,7 +27,9 @@ sticks with ccxt.
 Symbols are normalised to ccxt style (``ETH/USDT``) and testnet support is
 available for the default Bybit backend via ``set_sandbox_mode``. The
 ``python-binance`` dependency remains optional – the project functions with ccxt
-alone.
+alone. The adapter no longer filters markets by the legacy ``linear`` flag – if
+an instrument is present in ``exchange.markets`` and has usable OHLCV data it is
+eligible for trading.
 
 ## Improving trade coverage
 
@@ -72,6 +74,10 @@ The bot outputs detailed messages explaining why trades are skipped. Typical exa
 ⏸ XRP/USDT: model signal is HOLD → not entering trade
 ```
 
+When Bybit does not provide candles for a required timeframe the symbol is
+tagged as ``no_data`` for the current cycle, preventing duplicate fetch attempts
+and explaining the skip reason in ``decision_log.csv``.
+
 Search the log file or console output for phrases like "ADX too low", "RSI", or "model signal is HOLD" to determine why a symbol has no active positions. These messages help fine‑tune thresholds and verify that the bot attempts to trade every asset.
 \nSee `docs/refactor_guidelines.md` for a checklist of design improvements.
 
@@ -102,40 +108,48 @@ file with the correct headers.
 
 Each order must satisfy the exchange-imposed minimum size. On Bybit USDT
 perpetuals this typically maps to a 10 USDT notional threshold, although the
-exact value is market specific. If the calculated position size is smaller but
-the account balance has enough margin, the bot falls back to the minimum trade
-size instead of skipping. When a larger order fails due to insufficient funds,
-the bot also retries with the reduced quantity when permitted.
+exact value is market specific. Before sending an entry the bot estimates the
+required margin (``qty * price / leverage``) from the available balance and, when
+necessary, halves the order size up to two times while respecting the minimum
+lot. If the exchange still reports ``retCode=170131`` (``insufficient balance``)
+the attempt is skipped and recorded without spamming further retries.
 
-## Perpetual order examples
+## Protective orders on Bybit V5
 
-When placing protective orders on Bybit USDT perpetuals, ``reduceOnly`` should
-only be used for orders that explicitly close an existing position. A stop loss
-or take profit placed right after entering a trade usually requires only the
-``closeOnTrigger`` flag:
+The bot installs stop-loss and take-profit orders immediately after a successful
+entry using the V5 trigger format. Every protective order is created with
+``reduceOnly=True`` and ``closeOnTrigger=True`` so it can only decrease the
+position size.
 
-```python
-order_params = {"stopPx": stop_price, "closeOnTrigger": True}
-if is_manual_exit:
-    order_params["reduceOnly"] = True
-
-exchange.create_order(
-    symbol, "take_profit", side, amount, None, order_params
-)
-```
-
-Equivalent logic in the bot code looks like:
+For a stop-loss the bot submits a ``STOP_MARKET`` order without a price value:
 
 ```python
-params = {"stopPrice": stop}
-if closing_position:
-    params["reduceOnly"] = True
-
-exchange.create_order(symbol, "STOP_MARKET", side, amount, None, params)
+params_sl = {
+    "triggerPrice": sl_price,
+    "reduceOnly": True,
+    "closeOnTrigger": True,
+    "slOrderType": "Market",
+    "slTriggerBy": "LastPrice",
+}
+exchange.create_order(symbol, "STOP_MARKET", exit_side, qty, None, params_sl)
 ```
 
-If such orders are rejected, the bot falls back to a market order to close the
-position and logs the error message.
+The matching take-profit uses the ``tp`` keys while keeping the same trigger
+structure:
+
+```python
+params_tp = {
+    "triggerPrice": tp_price,
+    "reduceOnly": True,
+    "closeOnTrigger": True,
+    "tpOrderType": "Market",
+    "tpTriggerBy": "LastPrice",
+}
+exchange.create_order(symbol, "TAKE_PROFIT_MARKET", exit_side, qty, None, params_tp)
+```
+
+Legacy fields such as ``stopPrice``, ``closePosition`` and ``priceProtect`` are
+no longer sent to Bybit V5.
 
 ## Leverage setting
 
@@ -150,6 +164,8 @@ python main.py
 
 The maximum position size for each order is adjusted based on the current
 leverage using Binance Futures leverage brackets.
+If Bybit rejects the requested leverage the bot logs a warning but continues
+trading with the exchange default (typically cross/1x).
 
 ## Trade mode detection
 
