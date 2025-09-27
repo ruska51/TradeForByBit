@@ -2596,6 +2596,65 @@ def best_entry_moment(
             f"confidence={confidence:.2f} adx={adx:.1f}",
         )
     return ok
+def fetch_positions_soft(symbol: str) -> list[dict]:
+    """Fetch positions while gracefully handling missing category support."""
+
+    try:
+        return exchange.fetch_positions([symbol], {"category": "linear"})
+    except Exception as exc:
+        log(
+            logging.WARNING,
+            "positions",
+            symbol,
+            f"fallback to generic fetch_positions: {exc}",
+        )
+    try:
+        return exchange.fetch_positions([symbol])
+    except Exception as exc:
+        record_error(symbol, f"positions fetch failed: {exc}")
+        logging.error(f"Failed to fetch positions for {symbol}: {exc}")
+        return []
+
+
+def _adjust_qty_for_margin(
+    exchange,
+    symbol: str,
+    qty: float,
+    price: float,
+    leverage: float,
+    available_margin: float,
+    min_qty: float,
+) -> tuple[float | None, str | None]:
+    """Return quantity adjusted for available margin or ``None`` if impossible."""
+
+    effective_leverage = max(float(leverage) or 0.0, 1.0)
+    adjusted_qty = float(exchange.amount_to_precision(symbol, qty))
+    attempts = 0
+    available = max(float(available_margin or 0.0), 0.0)
+
+    while adjusted_qty > 0:
+        required_margin = (adjusted_qty * price) / effective_leverage if price > 0 else float("inf")
+        if required_margin <= available:
+            return adjusted_qty, None
+        if attempts >= 2 or adjusted_qty <= max(min_qty, 0.0):
+            break
+        attempts += 1
+        new_qty = max(min_qty, adjusted_qty / 2)
+        new_qty = float(exchange.amount_to_precision(symbol, new_qty))
+        if new_qty == adjusted_qty:
+            break
+        log(
+            logging.WARNING,
+            "order",
+            symbol,
+            f"reduced qty to {new_qty} due to insufficient balance (needs {required_margin:.4f} > has {available:.4f})",
+        )
+        adjusted_qty = new_qty
+
+    required_margin = (adjusted_qty * price) / effective_leverage if price > 0 else float("inf")
+    if required_margin <= available:
+        return adjusted_qty, None
+    return None, "insufficient_balance"
 
 
 def run_trade(
@@ -2663,7 +2722,9 @@ def run_trade(
         entry_ctx = {}
     balance_info = safe_fetch_balance(exchange, {"type": "future"})
     totals = balance_info.get("total") if isinstance(balance_info, dict) else None
+    frees = balance_info.get("free") if isinstance(balance_info, dict) else None
     balance = float((totals or {}).get("USDT", 0.0))
+    available_margin = float((frees or totals or {}).get("USDT", 0.0))
     max_notional = balance * MAX_POSITION_PCT
     market = exchange.market(symbol)
     precision = market.get("precision", {}).get("amount", 0)
@@ -2720,6 +2781,20 @@ def run_trade(
         qty = max_notional / price
     qty = float(exchange.amount_to_precision(symbol, qty))
 
+    adjusted_qty, margin_reason = _adjust_qty_for_margin(
+        exchange,
+        symbol,
+        qty,
+        price,
+        lev,
+        available_margin,
+        min_qty,
+    )
+    if adjusted_qty is None:
+        log_decision(symbol, margin_reason or "insufficient_balance")
+        return False
+    qty = adjusted_qty
+
     # Respect maximum position size for current leverage if available
     max_pos_qty = get_max_position_qty(symbol, lev, price)
     if max_pos_qty:
@@ -2732,6 +2807,27 @@ def run_trade(
         log(logging.INFO, "order", symbol, f"skipped: {err}")
         log_decision(symbol, err)
         return False
+    margin_attempts = 0
+    while (
+        order_id is None
+        and err == "insufficient_balance"
+        and qty > min_qty
+        and margin_attempts < 2
+    ):
+        margin_attempts += 1
+        qty = max(min_qty, qty / 2)
+        qty = float(exchange.amount_to_precision(symbol, qty))
+        log(
+            logging.WARNING,
+            "order",
+            symbol,
+            f"retrying with qty={qty} after insufficient balance",
+        )
+        order_id, err = safe_create_order(exchange, symbol, "market", side, qty, None, params)
+        if err in SOFT_ORDER_ERRORS:
+            log(logging.INFO, "order", symbol, f"skipped: {err}")
+            log_decision(symbol, err)
+            return False
     attempts = 0
     while (
         order_id is None
@@ -2759,6 +2855,9 @@ def run_trade(
         attempts += 1
     if order_id is None:
         # Try opening the smallest allowed position if there's enough balance
+        if err == "insufficient_balance":
+            log_decision(symbol, "insufficient_balance")
+            return False
         if balance >= MIN_NOTIONAL and err and any(code in err for code in ("-2019", "-4164")):
             min_trade_qty = max(min_qty, MIN_NOTIONAL / price)
             min_trade_qty = float(exchange.amount_to_precision(symbol, min_trade_qty))
@@ -2937,11 +3036,23 @@ def attempt_direct_market_entry(
         return False
 
     balance = 0.0
+    available_margin = 0.0
     try:
         bal_info = safe_fetch_balance(exchange, {"type": "future"})
-        balance = float((bal_info.get("total") or {}).get("USDT", 0.0))
+        totals = bal_info.get("total") if isinstance(bal_info, dict) else None
+        frees = bal_info.get("free") if isinstance(bal_info, dict) else None
+        balance = float((totals or {}).get("USDT", 0.0))
+        available_margin = float((frees or totals or {}).get("USDT", 0.0))
     except Exception as exc:
         logging.warning("fallback trade | %s | fetch_balance failed: %s", symbol, exc)
+    try:
+        market = exchange.market(symbol) or {}
+    except Exception as exc:
+        logging.warning("fallback trade | %s | market lookup failed: %s", symbol, exc)
+        market = {}
+    min_qty = float(
+        ((market.get("limits") or {}).get("amount") or {}).get("min", 0.0) or 0.0
+    )
 
     qty = risk_management.compute_order_qty(
         ADAPTER,
@@ -2964,6 +3075,20 @@ def attempt_direct_market_entry(
     except Exception:
         qty = float(qty)
 
+    adjusted_qty, margin_reason = _adjust_qty_for_margin(
+        exchange,
+        symbol,
+        qty,
+        last_price,
+        leverage,
+        available_margin,
+        min_qty,
+    )
+    if adjusted_qty is None or adjusted_qty <= 0:
+        log_decision(symbol, margin_reason or "insufficient_balance")
+        return False
+    qty = adjusted_qty
+
     max_pos_qty = get_max_position_qty(symbol, leverage, last_price)
     if max_pos_qty:
         qty = min(qty, max_pos_qty)
@@ -2974,20 +3099,34 @@ def attempt_direct_market_entry(
 
     params = {"newOrderRespType": "RESULT"}
     order_id, err = safe_create_order(exchange, symbol, "market", side, qty, None, params)
+    margin_attempts = 0
+    while (
+        order_id is None
+        and err == "insufficient_balance"
+        and qty > min_qty
+        and margin_attempts < 2
+    ):
+        margin_attempts += 1
+        qty = max(min_qty, qty / 2)
+        qty = float(exchange.amount_to_precision(symbol, qty))
+        log(
+            logging.WARNING,
+            "order",
+            symbol,
+            f"fallback retry with qty={qty} after insufficient balance",
+        )
+        order_id, err = safe_create_order(exchange, symbol, "market", side, qty, None, params)
     if order_id is None or err:
         reason = err or "order_failed"
         if err in SOFT_ORDER_ERRORS:
             log_decision(symbol, reason)
         else:
+            if err == "insufficient_balance":
+                log_decision(symbol, "insufficient_balance")
+                return False
             logging.error("fallback trade | %s | order failed: %s", symbol, reason)
             log_decision(symbol, "order_failed")
         return False
-
-    try:
-        market = exchange.market(symbol) or {}
-    except Exception as exc:
-        logging.warning("fallback trade | %s | market lookup failed: %s", symbol, exc)
-        market = {}
 
     precision = market.get("precision") or {}
     price_precision = 0
@@ -3276,7 +3415,7 @@ def cancel_all_child_orders(symbol: str) -> None:
 def market_close(symbol: str) -> dict:
     """Close open position for symbol using a protected exit."""
     try:
-        positions = exchange.fetch_positions([symbol], {"category": "linear"})
+        positions = fetch_positions_soft(symbol)
         for pos in positions:
             if float(pos.get("contracts", 0)) > 0:
                 side = pos.get("side", "").upper()
@@ -3450,14 +3589,20 @@ def place_protected_exit(
         return float(exchange.price_to_precision(symbol, adj))
 
     def _build_params(kind: str, price: float) -> dict:
-        params_local = {"stopPrice": price}
-        if kind.endswith("MARKET") and close_all:
-            params_local["closePosition"] = True
-        if reduce_only and kind in {"STOP_MARKET", "STOP", "TAKE_PROFIT"}:
-            params_local["reduceOnly"] = True
-        if kind == "TAKE_PROFIT_MARKET":
-            params_local["priceProtect"] = True
-        if kind in {"TAKE_PROFIT", "STOP"}:
+        params_local = {
+            "triggerPrice": price,
+            "reduceOnly": True,
+            "closeOnTrigger": True,
+        }
+        upper_kind = kind.upper()
+        is_market = upper_kind.endswith("MARKET")
+        if "STOP" in upper_kind:
+            params_local["slTriggerBy"] = "LastPrice"
+            params_local["slOrderType"] = "Market" if is_market else "Limit"
+        if "TAKE_PROFIT" in upper_kind:
+            params_local["tpTriggerBy"] = "LastPrice"
+            params_local["tpOrderType"] = "Market" if is_market else "Limit"
+        if not is_market:
             params_local["price"] = price
         return params_local
 
@@ -3511,6 +3656,9 @@ def place_protected_exit(
         order_id, err = safe_create_order(exchange, symbol, order_kind, side, qty, None, params)
         if err in SOFT_ORDER_ERRORS:
             log(logging.INFO, "order", symbol, f"skipped: {err}")
+            return None
+        if err == "insufficient_balance":
+            log(logging.WARNING, "order", symbol, "skip exit order: insufficient_balance")
             return None
         if order_id is not None:
             logging.info(
@@ -4207,12 +4355,7 @@ def run_bot():
                         reverse_done = True
         cancel_stale_orders(symbol)
 
-        try:
-            positions = exchange.fetch_positions([symbol], {"category": "linear"})
-        except Exception as e:
-            record_error(symbol, f"positions fetch failed: {e}")
-            logging.error(f"Failed to fetch positions for {symbol}: {e}")
-            positions = []
+        positions = fetch_positions_soft(symbol)
         no_position = not any(float(p.get("contracts", 0)) > 0 for p in positions)
 
         closed_this_cycle = False
@@ -4386,22 +4529,12 @@ def run_bot():
             log_decision(symbol, "position_exists")
             continue
         # === Проверка открытых позиций и автоматическая фиксация прибыли ===
-        try:
-            positions = exchange.fetch_positions([symbol], {"category": "linear"})
-        except Exception as e:
-            record_error(symbol, f"positions fetch failed: {e}")
-            logging.error(f"Failed to fetch positions for {symbol}: {e}")
-            positions = []
+        positions = fetch_positions_soft(symbol)
 
         # После фиксации позиции бот сразу сможет открыть новую!
 
         # Получим список позиций повторно, чтобы не считать только что закрытую как открытую
-        try:
-            positions = exchange.fetch_positions([symbol], {"category": "linear"})
-        except Exception as e:
-            record_error(symbol, f"positions re-fetch failed: {e}")
-            logging.error(f"Failed to re-fetch positions for {symbol}: {e}")
-            positions = []
+        positions = fetch_positions_soft(symbol)
 
         open_pos = None
         for pos in positions:
@@ -4977,7 +5110,7 @@ def run_bot():
 
         # [ANCHOR:NORMALIZE_DECLINE_REASONS]
         if signal_to_use == "hold":
-            positions = exchange.fetch_positions([symbol], {"category": "linear"})
+            positions = fetch_positions_soft(symbol)
             pos_exists = any(float(pos.get("contracts", 0)) > 0 for pos in positions)
             reason = "hold_position_exists" if pos_exists else "hold_no_position"
             reset_tf_skip(symbol)
@@ -5122,10 +5255,7 @@ def run_bot():
         for symbol in symbols:
             if fallback_cooldown.get(symbol, 0) > current_bar:
                 continue
-            try:
-                positions = exchange.fetch_positions([symbol], {"category": "linear"})
-            except Exception:
-                continue
+            positions = fetch_positions_soft(symbol)
             if any(float(p.get("contracts", 0)) > 0 for p in positions):
                 continue
             if len(open_trade_ctx) >= MAX_OPEN_TRADES:

@@ -143,6 +143,6 @@ def test_exchange_options_match(monkeypatch):
     monkeypatch.setattr(exchange_adapter, "_ccxt", mod)
 
     ad = ExchangeAdapter(config={"EXCHANGE_BACKEND": "ccxt", "futures": True, "exchange_id": "bybit"})
-    assert ad.x.options.get("defaultType") == "linear"
-    assert ad.x.options.get("defaultSubType") in (None, "linear")
+    assert ad.x.options.get("defaultType") == "swap"
+    assert ad.x.options.get("defaultSubType") in (None, "linear", "inverse")
 

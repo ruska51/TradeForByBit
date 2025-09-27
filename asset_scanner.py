@@ -33,7 +33,7 @@ def _get_adapter() -> ExchangeAdapter:
 def _exchange_params(enable_rate_limit: bool = True) -> tuple[dict, bool]:
     adapter = _get_adapter()
     params: dict = {"enableRateLimit": enable_rate_limit}
-    params["options"] = {"defaultType": "swap", "defaultSubType": "linear"}
+    params["options"] = {"defaultType": "swap"}
     for key in ("apiKey", "secret"):
         value = adapter.config.get(key)
         if value:

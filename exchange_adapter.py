@@ -89,7 +89,7 @@ def set_valid_leverage(exchange, symbol: str, desired: int):
         logging.info("leverage | %s | set %s", symbol, L)
     except Exception as e:  # pragma: no cover - network errors
         logging.warning(
-            "leverage | %s | failed to set leverage %s: %s", symbol, L, e
+            "leverage | %s | failed to set leverage %s (soft): %s", symbol, L, e
         )
         return None
     return L
@@ -203,9 +203,9 @@ class ExchangeAdapter:
 
         if self.futures:
             if self.exchange_id.startswith("bybit"):
-                options: dict[str, str] = {"defaultType": "linear"}
+                options: dict[str, str] = {"defaultType": "swap"}
             else:
-                options = {"defaultType": "future", "defaultSubType": "linear"}
+                options = {"defaultType": "future"}
         else:
             options = {"defaultType": "spot"}
 
@@ -359,10 +359,10 @@ class ExchangeAdapter:
         opts = getattr(self.x, "options", {}) or {}
         if self.futures:
             dt = opts.get("defaultType")
-            if dt and dt not in {"future", "swap", "linear"}:
+            if dt and dt not in {"future", "swap"}:
                 logging.warning("adapter | expected futures defaultType, got %s", dt)
             pt = opts.get("defaultSubType") or opts.get("productType")
-            if pt and pt not in {"linear", "usdm"}:
+            if pt and pt not in {"linear", "inverse", "usdm"}:
                 logging.warning("adapter | unexpected futures productType %s", pt)
         else:
             dt = opts.get("defaultType")
