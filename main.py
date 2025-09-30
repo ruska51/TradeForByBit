@@ -1441,7 +1441,30 @@ def _safe_df(data) -> pd.DataFrame | None:
     try:
         if data is None:
             return None
-        df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        cleaned: list[list[float]] = []
+        for row in data:
+            if not isinstance(row, (list, tuple)):
+                continue
+            if len(row) < 6:
+                continue
+            try:
+                ts = int(float(row[0]))
+                open_, high, low, close, volume = (
+                    float(row[1]),
+                    float(row[2]),
+                    float(row[3]),
+                    float(row[4]),
+                    float(row[5]),
+                )
+            except (TypeError, ValueError):
+                continue
+            cleaned.append([ts, open_, high, low, close, volume])
+        if not cleaned:
+            return None
+        df = pd.DataFrame(
+            cleaned,
+            columns=["timestamp", "open", "high", "low", "close", "volume"],
+        )
         df.dropna(inplace=True)
         if df.empty:
             return None
@@ -3594,7 +3617,9 @@ def place_protected_exit(
 
     market_category = detect_market_category(exchange, symbol) if is_bybit else None
 
-    def _determine_trigger_direction(kind: str) -> int | None:
+    def _determine_trigger_direction(kind: str) -> str | None:
+        """Return Bybit trigger direction compatible with the latest API."""
+
         if not is_bybit:
             return None
         if market_category == "spot":
@@ -3603,8 +3628,8 @@ def place_protected_exit(
         is_tp = "TAKE_PROFIT" in upper_kind
         closing_long = side.lower() == "sell"
         if closing_long:
-            return 1 if is_tp else 2
-        return 2 if is_tp else 1
+            return "ascending" if is_tp else "descending"
+        return "descending" if is_tp else "ascending"
 
     def _build_params(kind: str, price: float) -> dict:
         params_local = {
