@@ -74,18 +74,24 @@ def _with_bybit_order_params(exchange, params: dict | None) -> dict | None:
 def _normalize_balance_params(exchange, params: dict | None) -> dict | None:
     """Translate generic balance parameters to exchange specific ones."""
 
-    if params is None:
-        return None
     if not _is_bybit_exchange(exchange):
         return params
-    adjusted = dict(params)
+
+    adjusted = dict(params or {})
     typ = str(adjusted.pop("type", "")).lower()
-    if typ:
-        if typ in {"future", "futures", "contract", "swap"}:
-            adjusted.setdefault("accountType", "CONTRACT")
-        else:
-            adjusted.setdefault("accountType", typ.upper())
-    adjusted.setdefault("accountType", "CONTRACT")
+    futures_aliases = {"future", "futures", "contract", "swap", "linear"}
+
+    # Unified accounts are now the default mode on Bybit testnet and
+    # production.  Explicitly request the unified balance to avoid the API
+    # error ``accountType only support UNIFIED`` that otherwise prevents the
+    # bot from trading when it attempts to read the account balance.
+    if typ in futures_aliases:
+        adjusted.setdefault("accountType", "UNIFIED")
+    elif typ:
+        adjusted.setdefault("accountType", typ.upper())
+    else:
+        adjusted.setdefault("accountType", "UNIFIED")
+
     return adjusted
 
 
