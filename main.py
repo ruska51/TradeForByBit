@@ -122,6 +122,7 @@ from logging_utils import (
     log_prediction_error,
     record_summary,
     emit_summary,
+    _is_bybit_exchange,
 )
 from retrain_utils import retrain_global_model
 from fallback import fallback_signal
@@ -3588,6 +3589,18 @@ def place_protected_exit(
         adj = adjust_price_to_percent_filter(symbol, raw)
         return float(exchange.price_to_precision(symbol, adj))
 
+    is_bybit = _is_bybit_exchange(exchange)
+
+    def _determine_trigger_direction(kind: str) -> int | None:
+        if not is_bybit:
+            return None
+        upper_kind = kind.upper()
+        is_tp = "TAKE_PROFIT" in upper_kind
+        closing_long = side.lower() == "sell"
+        if closing_long:
+            return 1 if is_tp else 2
+        return 2 if is_tp else 1
+
     def _build_params(kind: str, price: float) -> dict:
         params_local = {
             "triggerPrice": price,
@@ -3596,6 +3609,10 @@ def place_protected_exit(
         }
         upper_kind = kind.upper()
         is_market = upper_kind.endswith("MARKET")
+        trigger_direction = _determine_trigger_direction(upper_kind)
+        if trigger_direction is not None:
+            params_local["triggerDirection"] = trigger_direction
+            params_local.setdefault("triggerBy", "LastPrice")
         if "STOP" in upper_kind:
             params_local["slTriggerBy"] = "LastPrice"
             params_local["slOrderType"] = "Market" if is_market else "Limit"
@@ -3644,7 +3661,13 @@ def place_protected_exit(
         else:
             new_price = ref_price - diff * factor if is_tp else ref_price + diff * factor
         new_price = max(new_price, 0.0)
-        new_type = "TAKE_PROFIT" if is_tp else "STOP"
+        base_type = "TAKE_PROFIT" if is_tp else "STOP"
+        if "MARKET" in kind:
+            new_type = f"{base_type}_MARKET"
+        elif "LIMIT" in kind:
+            new_type = f"{base_type}_LIMIT"
+        else:
+            new_type = base_type
         return new_type, _normalize_price(new_price)
 
     order_kind = order_type.upper()
