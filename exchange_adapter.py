@@ -383,6 +383,40 @@ class ExchangeAdapter:
                 logging.warning("adapter | expected spot defaultType, got %s", dt)
 
     # ------------------------------------------------------------------
+    def _fetch_ohlcv_call(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+        request_params: dict | None = None,
+    ) -> list[list]:
+        ex = getattr(self, "x", None)
+        if not ex:
+            raise AdapterOHLCVUnavailable("exchange unavailable")
+        if request_params:
+            try:
+                return ex.fetch_ohlcv(
+                    symbol,
+                    timeframe=timeframe,
+                    limit=limit,
+                    params=request_params,
+                )
+            except TypeError:
+                try:
+                    return ex.fetch_ohlcv(
+                        symbol,
+                        timeframe,
+                        None,
+                        limit,
+                        request_params,
+                    )
+                except TypeError:
+                    return ex.fetch_ohlcv(symbol, timeframe, limit)
+        try:
+            return ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        except TypeError:
+            return ex.fetch_ohlcv(symbol, timeframe, limit)
+
     def fetch_ohlcv(self, symbol: str, timeframe: str, *, limit: int = 500) -> list[list]:
         if not symbol:
             raise AdapterOHLCVUnavailable("symbol required")
@@ -422,10 +456,11 @@ class ExchangeAdapter:
                 logging.warning("adapter | ohlcv unavailable: markets empty for %s", symbol)
                 raise AdapterOHLCVUnavailable(f"markets empty for {symbol}")
 
-        params = {"symbol": symbol, "timeframe": timeframe, "limit": limit}
+        log_params = {"symbol": symbol, "timeframe": timeframe, "limit": limit}
+        request_params = self._default_params() or None
 
         try:
-            data = self.x.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)  # type: ignore[operator]
+            data = self._fetch_ohlcv_call(symbol, timeframe, limit, request_params)
             if not data:
                 raise AdapterOHLCVUnavailable("empty result")
             url = getattr(self.x, "last_request_url", "unknown")
@@ -433,7 +468,7 @@ class ExchangeAdapter:
             logging.debug(
                 "adapter | fetch_ohlcv success url=%s params=%s status=%s",
                 url,
-                params,
+                log_params | ({"request_params": request_params} if request_params else {}),
                 status,
             )
             self._store_ohlcv_cache(cache_key, data)
@@ -457,7 +492,7 @@ class ExchangeAdapter:
                 logging.warning("adapter | ohlcv unavailable: markets empty for %s", symbol)
                 raise AdapterOHLCVUnavailable(f"markets empty for {symbol}")
             try:
-                data = self.x.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+                data = self._fetch_ohlcv_call(symbol, timeframe, limit, request_params)
                 if not data:
                     raise AdapterOHLCVUnavailable("empty result")
                 url = getattr(self.x, "last_request_url", "unknown")
@@ -465,33 +500,61 @@ class ExchangeAdapter:
                 logging.debug(
                     "adapter | fetch_ohlcv success url=%s params=%s status=%s",
                     url,
-                    params,
+                    log_params | ({"request_params": request_params} if request_params else {}),
                     status,
                 )
                 self._store_ohlcv_cache(cache_key, data)
                 return data
             except Exception as exc:  # pragma: no cover - logging only
-                return self._handle_fetch_failure(symbol, timeframe, limit, params, exc)
+                return self._handle_fetch_failure(
+                    symbol,
+                    timeframe,
+                    limit,
+                    log_params,
+                    exc,
+                    request_params=request_params,
+                )
         except Exception as exc:  # pragma: no cover - logging only
             if self._is_rate_limited(exc):
                 time.sleep(2)
                 try:
-                    data = self.x.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)  # type: ignore[operator]
+                    data = self._fetch_ohlcv_call(symbol, timeframe, limit, request_params)
                 except Exception as retry_exc:  # pragma: no cover - logging only
-                    return self._handle_fetch_failure(symbol, timeframe, limit, params, retry_exc)
+                    return self._handle_fetch_failure(
+                        symbol,
+                        timeframe,
+                        limit,
+                        log_params,
+                        retry_exc,
+                        request_params=request_params,
+                    )
                 if not data:
-                    return self._handle_fetch_failure(symbol, timeframe, limit, params, exc)
+                    return self._handle_fetch_failure(
+                        symbol,
+                        timeframe,
+                        limit,
+                        log_params,
+                        exc,
+                        request_params=request_params,
+                    )
                 url = getattr(self.x, "last_request_url", "unknown")
                 status = getattr(self.x, "last_http_status_code", "unknown")
                 logging.debug(
                     "adapter | fetch_ohlcv retry success url=%s params=%s status=%s",
                     url,
-                    params,
+                    log_params | ({"request_params": request_params} if request_params else {}),
                     status,
                 )
                 self._store_ohlcv_cache(cache_key, data)
                 return data
-            return self._handle_fetch_failure(symbol, timeframe, limit, params, exc)
+            return self._handle_fetch_failure(
+                symbol,
+                timeframe,
+                limit,
+                log_params,
+                exc,
+                request_params=request_params,
+            )
 
         raise AdapterOHLCVUnavailable("backend unsupported")
 
@@ -556,13 +619,15 @@ class ExchangeAdapter:
         limit: int,
         params: dict,
         exc: Exception,
+        *,
+        request_params: dict | None = None,
     ) -> list[list]:
         url = getattr(self.x, "last_request_url", "unknown")
         status = getattr(self.x, "last_http_status_code", "unknown")
         logging.warning(
             "adapter | fetch_ohlcv failed url=%s params=%s status=%s error=%s",
             url,
-            params,
+            params | ({"request_params": request_params} if request_params else {}),
             status,
             exc,
         )
@@ -572,13 +637,13 @@ class ExchangeAdapter:
             if hasattr(self.x, "set_sandbox_mode"):
                 try:
                     self.x.set_sandbox_mode(False)
-                    data = self.x.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+                    data = self._fetch_ohlcv_call(symbol, timeframe, limit, request_params)
                     url = getattr(self.x, "last_request_url", "unknown")
                     status = getattr(self.x, "last_http_status_code", "unknown")
                     logging.debug(
                         "adapter | fetch_ohlcv live retry success url=%s params=%s status=%s",
                         url,
-                        params,
+                        params | ({"request_params": request_params} if request_params else {}),
                         status,
                     )
                     self.x.set_sandbox_mode(True)
@@ -603,7 +668,7 @@ class ExchangeAdapter:
             logging.debug(
                 "adapter | fetch_ohlcv csv fallback success file=%s params=%s",
                 self._csv_path(symbol, timeframe),
-                params,
+                params | ({"request_params": request_params} if request_params else {}),
             )
             self._store_ohlcv_cache((symbol, timeframe, int(limit or 0)), data)
             return data
