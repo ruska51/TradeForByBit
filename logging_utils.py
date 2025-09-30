@@ -38,6 +38,57 @@ colorama_init(autoreset=True)
 MIN_NOTIONAL = getattr(sys.modules.get("main"), "MIN_NOTIONAL", 10.0)
 
 
+def _is_bybit_exchange(exchange) -> bool:
+    """Return ``True`` when *exchange* refers to Bybit."""
+
+    ex_id = getattr(exchange, "id", None)
+    if ex_id:
+        ex_id = str(ex_id).lower()
+    else:
+        name = getattr(getattr(exchange, "__class__", None), "__name__", "")
+        ex_id = str(name).lower()
+    return "bybit" in ex_id
+
+
+def _with_bybit_order_params(exchange, params: dict | None) -> dict | None:
+    """Inject Bybit specific parameters when required.
+
+    Recent versions of the Bybit API require the ``category`` argument for
+    every order management request.  Without it orders are rejected with
+    ``Param error!``, preventing the bot from opening positions.  The helper
+    keeps the behaviour unchanged for other exchanges while transparently
+    adding the missing parameter for Bybit.
+    """
+
+    if not _is_bybit_exchange(exchange):
+        return params
+    merged = dict(params or {})
+    merged.setdefault("category", "linear")
+    # ``positionIdx`` defaults to 0 (one-way mode) which matches the bot
+    # assumptions but some unified accounts require the field to be set
+    # explicitly for conditional orders.
+    merged.setdefault("positionIdx", merged.get("positionIdx", 0))
+    return merged
+
+
+def _normalize_balance_params(exchange, params: dict | None) -> dict | None:
+    """Translate generic balance parameters to exchange specific ones."""
+
+    if params is None:
+        return None
+    if not _is_bybit_exchange(exchange):
+        return params
+    adjusted = dict(params)
+    typ = str(adjusted.pop("type", "")).lower()
+    if typ:
+        if typ in {"future", "futures", "contract", "swap"}:
+            adjusted.setdefault("accountType", "CONTRACT")
+        else:
+            adjusted.setdefault("accountType", typ.upper())
+    adjusted.setdefault("accountType", "CONTRACT")
+    return adjusted
+
+
 def setup_logging(level: int = logging.INFO, to_console: bool = True) -> None:
     """Configure rotating file and optional console logging."""
 
@@ -947,6 +998,7 @@ def safe_fetch_balance(exchange, params: dict | None = None, *, retries: int = 1
     """Fetch account balance with basic rate limit handling."""
 
     attempt = 0
+    params = _normalize_balance_params(exchange, params)
     while True:
         try:
             if params is None:
@@ -972,8 +1024,7 @@ def safe_fetch_balance(exchange, params: dict | None = None, *, retries: int = 1
 def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                       qty: float, price=None, params=None):
     """Create an order with retry and PERCENT_PRICE handling."""
-    if params is None:
-        params = {}
+    params = _with_bybit_order_params(exchange, params)
     if not getattr(exchange, "markets", None):
         try:
             exchange.load_markets()

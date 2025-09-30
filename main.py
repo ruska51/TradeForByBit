@@ -3714,8 +3714,22 @@ def ensure_exit_orders(
     if qty_value <= 0:
         return
 
+    fetch_params: dict[str, Any] = {}
+    ex_id = str(getattr(exchange_obj, "id", "") or getattr(exchange_obj, "name", "")).lower()
+    if "bybit" in ex_id:
+        fetch_params["category"] = "linear"
+        fetch_params.setdefault("positionIdx", 0)
     try:
-        orders = exchange_obj.fetch_open_orders(symbol) or []
+        if fetch_params:
+            try:
+                orders = exchange_obj.fetch_open_orders(symbol, None, None, fetch_params) or []
+            except TypeError:
+                try:
+                    orders = exchange_obj.fetch_open_orders(symbol, None, fetch_params) or []
+                except TypeError:
+                    orders = exchange_obj.fetch_open_orders(symbol, fetch_params) or []
+        else:
+            orders = exchange_obj.fetch_open_orders(symbol) or []
     except Exception as exc:
         logging.warning("exit_guard | %s | fetch_open_orders failed: %s", symbol, exc)
         orders = []
