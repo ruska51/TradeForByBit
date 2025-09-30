@@ -148,6 +148,19 @@ class ExchangeAdapter:
             self._verify_exchange_options()
 
     # ------------------------------------------------------------------
+    def _default_params(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Return params extended with exchange specific defaults."""
+
+        base = dict(params or {})
+        ex_id = str(getattr(self, "exchange_id", "") or "").lower()
+        if not ex_id and getattr(self, "x", None):
+            ex_id = str(getattr(self.x, "id", "") or "").lower()
+        if "bybit" in ex_id:
+            base.setdefault("category", "linear")
+            base.setdefault("positionIdx", base.get("positionIdx", 0))
+        return base
+
+    # ------------------------------------------------------------------
     @property
     def is_futures(self) -> bool:
         """Return whether the adapter is configured for futures trading."""
@@ -620,11 +633,40 @@ class ExchangeAdapter:
     # ------------------------------------------------------------------
     def fetch_open_orders(self, symbol: str | None = None) -> tuple[int, list]:
         """Return ``(count, ids)`` of open orders without raising."""
+        def _call_fetch(ex, sym, params):
+            if not ex or not hasattr(ex, "fetch_open_orders"):
+                return []
+            if params:
+                attempts = []
+                if sym is not None:
+                    attempts = [
+                        lambda: ex.fetch_open_orders(sym, None, None, params),
+                        lambda: ex.fetch_open_orders(sym, None, params),
+                        lambda: ex.fetch_open_orders(sym, params),
+                    ]
+                else:
+                    attempts = [
+                        lambda: ex.fetch_open_orders(None, None, None, params),
+                        lambda: ex.fetch_open_orders(None, None, params),
+                        lambda: ex.fetch_open_orders(None, params),
+                        lambda: ex.fetch_open_orders(params),
+                    ]
+                for attempt in attempts:
+                    try:
+                        result = attempt()
+                        if result is not None:
+                            return result
+                    except TypeError:
+                        continue
+            if sym is not None:
+                return ex.fetch_open_orders(sym)
+            return ex.fetch_open_orders()
+
         try:
             ex = getattr(self, "x", None)
+            params = self._default_params()
             if ex and hasattr(ex, "fetch_open_orders"):
-                orders = ex.fetch_open_orders(symbol) if symbol else ex.fetch_open_orders()
-                orders = orders or []
+                orders = _call_fetch(ex, symbol, params) or []
                 ids = [o.get("id") or o.get("orderId") for o in orders]
                 return len(ids), ids
         except Exception as exc:  # pragma: no cover - logging only
@@ -633,13 +675,9 @@ class ExchangeAdapter:
                 time.sleep(1.0)
                 try:
                     ex = getattr(self, "x", None)
+                    params = self._default_params()
                     if ex and hasattr(ex, "fetch_open_orders"):
-                        orders = (
-                            ex.fetch_open_orders(symbol)
-                            if symbol
-                            else ex.fetch_open_orders()
-                        )
-                        orders = orders or []
+                        orders = _call_fetch(ex, symbol, params) or []
                         ids = [o.get("id") or o.get("orderId") for o in orders]
                         return len(ids), ids
                 except Exception as retry_exc:  # pragma: no cover - logging only
@@ -660,9 +698,21 @@ class ExchangeAdapter:
             if not cnt:
                 return (0, [])
 
+            params = self._default_params()
             if hasattr(self.x, "cancel_all_orders"):
                 try:
-                    self.x.cancel_all_orders(symbol) if symbol else self.x.cancel_all_orders()
+                    if params:
+                        if symbol:
+                            self.x.cancel_all_orders(symbol, params)
+                        else:
+                            self.x.cancel_all_orders(params)
+                    else:
+                        self.x.cancel_all_orders(symbol) if symbol else self.x.cancel_all_orders()
+                except TypeError:
+                    try:
+                        self.x.cancel_all_orders(symbol) if symbol else self.x.cancel_all_orders()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
                 cancelled_ids = ids
@@ -670,7 +720,13 @@ class ExchangeAdapter:
 
             for oid in ids:
                 try:
-                    self.x.cancel_order(oid, symbol)
+                    if params:
+                        try:
+                            self.x.cancel_order(oid, symbol, params)
+                        except TypeError:
+                            self.x.cancel_order(oid, symbol)
+                    else:
+                        self.x.cancel_order(oid, symbol)
                     cancelled_ids.append(oid)
                 except Exception as exc:  # pragma: no cover - logging only
                     logging.warning("adapter | cancel_order failed: %s", exc)
