@@ -1359,76 +1359,134 @@ PATTERN_SOURCE_MAP = {"cnn": 1, "manual": 2, "real": 3, "synthetic": 4, "none": 
 
 
 def calculate_indicators(df):
-    df["ema_fast"] = df["close"].ewm(span=10).mean()
-    df["ema_slow"] = df["close"].ewm(span=50).mean()
-    df["ema_200"] = df["close"].ewm(span=200).mean()
-    df["sma_100"] = df["close"].rolling(window=100).mean()
+    """Enrich OHLCV dataframe with indicators while keeping rows usable.
+
+    Historically this helper relied on :meth:`pandas.DataFrame.dropna` which
+    caused the caller to receive an empty dataframe whenever a division by
+    zero (for example during flat candles) introduced NaNs.  The trading loop
+    would then emit ``"Chart data unavailable"`` warnings and skip pattern
+    recognition altogether.  The updated implementation keeps computations
+    numerically stable by using ``min_periods=1`` windows, guarding every
+    division and normalising problematic values instead of discarding the
+    entire dataset.
+    """
+
+    df = df.copy()
+
+    df["ema_fast"] = df["close"].ewm(span=10, adjust=False).mean()
+    df["ema_slow"] = df["close"].ewm(span=50, adjust=False).mean()
+    df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
+    df["sma_100"] = df["close"].rolling(window=100, min_periods=1).mean()
 
     df["hour"] = df["timestamp"].dt.hour
     df["dayofweek"] = df["timestamp"].dt.dayofweek
-    df["ema_fast"] = df["close"].ewm(span=10).mean()
-    df["ema_slow"] = df["close"].ewm(span=50).mean()
+
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df["rsi"] = 100 - (100 / (1 + rs))
-    df["macd"] = df["close"].ewm(span=12).mean() - df["close"].ewm(span=26).mean()
-    df["macd_signal"] = df["macd"].ewm(span=9).mean()
-    df["volatility"] = df["close"].pct_change(fill_method=None).rolling(50).std()
-    df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
-    df["willr"] = (
-        (df["high"].rolling(14).max() - df["close"])
-        / (df["high"].rolling(14).max() - df["low"].rolling(14).min())
-        * -100
-    )
+    avg_gain = gain.rolling(14, min_periods=1).mean()
+    avg_loss = loss.rolling(14, min_periods=1).mean()
+    rs = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+    loss_zero = avg_loss == 0
+    gain_zero = avg_gain == 0
+    valid_mask = ~(loss_zero & gain_zero)
+    rs.loc[valid_mask] = avg_gain.loc[valid_mask] / avg_loss.loc[valid_mask].replace(0, np.nan)
+    rs.loc[loss_zero & ~gain_zero] = np.inf
+    df["rsi"] = 100 - (100 / (1 + rs.replace([np.inf, -np.inf], np.nan)))
+    df.loc[loss_zero & ~gain_zero, "rsi"] = 100.0
+    df.loc[gain_zero & ~loss_zero, "rsi"] = 0.0
+    df.loc[gain_zero & loss_zero, "rsi"] = 50.0
+
+    df["macd"] = df["close"].ewm(span=12, adjust=False).mean() - df["close"].ewm(span=26, adjust=False).mean()
+    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+    df["volatility"] = df["close"].pct_change(fill_method=None).rolling(50, min_periods=1).std(ddof=0)
+    df["atr"] = (df["high"] - df["low"]).rolling(14, min_periods=1).mean()
+
+    high_roll = df["high"].rolling(14, min_periods=1)
+    low_roll = df["low"].rolling(14, min_periods=1)
+    range_span = high_roll.max() - low_roll.min()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        df["willr"] = np.where(
+            range_span == 0,
+            0.0,
+            (high_roll.max() - df["close"]) / range_span * -100,
+        )
+
     tp = (df["high"] + df["low"] + df["close"]) / 3
-    df["cci"] = (df["close"] - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
+    tp_mean = tp.rolling(20, min_periods=1).mean()
+    tp_std = tp.rolling(20, min_periods=1).std(ddof=0)
+    denom = 0.015 * tp_std
+    df["cci"] = np.where(denom == 0, 0.0, (df["close"] - tp_mean) / denom)
+
     df["candle_range"] = df["high"] - df["low"]
-    df["volume_ema"] = df["volume"].ewm(span=20).mean()
-    df["trend_strength"] = abs(df["ema_fast"] - df["ema_slow"])
+    df["volume_ema"] = df["volume"].ewm(span=20, adjust=False).mean()
+    df["trend_strength"] = (df["ema_fast"] - df["ema_slow"]).abs()
     df["ema_200_slope"] = df["ema_200"].diff()
     df["trend_direction"] = np.sign(df["ema_fast"] - df["ema_slow"])
-    df["trend_persistence"] = df["trend_direction"].rolling(20).sum().fillna(0)
-    # Новые фичи
+    df["trend_persistence"] = df["trend_direction"].rolling(20, min_periods=1).sum().fillna(0)
+
     df["roc"] = df["close"].pct_change(periods=10, fill_method=None)
     df["mom"] = df["close"] - df["close"].shift(10)
     df["obv"] = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
-    df["bb_b"] = (df["close"] - df["close"].rolling(20).mean()) / (2 * df["close"].rolling(20).std())
-    low_min = df["low"].rolling(14).min()
-    high_max = df["high"].rolling(14).max()
-    df["stoch_k"] = 100 * (df["close"] - low_min) / (high_max - low_min)
-    df["stoch_d"] = df["stoch_k"].rolling(3).mean()
-    plus_dm = df["high"].diff()
-    minus_dm = -df["low"].diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm < 0] = 0
+
+    close_mean_20 = df["close"].rolling(20, min_periods=1).mean()
+    close_std_20 = df["close"].rolling(20, min_periods=1).std(ddof=0)
+    bb_denom = 2 * close_std_20
+    df["bb_b"] = np.where(bb_denom == 0, 0.0, (df["close"] - close_mean_20) / bb_denom)
+
+    low_min = df["low"].rolling(14, min_periods=1).min()
+    high_max = df["high"].rolling(14, min_periods=1).max()
+    stoch_denom = high_max - low_min
+    df["stoch_k"] = np.where(
+        stoch_denom == 0,
+        0.0,
+        100 * (df["close"] - low_min) / stoch_denom,
+    )
+    df["stoch_d"] = df["stoch_k"].rolling(3, min_periods=1).mean()
+
+    plus_dm = (df["high"].diff()).clip(lower=0)
+    minus_dm = (-df["low"].diff()).clip(lower=0)
     tr1 = df["high"] - df["low"]
     tr2 = (df["high"] - df["close"].shift()).abs()
     tr3 = (df["low"] - df["close"].shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_adx = tr.rolling(14).mean()
-    plus_di = 100 * (plus_dm.rolling(14).mean() / atr_adx)
-    minus_di = 100 * (minus_dm.rolling(14).mean() / atr_adx)
-    df["adx"] = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-    # Добавляем лаговые фичи после всех индикаторов
+    atr_adx = tr.rolling(14, min_periods=1).mean()
+    atr_adx = atr_adx.replace(0, np.nan)
+    plus_di = 100 * (plus_dm.rolling(14, min_periods=1).mean() / atr_adx)
+    minus_di = 100 * (minus_dm.rolling(14, min_periods=1).mean() / atr_adx)
+    adx_denom = (plus_di + minus_di).replace(0, np.nan)
+    df["adx"] = 100 * (plus_di - minus_di).abs() / adx_denom
+    df["adx"].fillna(0.0, inplace=True)
+
     lag_periods = [1, 2, 3]
     for lag in lag_periods:
         df[f"rsi_lag{lag}"] = df["rsi"].shift(lag)
         df[f"macd_lag{lag}"] = df["macd"].shift(lag)
         df[f"ema_fast_lag{lag}"] = df["ema_fast"].shift(lag)
-    # === ML-фичи для микродвижений рынка ===
+
     for window in [5, 10, 20, 50]:
-        df[f"close_rolling_mean_{window}"] = df["close"].rolling(window).mean()
-        df[f"close_rolling_std_{window}"] = df["close"].rolling(window).std()
-        df[f"volume_rolling_mean_{window}"] = df["volume"].rolling(window).mean()
-        df[f"volume_rolling_std_{window}"] = df["volume"].rolling(window).std()
-        df[f"price_range_{window}"] = df["high"].rolling(window).max() - df["low"].rolling(window).min()
-    # Фича: отношение объема к среднему за 20 свечей
-    df["vol_div_avg20"] = df["volume"] / (df["volume"].rolling(20).mean() + 1e-8)
-    return df.dropna()
+        df[f"close_rolling_mean_{window}"] = df["close"].rolling(window, min_periods=1).mean()
+        df[f"close_rolling_std_{window}"] = df["close"].rolling(window, min_periods=1).std(ddof=0)
+        df[f"volume_rolling_mean_{window}"] = df["volume"].rolling(window, min_periods=1).mean()
+        df[f"volume_rolling_std_{window}"] = df["volume"].rolling(window, min_periods=1).std(ddof=0)
+        df[f"price_range_{window}"] = (
+            df["high"].rolling(window, min_periods=1).max()
+            - df["low"].rolling(window, min_periods=1).min()
+        )
+
+    df["vol_div_avg20"] = df["volume"] / (df["volume"].rolling(20, min_periods=1).mean() + 1e-8)
+
+    warmup = max(10, max(lag_periods))
+    if len(df) > warmup:
+        df = df.iloc[warmup:].copy()
+
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.dropna(subset=["open", "high", "low", "close", "volume"], inplace=True)
+    df.fillna(method="ffill", inplace=True)
+    df.fillna(method="bfill", inplace=True)
+    df.fillna(0.0, inplace=True)
+
+    return df
 
 
 def log_candle_status(symbol: str, tf: str, count: int | None) -> None:
