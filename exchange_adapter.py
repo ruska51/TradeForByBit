@@ -153,6 +153,7 @@ class ExchangeAdapter:
         params: Optional[Dict[str, Any]] = None,
         *,
         include_position_idx: bool = True,
+        symbol: str | None = None,
     ) -> Dict[str, Any]:
         """Return params extended with exchange specific defaults.
 
@@ -169,12 +170,110 @@ class ExchangeAdapter:
         if not ex_id and getattr(self, "x", None):
             ex_id = str(getattr(self.x, "id", "") or "").lower()
         if "bybit" in ex_id:
-            base.setdefault("category", "linear")
+            if symbol:
+                category = self._detect_bybit_category(symbol)
+                if category:
+                    base.setdefault("category", category)
+            elif self.futures:
+                base.setdefault("category", "linear")
             if include_position_idx and self.futures:
                 base.setdefault("positionIdx", base.get("positionIdx", 0))
             elif not include_position_idx:
                 base.pop("positionIdx", None)
         return base
+
+    # ------------------------------------------------------------------
+    def _ccxt_symbol(self, symbol: str) -> str:
+        """Return symbol string recognised by the underlying CCXT exchange."""
+
+        ex = getattr(self, "x", None)
+        if not symbol or not ex:
+            return symbol
+
+        markets = getattr(ex, "markets", {}) or {}
+        if symbol in markets:
+            return symbol
+
+        try:
+            market = ex.market(symbol)
+            if isinstance(market, dict):
+                mapped = market.get("symbol")
+                if isinstance(mapped, str) and mapped in markets:
+                    return mapped
+        except Exception:
+            pass
+
+        if "/" in symbol:
+            base, quote = symbol.split("/", 1)
+            candidate = f"{base}/{quote}:{quote}"
+            if candidate in markets:
+                return candidate
+
+        markets_by_id = getattr(ex, "markets_by_id", {}) or {}
+        lookup = symbol.replace("/", "")
+        market = markets_by_id.get(lookup)
+        if isinstance(market, dict):
+            mapped = market.get("symbol") or market.get("info", {}).get("symbol")
+            if isinstance(mapped, str):
+                return mapped
+        elif isinstance(market, str):
+            return market
+
+        if symbol.endswith(":USDT"):
+            trimmed = symbol.split(":", 1)[0]
+            if trimmed in markets:
+                return trimmed
+
+        return symbol
+
+    # ------------------------------------------------------------------
+    def _detect_bybit_category(self, symbol: str) -> str | None:
+        """Best-effort detection of Bybit market category for ``symbol``."""
+
+        ex = getattr(self, "x", None)
+        if not ex:
+            return None
+
+        ccxt_symbol = self._ccxt_symbol(symbol)
+        market: dict[str, Any] | None = None
+        try:
+            market_obj = ex.market(ccxt_symbol)
+            if isinstance(market_obj, dict) and market_obj:
+                market = market_obj
+        except Exception:
+            pass
+
+        if market is None:
+            markets = getattr(ex, "markets", {}) or {}
+            market = markets.get(ccxt_symbol) or markets.get(symbol)
+
+        if not isinstance(market, dict):
+            return None
+
+        info = market.get("info") or {}
+        category = info.get("category") or info.get("contractType") or info.get("productType")
+        if isinstance(category, str) and category:
+            return category.lower()
+
+        market_type = str(market.get("type") or "").lower()
+        if market.get("spot") or market_type == "spot":
+            return "spot"
+        if market.get("option") or market_type == "option":
+            return "option"
+        if market.get("inverse"):
+            return "inverse"
+        if market.get("linear"):
+            return "linear"
+
+        if market_type in {"swap", "future"}:
+            settle = str(market.get("settle") or market.get("settleId") or "").upper()
+            quote = str(market.get("quote") or "").upper()
+            if settle and quote and settle != quote:
+                return "inverse"
+            if settle or quote:
+                return "linear"
+
+        return None
 
     # ------------------------------------------------------------------
     @property
@@ -439,6 +538,8 @@ class ExchangeAdapter:
         if not timeframe:
             raise AdapterOHLCVUnavailable("timeframe required")
 
+        ccxt_symbol = self._ccxt_symbol(symbol)
+
         cache_key = (symbol, timeframe, int(limit or 0))
         now = time.time()
         cache = self._get_ohlcv_cache()
@@ -473,10 +574,12 @@ class ExchangeAdapter:
                 raise AdapterOHLCVUnavailable(f"markets empty for {symbol}")
 
         log_params = {"symbol": symbol, "timeframe": timeframe, "limit": limit}
-        request_params = self._default_params(include_position_idx=False) or None
+        request_params = self._default_params(
+            include_position_idx=False, symbol=ccxt_symbol or symbol
+        ) or None
 
         try:
-            data = self._fetch_ohlcv_call(symbol, timeframe, limit, request_params)
+            data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
             if not data:
                 raise AdapterOHLCVUnavailable("empty result")
             url = getattr(self.x, "last_request_url", "unknown")
@@ -508,7 +611,7 @@ class ExchangeAdapter:
                 logging.warning("adapter | ohlcv unavailable: markets empty for %s", symbol)
                 raise AdapterOHLCVUnavailable(f"markets empty for {symbol}")
             try:
-                data = self._fetch_ohlcv_call(symbol, timeframe, limit, request_params)
+                data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
                 if not data:
                     raise AdapterOHLCVUnavailable("empty result")
                 url = getattr(self.x, "last_request_url", "unknown")
@@ -529,12 +632,15 @@ class ExchangeAdapter:
                     log_params,
                     exc,
                     request_params=request_params,
+                    request_symbol=ccxt_symbol,
                 )
         except Exception as exc:  # pragma: no cover - logging only
             if self._is_rate_limited(exc):
                 time.sleep(2)
                 try:
-                    data = self._fetch_ohlcv_call(symbol, timeframe, limit, request_params)
+                    data = self._fetch_ohlcv_call(
+                        ccxt_symbol, timeframe, limit, request_params
+                    )
                 except Exception as retry_exc:  # pragma: no cover - logging only
                     return self._handle_fetch_failure(
                         symbol,
@@ -543,6 +649,7 @@ class ExchangeAdapter:
                         log_params,
                         retry_exc,
                         request_params=request_params,
+                        request_symbol=ccxt_symbol,
                     )
                 if not data:
                     return self._handle_fetch_failure(
@@ -552,6 +659,7 @@ class ExchangeAdapter:
                         log_params,
                         exc,
                         request_params=request_params,
+                        request_symbol=ccxt_symbol,
                     )
                 url = getattr(self.x, "last_request_url", "unknown")
                 status = getattr(self.x, "last_http_status_code", "unknown")
@@ -570,6 +678,7 @@ class ExchangeAdapter:
                 log_params,
                 exc,
                 request_params=request_params,
+                request_symbol=ccxt_symbol,
             )
 
         raise AdapterOHLCVUnavailable("backend unsupported")
@@ -637,6 +746,7 @@ class ExchangeAdapter:
         exc: Exception,
         *,
         request_params: dict | None = None,
+        request_symbol: str | None = None,
     ) -> list[list]:
         url = getattr(self.x, "last_request_url", "unknown")
         status = getattr(self.x, "last_http_status_code", "unknown")
@@ -648,12 +758,14 @@ class ExchangeAdapter:
             exc,
         )
 
+        call_symbol = request_symbol or symbol
+
         msg = str(exc).lower()
         if self.sandbox and ("timeframe" in msg or "unsupported" in msg):
             if hasattr(self.x, "set_sandbox_mode"):
                 try:
                     self.x.set_sandbox_mode(False)
-                    data = self._fetch_ohlcv_call(symbol, timeframe, limit, request_params)
+                    data = self._fetch_ohlcv_call(call_symbol, timeframe, limit, request_params)
                     url = getattr(self.x, "last_request_url", "unknown")
                     status = getattr(self.x, "last_http_status_code", "unknown")
                     logging.debug(
@@ -745,7 +857,7 @@ class ExchangeAdapter:
 
         try:
             ex = getattr(self, "x", None)
-            params = self._default_params()
+            params = self._default_params(symbol=symbol)
             if ex and hasattr(ex, "fetch_open_orders"):
                 orders = _call_fetch(ex, symbol, params) or []
                 ids = [o.get("id") or o.get("orderId") for o in orders]
@@ -756,7 +868,7 @@ class ExchangeAdapter:
                 time.sleep(1.0)
                 try:
                     ex = getattr(self, "x", None)
-                    params = self._default_params()
+                    params = self._default_params(symbol=symbol)
                     if ex and hasattr(ex, "fetch_open_orders"):
                         orders = _call_fetch(ex, symbol, params) or []
                         ids = [o.get("id") or o.get("orderId") for o in orders]
@@ -779,7 +891,7 @@ class ExchangeAdapter:
             if not cnt:
                 return (0, [])
 
-            params = self._default_params()
+            params = self._default_params(symbol=symbol)
             if hasattr(self.x, "cancel_all_orders"):
                 try:
                     if params:
@@ -832,7 +944,32 @@ class ExchangeAdapter:
             markets = self.x.load_markets(False) or {}
         except Exception:
             markets = {}
-        return set(markets.keys())
+
+        names: set[str] = set()
+        if isinstance(markets, dict):
+            iterable = markets.items()
+        else:
+            iterable = ((name, {}) for name in markets)
+
+        for name, info in iterable:
+            if not name:
+                continue
+            if isinstance(name, str):
+                names.add(name)
+                if ":" in name:
+                    names.add(name.split(":", 1)[0])
+            if not isinstance(info, dict):
+                continue
+            symbol = info.get("symbol")
+            if isinstance(symbol, str) and symbol:
+                names.add(symbol)
+                if ":" in symbol:
+                    names.add(symbol.split(":", 1)[0])
+            base = info.get("base")
+            quote = info.get("quote")
+            if isinstance(base, str) and isinstance(quote, str) and base and quote:
+                names.add(f"{base}/{quote}")
+        return names
 
     # ------------------------------------------------------------------
     def _warn_once(self, key: tuple[str, str], message: str) -> None:
