@@ -50,6 +50,182 @@ def _is_bybit_exchange(exchange) -> bool:
     return "bybit" in ex_id
 
 
+def _market_category_from_meta(market: dict | None) -> str | None:
+    """Return Bybit-style market category from a CCXT market description."""
+
+    if not isinstance(market, dict):
+        return None
+
+    info = market.get("info") or {}
+    if isinstance(info, dict):
+        for key in ("category", "contractType", "productType", "market"):
+            value = info.get(key)
+            if isinstance(value, str) and value:
+                return value.lower()
+
+    market_type = str(market.get("type") or "").lower()
+    if market.get("spot") or market_type == "spot":
+        return "spot"
+    if market.get("option") or market_type == "option":
+        return "option"
+    if market.get("inverse"):
+        return "inverse"
+    if market.get("linear"):
+        return "linear"
+    if market.get("swap"):
+        settle = str(market.get("settle") or market.get("settleId") or "").upper()
+        quote = str(market.get("quote") or "").upper()
+        if settle and quote and settle != quote:
+            return "inverse"
+        return "linear"
+    if market_type in {"swap", "future"}:
+        settle = str(market.get("settle") or market.get("settleId") or "").upper()
+        quote = str(market.get("quote") or "").upper()
+        if settle and quote and settle != quote:
+            return "inverse"
+        if settle or quote:
+            return "linear"
+    return None
+
+
+def detect_market_category(exchange, symbol: str) -> str | None:
+    """Best-effort detection of the market category for ``symbol``.
+
+    The helper mirrors :meth:`ExchangeAdapter._detect_bybit_category` so the
+    trading utilities can consistently decide whether an instrument is spot or
+    derivative even when the adapter itself is bypassed (``safe_create_order``
+    works directly with the underlying CCXT exchange instance).
+    """
+
+    if not symbol:
+        return None
+
+    market = None
+    try:  # pragma: no cover - depends on CCXT metadata availability
+        market = exchange.market(symbol)
+    except Exception:
+        market = None
+
+    category = _market_category_from_meta(market)
+    if category:
+        return category
+
+    markets = getattr(exchange, "markets", {}) or {}
+    if symbol in markets:
+        category = _market_category_from_meta(markets.get(symbol))
+        if category:
+            return category
+
+    base = quote = None
+    if isinstance(market, dict):
+        base = market.get("base")
+        quote = market.get("quote")
+    if (not base or not quote) and "/" in symbol:
+        base, quote = symbol.split("/", 1)
+
+    base = str(base or "").upper()
+    quote = str(quote or "").upper()
+
+    if markets and base and quote:
+        for meta in markets.values():
+            if not isinstance(meta, dict):
+                continue
+            if str(meta.get("base") or "").upper() != base:
+                continue
+            if str(meta.get("quote") or "").upper() != quote:
+                continue
+            category = _market_category_from_meta(meta)
+            if category:
+                return category
+
+    return None
+
+
+def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
+    """Return CCXT symbol matching the requested Bybit ``category``."""
+
+    if not _is_bybit_exchange(exchange):
+        return symbol
+
+    category_norm = str(category or "").lower()
+    if not category_norm or category_norm == "spot":
+        return symbol
+
+    markets = getattr(exchange, "markets", {}) or {}
+
+    def _match_market(meta: dict | None) -> str | None:
+        if not isinstance(meta, dict):
+            return None
+        meta_category = _market_category_from_meta(meta)
+        if category_norm == meta_category:
+            mapped = meta.get("symbol") or meta.get("id")
+            if isinstance(mapped, str) and mapped:
+                return mapped
+        if category_norm == "linear" and (
+            meta.get("linear")
+            or meta.get("swap")
+            or meta_category in {"linear", "swap"}
+        ):
+            mapped = meta.get("symbol") or meta.get("id")
+            if isinstance(mapped, str) and mapped:
+                return mapped
+        if category_norm == "inverse" and (
+            meta.get("inverse")
+            or meta_category == "inverse"
+        ):
+            mapped = meta.get("symbol") or meta.get("id")
+            if isinstance(mapped, str) and mapped:
+                return mapped
+        return None
+
+    try:  # pragma: no cover - relies on CCXT metadata
+        current = exchange.market(symbol)
+    except Exception:
+        current = markets.get(symbol)
+
+    mapped = _match_market(current)
+    if mapped:
+        return mapped
+
+    base = quote = None
+    if isinstance(current, dict):
+        base = current.get("base")
+        quote = current.get("quote")
+    if (not base or not quote) and "/" in symbol:
+        base, quote = symbol.split("/", 1)
+
+    base = str(base or "").upper()
+    quote = str(quote or "").upper()
+
+    if markets and base and quote:
+        for meta in markets.values():
+            if not isinstance(meta, dict):
+                continue
+            if str(meta.get("base") or "").upper() != base:
+                continue
+            if str(meta.get("quote") or "").upper() != quote:
+                continue
+            mapped = _match_market(meta)
+            if mapped:
+                return mapped
+
+    if "/" in symbol:
+        base_raw, quote_raw = symbol.split("/", 1)
+        candidates = [
+            f"{base_raw}{quote_raw}",
+            f"{base_raw}{quote_raw}:{quote_raw}",
+            f"{base_raw}/{quote_raw}:{quote_raw}",
+        ]
+        markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
+        for cand in candidates:
+            meta = markets.get(cand) or markets_by_id.get(cand)
+            mapped = _match_market(meta)
+            if mapped:
+                return mapped
+
+    return symbol
+
+
 def _with_bybit_order_params(exchange, params: dict | None) -> dict | None:
     """Inject Bybit specific parameters when required.
 
@@ -1031,6 +1207,12 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                       qty: float, price=None, params=None):
     """Create an order with retry and PERCENT_PRICE handling."""
     params = _with_bybit_order_params(exchange, params)
+    normalized_symbol = _normalize_bybit_symbol(
+        exchange, symbol, (params or {}).get("category")
+    )
+    display_symbol = symbol
+    status_key = display_symbol
+    symbol = normalized_symbol
     if not getattr(exchange, "markets", None):
         try:
             exchange.load_markets()
@@ -1078,18 +1260,25 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
             side=side,
         )
     except Exception as exc:
-        logging.warning("order | %s | normalization failed: %s", symbol, exc)
-        log(logging.WARNING, "order", symbol, f"normalization failed: {exc}")
+        logging.warning(
+            "order | %s | normalization failed: %s", display_symbol, exc
+        )
+        log(
+            logging.WARNING,
+            "order",
+            display_symbol,
+            f"normalization failed: {exc}",
+        )
         tag = "order_normalization_failed"
-        if tag not in _order_status[symbol]:
-            _order_status[symbol].append(tag)
+        if tag not in _order_status[status_key]:
+            _order_status[status_key].append(tag)
         return None, "normalization_failed"
     if skip_reason is not None:
         msg = f"order skipped: {skip_reason} (requested={qty})"
-        log(logging.INFO, "order", symbol, msg)
+        log(logging.INFO, "order", display_symbol, msg)
         tag = f"order_{skip_reason}"
-        if tag not in _order_status[symbol]:
-            _order_status[symbol].append(tag)
+        if tag not in _order_status[status_key]:
+            _order_status[status_key].append(tag)
         return None, skip_reason
     qty = norm_qty
 
@@ -1109,47 +1298,59 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
             filled = float(order.get("executedQty") or order.get("filled") or qty)
             original = float(order.get("origQty") or qty)
             # discard any previously stored failure messages after a successful order
-            _order_status[symbol] = [
-                m for m in _order_status[symbol] if not m.lower().startswith("order failed")
+            _order_status[status_key] = [
+                m
+                for m in _order_status[status_key]
+                if not m.lower().startswith("order failed")
             ]
             if status == "FILLED" or filled == original:
                 msg = f"✅ Order {side.upper()} {filled:g} @ {avg_price} ({status or 'FILLED'})"
-                if msg not in _order_status[symbol]:
-                    _order_status[symbol].append(msg)
+                if msg not in _order_status[status_key]:
+                    _order_status[status_key].append(msg)
                 return order_id, None
             else:
                 msg = f"⚠️ Order {status}: {filled:g}/{original:g} filled"
-                if msg not in _order_status[symbol]:
-                    _order_status[symbol].append(msg)
+                if msg not in _order_status[status_key]:
+                    _order_status[status_key].append(msg)
                 return order_id, None
         except Exception as e:
             err_str = str(e)
             err_lower = err_str.lower()
             if "170131" in err_str or "insufficient balance" in err_lower:
                 msg = "order_insufficient_balance"
-                if msg not in _order_status[symbol]:
-                    _order_status[symbol].append(msg)
+                if msg not in _order_status[status_key]:
+                    _order_status[status_key].append(msg)
                 log(
                     logging.WARNING,
                     "order",
-                    symbol,
+                    display_symbol,
                     "insufficient balance while creating order",
                 )
                 return None, "insufficient_balance"
             if "-4131" in err_str and not is_market_like:
                 if attempt == 0:
-                    log(logging.WARNING, "order", symbol, "Order failed due to percent price filter, retrying...")
-                    _order_status[symbol].append("order_retry_limit_price_adjusted")
+                    log(
+                        logging.WARNING,
+                        "order",
+                        display_symbol,
+                        "Order failed due to percent price filter, retrying...",
+                    )
+                    _order_status[status_key].append("order_retry_limit_price_adjusted")
                     best = _best_price()
                     if best:
                         factor = 1.001 if side == "buy" else 0.999
                         adj_price = _apply_filters(best, best * factor)
                     continue
                 if ALLOW_MARKET_FALLBACK:
-                    log(logging.WARNING, "order", symbol, "Switched to market order")
-                    _order_status[symbol].append("order_fallback_to_market")
-                    _order_status[symbol].append("order_market_fallback")
-                    _order_status[symbol].append("order_cancelled")
+                    log(
+                        logging.WARNING,
+                        "order",
+                        display_symbol,
+                        "Switched to market order",
+                    )
+                    _order_status[status_key].append("order_fallback_to_market")
+                    _order_status[status_key].append("order_market_fallback")
+                    _order_status[status_key].append("order_cancelled")
                     try:
                         order = exchange.create_order(symbol, "market", side, qty, None, params)
                         order_id = order.get("id") or order.get("orderId")
@@ -1158,8 +1359,8 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                     except Exception as me:
                         err_str = str(me)
                     msg = "order_failed_percent_filter"
-                    if msg not in _order_status[symbol]:
-                        _order_status[symbol].append(msg)
+                    if msg not in _order_status[status_key]:
+                        _order_status[status_key].append(msg)
                     return None, err_str
             specific = None
             if "-2019" in err_str and "Margin is insufficient" in err_str:
@@ -1171,8 +1372,8 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
             elif "-4164" in err_str:
                 specific = "❌ Минимальный объем ордера 10 USDT."
             msg = f"Order failed: {specific or err_str}"
-            if msg not in _order_status[symbol]:
-                _order_status[symbol].append(msg)
+            if msg not in _order_status[status_key]:
+                _order_status[status_key].append(msg)
             return None, err_str
 
 

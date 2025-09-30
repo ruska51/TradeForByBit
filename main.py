@@ -123,6 +123,7 @@ from logging_utils import (
     record_summary,
     emit_summary,
     _is_bybit_exchange,
+    detect_market_category,
 )
 from retrain_utils import retrain_global_model
 from fallback import fallback_signal
@@ -3591,8 +3592,12 @@ def place_protected_exit(
 
     is_bybit = _is_bybit_exchange(exchange)
 
+    market_category = detect_market_category(exchange, symbol) if is_bybit else None
+
     def _determine_trigger_direction(kind: str) -> int | None:
         if not is_bybit:
+            return None
+        if market_category == "spot":
             return None
         upper_kind = kind.upper()
         is_tp = "TAKE_PROFIT" in upper_kind
