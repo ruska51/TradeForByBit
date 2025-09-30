@@ -148,8 +148,21 @@ class ExchangeAdapter:
             self._verify_exchange_options()
 
     # ------------------------------------------------------------------
-    def _default_params(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Return params extended with exchange specific defaults."""
+    def _default_params(
+        self,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        include_position_idx: bool = True,
+    ) -> Dict[str, Any]:
+        """Return params extended with exchange specific defaults.
+
+        Some Bybit endpoints (private order management) require ``positionIdx``
+        while public market-data endpoints reject it.  Previously the adapter
+        always injected ``positionIdx`` which resulted in empty responses when
+        requesting OHLCV candles on the testnet API.  The caller can now opt out
+        via ``include_position_idx`` so market data requests remain compatible
+        without regressing the trading endpoints that still expect the value.
+        """
 
         base = dict(params or {})
         ex_id = str(getattr(self, "exchange_id", "") or "").lower()
@@ -157,7 +170,10 @@ class ExchangeAdapter:
             ex_id = str(getattr(self.x, "id", "") or "").lower()
         if "bybit" in ex_id:
             base.setdefault("category", "linear")
-            base.setdefault("positionIdx", base.get("positionIdx", 0))
+            if include_position_idx and self.futures:
+                base.setdefault("positionIdx", base.get("positionIdx", 0))
+            elif not include_position_idx:
+                base.pop("positionIdx", None)
         return base
 
     # ------------------------------------------------------------------
@@ -457,7 +473,7 @@ class ExchangeAdapter:
                 raise AdapterOHLCVUnavailable(f"markets empty for {symbol}")
 
         log_params = {"symbol": symbol, "timeframe": timeframe, "limit": limit}
-        request_params = self._default_params() or None
+        request_params = self._default_params(include_position_idx=False) or None
 
         try:
             data = self._fetch_ohlcv_call(symbol, timeframe, limit, request_params)
