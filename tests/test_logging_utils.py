@@ -11,6 +11,7 @@ from logging_utils import (
     ensure_report_schema,
     TRADES_CSV_HEADER,
     LOG_ENTRY_FIELDS,
+    detect_market_category,
 )
 
 class DummyExchange:
@@ -186,6 +187,28 @@ class BybitExitExchange:
         return {"id": "3", "status": "FILLED", "filled": qty}
 
 
+class FakeBybitLinearExchange:
+    id = "bybit"
+
+    def __init__(self):
+        self.markets = {
+            "ETH/USDT:USDT": {
+                "symbol": "ETH/USDT:USDT",
+                "id": "ETHUSDT",
+                "info": {"category": "linear"},
+                "linear": True,
+            }
+        }
+        self.markets_by_id = self.markets
+        self.params = {"category": "linear"}
+
+    def market(self, symbol):
+        result = self.markets.get(symbol)
+        if result is None:
+            raise KeyError(symbol)
+        return result
+
+
 def test_safe_create_order_percent_filter_retry(caplog):
     setup_logger()
     import logging
@@ -230,6 +253,11 @@ def test_safe_create_order_bybit_stop_market_normalized(caplog):
     assert err is None
     assert ex.calls[-1][0] == "market"
     assert ex.calls[-1][-1]["orderType"] == "Market"
+
+
+def test_detect_market_category_linear_mapping():
+    exchange = FakeBybitLinearExchange()
+    assert detect_market_category(exchange, "ETH/USDT") == "linear"
 
 
 def test_ensure_trades_csv_header_migrates(tmp_path):
