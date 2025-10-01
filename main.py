@@ -4722,6 +4722,30 @@ def run_bot():
         trend_state = determine_trend(df_trend)
         mode, mode_params, data_mode = select_trade_mode(symbol, df_trend)
         mode_lev = mode_params.get("lev", LEVERAGE)
+        market_category = detect_market_category(exchange, symbol)
+        if market_category is None:
+            adapter_category = getattr(ADAPTER, "_detect_bybit_category", None)
+            if callable(adapter_category):
+                try:
+                    market_category = adapter_category(symbol)
+                except Exception as exc:
+                    logging.debug(
+                        "market | %s | adapter category lookup failed: %s",
+                        symbol,
+                        exc,
+                    )
+        market_category = (market_category or "").lower() or None
+        derivative_categories = {
+            "linear",
+            "inverse",
+            "swap",
+            "perpetual",
+            "future",
+            "futures",
+        }
+        is_derivative_market = market_category in derivative_categories
+        if market_category == "spot":
+            mode_lev = 1
 
         # --- Prepare dataframes for trend confirmation ---
         trend_dfs: dict[str, pd.DataFrame] = {}
@@ -5214,7 +5238,14 @@ def run_bot():
 
         # === Дополнительная фильтрация по тренду и паттернам ===
         rsi_val = df_trend["rsi"].iloc[-1]
-        set_valid_leverage(exchange, symbol, mode_lev)
+        if is_derivative_market:
+            set_valid_leverage(exchange, symbol, mode_lev)
+        else:
+            logging.debug(
+                "leverage | %s | Skipping leverage setup for %s market",
+                symbol,
+                market_category or "unknown",
+            )
         if not use_fallback:
             if signal_to_use == "long" and rsi_val > adj_rsi_overbought:
                 log_decision(symbol, "rsi_overbought")
@@ -5288,6 +5319,7 @@ def run_bot():
             "trend": trend_state,
             "used_fallback": use_fallback,
             "reason": entry_reason,
+            "market_category": market_category,
         }
         balance_info = safe_fetch_balance(exchange, {"type": "future"})
         equity = float((balance_info.get("total") or {}).get("USDT", 0.0))
@@ -5463,7 +5495,15 @@ def run_bot():
             )
             vol_risk_fb = 0.5 if vol_reason_fb == "vol_missing" else 1.0
             trend_state = determine_trend(df_trend)
-            set_valid_leverage(exchange, symbol, LEVERAGE)
+            fallback_leverage = LEVERAGE if is_derivative_market else 1
+            if is_derivative_market:
+                set_valid_leverage(exchange, symbol, fallback_leverage)
+            else:
+                logging.debug(
+                    "leverage | %s | Skipping leverage setup for %s market",
+                    symbol,
+                    market_category or "unknown",
+                )
             ctx = {
                 "rsi": float(rsi_val),
                 "adx": float(adx_val),
@@ -5474,6 +5514,7 @@ def run_bot():
                 "reason": "idle_fallback",
                 "vol_ratio": vol_ratio_fb,
                 "vol_reason": vol_reason_fb,
+                "market_category": market_category,
             }
             success_fb = run_trade(
                 symbol,
@@ -5485,6 +5526,7 @@ def run_bot():
                 sl_mult=1.5,
                 tp_mult=3.0,
                 risk_factor=0.5 * soft_risk * vol_risk_fb,
+                leverage=fallback_leverage,
             )
             if success_fb:
                 recent_hits.append(True)
