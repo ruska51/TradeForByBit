@@ -100,18 +100,33 @@ def detect_market_category(exchange, symbol: str) -> str | None:
     if not symbol:
         return None
 
+    normalized_symbol = _normalize_bybit_symbol(exchange, symbol, None)
+    search_symbols: list[str] = []
+    for candidate in (normalized_symbol, symbol):
+        if isinstance(candidate, str) and candidate and candidate not in search_symbols:
+            search_symbols.append(candidate)
+
     market = None
-    try:  # pragma: no cover - depends on CCXT metadata availability
-        market = exchange.market(symbol)
-    except Exception:
-        market = None
+    for candidate in search_symbols:
+        try:  # pragma: no cover - depends on CCXT metadata availability
+            market = exchange.market(candidate)
+            if market:
+                break
+        except Exception:
+            market = None
+
+    lookup_symbol = search_symbols[0] if search_symbols else symbol
 
     category = _market_category_from_meta(market)
     if category:
         return category
 
     markets = getattr(exchange, "markets", {}) or {}
-    if symbol in markets:
+    if lookup_symbol in markets:
+        category = _market_category_from_meta(markets.get(lookup_symbol))
+        if category:
+            return category
+    if lookup_symbol != symbol and symbol in markets:
         category = _market_category_from_meta(markets.get(symbol))
         if category:
             return category
@@ -120,6 +135,8 @@ def detect_market_category(exchange, symbol: str) -> str | None:
     if isinstance(market, dict):
         base = market.get("base")
         quote = market.get("quote")
+    if (not base or not quote) and "/" in lookup_symbol:
+        base, quote = lookup_symbol.split("/", 1)
     if (not base or not quote) and "/" in symbol:
         base, quote = symbol.split("/", 1)
 
@@ -130,15 +147,53 @@ def detect_market_category(exchange, symbol: str) -> str | None:
         for meta in markets.values():
             if not isinstance(meta, dict):
                 continue
-            if str(meta.get("base") or "").upper() != base:
-                continue
-            if str(meta.get("quote") or "").upper() != quote:
+            meta_base = str(meta.get("base") or "").upper()
+            meta_quote = str(meta.get("quote") or "").upper()
+            if not meta_base or not meta_quote:
+                mapped = meta.get("symbol") or meta.get("id")
+                if isinstance(mapped, str) and "/" in mapped:
+                    meta_base, meta_quote = mapped.split("/", 1)
+                    meta_base = meta_base.upper()
+                    meta_quote = meta_quote.split(":", 1)[0].upper()
+            if meta_base != base or meta_quote != quote:
                 continue
             category = _market_category_from_meta(meta)
             if category:
                 return category
 
-    return None
+    category = None
+
+    if lookup_symbol in markets:
+        category = _market_category_from_meta(markets.get(lookup_symbol))
+    if not category and lookup_symbol != symbol and symbol in markets:
+        category = _market_category_from_meta(markets.get(symbol))
+
+    if category == "spot":
+        def _has_linear_params(obj) -> bool:
+            params = getattr(obj, "params", None)
+            if isinstance(params, dict):
+                cat = params.get("category") or params.get("categoryType")
+                if isinstance(cat, str) and cat.lower() == "linear":
+                    return True
+            return False
+
+        futures_hint = bool(getattr(exchange, "futures", False)) or _has_linear_params(
+            exchange
+        )
+        adapter = getattr(exchange, "adapter", None)
+        if adapter is not None:
+            futures_hint = futures_hint or bool(getattr(adapter, "futures", False))
+            futures_hint = futures_hint or _has_linear_params(adapter)
+        if not futures_hint:
+            main_mod = sys.modules.get("main")
+            main_adapter = getattr(main_mod, "ADAPTER", None) if main_mod else None
+            if main_adapter and getattr(main_adapter, "x", None) is exchange:
+                futures_hint = bool(getattr(main_adapter, "futures", False))
+                futures_hint = futures_hint or _has_linear_params(main_adapter)
+        if futures_hint:
+            return "linear"
+
+    return category
 
 
 def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
@@ -148,64 +203,122 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
         return symbol
 
     category_norm = str(category or "").lower()
-    if not category_norm or category_norm == "spot":
-        return symbol
-
     markets = getattr(exchange, "markets", {}) or {}
+    markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
 
-    def _match_market(meta: dict | None) -> str | None:
+    def _extract_base_quote(meta: dict | None) -> tuple[str, str]:
+        if not isinstance(meta, dict):
+            return "", ""
+        base_raw = str(meta.get("base") or "").upper()
+        quote_raw = str(meta.get("quote") or "").upper()
+        mapped = meta.get("symbol") or meta.get("id")
+        if (not base_raw or not quote_raw) and isinstance(mapped, str) and "/" in mapped:
+            base_raw, quote_part = mapped.split("/", 1)
+            base_raw = base_raw.upper()
+            quote_raw = quote_part.split(":", 1)[0].upper()
+        return base_raw, quote_raw
+
+    def _mapped_symbol(meta: dict | None) -> str | None:
+        if not isinstance(meta, dict):
+            return None
+        mapped = meta.get("symbol") or meta.get("id")
+        if isinstance(mapped, str) and mapped:
+            return mapped
+        return None
+
+    def _match_with_category(meta: dict | None) -> str | None:
         if not isinstance(meta, dict):
             return None
         meta_category = _market_category_from_meta(meta)
-        if category_norm == meta_category:
-            mapped = meta.get("symbol") or meta.get("id")
-            if isinstance(mapped, str) and mapped:
-                return mapped
-        if category_norm == "linear" and (
-            meta.get("linear")
-            or meta.get("swap")
-            or meta_category in {"linear", "swap"}
-        ):
-            mapped = meta.get("symbol") or meta.get("id")
-            if isinstance(mapped, str) and mapped:
-                return mapped
-        if category_norm == "inverse" and (
-            meta.get("inverse")
-            or meta_category == "inverse"
-        ):
-            mapped = meta.get("symbol") or meta.get("id")
-            if isinstance(mapped, str) and mapped:
-                return mapped
+        if category_norm == "linear":
+            if (
+                meta.get("linear")
+                or meta.get("swap")
+                or meta_category in {"linear", "swap"}
+            ):
+                return _mapped_symbol(meta)
+        elif category_norm == "inverse":
+            if meta.get("inverse") or meta_category == "inverse":
+                return _mapped_symbol(meta)
+        elif category_norm == meta_category:
+            return _mapped_symbol(meta)
         return None
 
     try:  # pragma: no cover - relies on CCXT metadata
         current = exchange.market(symbol)
     except Exception:
-        current = markets.get(symbol)
+        current = markets.get(symbol) or markets_by_id.get(symbol)
 
-    mapped = _match_market(current)
+    if not category_norm or category_norm == "spot":
+        mapped = _mapped_symbol(current)
+        if mapped:
+            return mapped
+        if symbol in markets:
+            mapped = _mapped_symbol(markets.get(symbol))
+            if mapped:
+                return mapped
+
+        base, quote = _extract_base_quote(current)
+        if (not base or not quote) and "/" in symbol:
+            base_raw, quote_raw = symbol.split("/", 1)
+            base = base or base_raw.upper()
+            quote = quote or quote_raw.split(":", 1)[0].upper()
+
+        preferred_spot = None
+        fallback_symbol = None
+
+        for meta in markets.values():
+            if not isinstance(meta, dict):
+                continue
+            if base and quote:
+                meta_base, meta_quote = _extract_base_quote(meta)
+                if meta_base and meta_quote and (
+                    meta_base != base or meta_quote != quote
+                ):
+                    continue
+            mapped_meta = _mapped_symbol(meta)
+            if not mapped_meta:
+                continue
+            meta_category = _market_category_from_meta(meta)
+            if category_norm == "spot":
+                if meta_category == "spot" or (
+                    meta_category is None and meta.get("spot") is not False
+                ):
+                    return mapped_meta
+                continue
+            if meta_category in {None, "", "spot"} and preferred_spot is None:
+                preferred_spot = mapped_meta
+                if meta_category == "spot":
+                    break
+            elif fallback_symbol is None:
+                fallback_symbol = mapped_meta
+
+        if category_norm == "spot":
+            return preferred_spot or symbol
+        return preferred_spot or fallback_symbol or symbol
+
+    mapped = _match_with_category(current)
     if mapped:
         return mapped
 
-    base = quote = None
+    base = quote = ""
     if isinstance(current, dict):
-        base = current.get("base")
-        quote = current.get("quote")
+        base, quote = _extract_base_quote(current)
     if (not base or not quote) and "/" in symbol:
-        base, quote = symbol.split("/", 1)
-
-    base = str(base or "").upper()
-    quote = str(quote or "").upper()
+        base_raw, quote_raw = symbol.split("/", 1)
+        base = base or base_raw.upper()
+        quote = quote or quote_raw.split(":", 1)[0].upper()
 
     if markets and base and quote:
         for meta in markets.values():
             if not isinstance(meta, dict):
                 continue
-            if str(meta.get("base") or "").upper() != base:
+            meta_base, meta_quote = _extract_base_quote(meta)
+            if not meta_base or not meta_quote:
                 continue
-            if str(meta.get("quote") or "").upper() != quote:
+            if meta_base != base or meta_quote != quote:
                 continue
-            mapped = _match_market(meta)
+            mapped = _match_with_category(meta)
             if mapped:
                 return mapped
 
@@ -216,10 +329,9 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
             f"{base_raw}{quote_raw}:{quote_raw}",
             f"{base_raw}/{quote_raw}:{quote_raw}",
         ]
-        markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
         for cand in candidates:
             meta = markets.get(cand) or markets_by_id.get(cand)
-            mapped = _match_market(meta)
+            mapped = _match_with_category(meta)
             if mapped:
                 return mapped
 
