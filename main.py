@@ -3808,6 +3808,9 @@ def ensure_exit_orders(
     if not exchange_obj or not hasattr(exchange_obj, "fetch_open_orders"):
         return
 
+    is_bybit = _is_bybit_exchange(exchange_obj)
+    category = detect_market_category(exchange_obj, symbol) if is_bybit else None
+
     try:
         qty_value = float(qty)
     except (TypeError, ValueError):
@@ -3817,6 +3820,16 @@ def ensure_exit_orders(
 
     side_norm = str(side or "").lower()
     exit_side = "sell" if side_norm == "long" else "buy"
+    closing_long = exit_side.lower() == "sell"
+
+    def _determine_trigger_direction(kind: str) -> str | None:
+        if not is_bybit or category == "spot":
+            return None
+        upper_kind = str(kind or "").upper()
+        is_tp = "TAKE_PROFIT" in upper_kind
+        if closing_long:
+            return "ascending" if is_tp else "descending"
+        return "descending" if is_tp else "ascending"
 
     try:
         qty_value = float(exchange_obj.amount_to_precision(symbol, qty_value))
@@ -3826,10 +3839,10 @@ def ensure_exit_orders(
         return
 
     fetch_params: dict[str, Any] = {}
-    ex_id = str(getattr(exchange_obj, "id", "") or getattr(exchange_obj, "name", "")).lower()
-    if "bybit" in ex_id:
-        fetch_params["category"] = "linear"
-        fetch_params.setdefault("positionIdx", 0)
+    if is_bybit:
+        fetch_params["category"] = category or "linear"
+        if category != "spot":
+            fetch_params.setdefault("positionIdx", 0)
     try:
         if fetch_params:
             try:
@@ -3913,6 +3926,10 @@ def ensure_exit_orders(
                 "closePosition": True,
                 "reduceOnly": True,
             }
+            trigger_direction = _determine_trigger_direction("STOP_MARKET")
+            if trigger_direction is not None:
+                params["triggerDirection"] = trigger_direction
+                params.setdefault("triggerBy", "LastPrice")
             order_id, err = safe_create_order(
                 exchange_obj,
                 symbol,
@@ -3944,6 +3961,10 @@ def ensure_exit_orders(
                 "closePosition": True,
                 "priceProtect": True,
             }
+            trigger_direction = _determine_trigger_direction("TAKE_PROFIT_MARKET")
+            if trigger_direction is not None:
+                params["triggerDirection"] = trigger_direction
+                params.setdefault("triggerBy", "LastPrice")
             order_id, err = safe_create_order(
                 exchange_obj,
                 symbol,
