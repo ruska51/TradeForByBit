@@ -1482,8 +1482,8 @@ def calculate_indicators(df):
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(subset=["open", "high", "low", "close", "volume"], inplace=True)
-    df.fillna(method="ffill", inplace=True)
-    df.fillna(method="bfill", inplace=True)
+    df.ffill(inplace=True)
+    df.bfill(inplace=True)
     df.fillna(0.0, inplace=True)
 
     return df
