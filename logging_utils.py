@@ -247,6 +247,21 @@ def _with_bybit_order_params(exchange, params: dict | None) -> dict | None:
     return merged
 
 
+def _normalize_bybit_order_type_value(order_type: str) -> str:
+    """Translate high level order types to Bybit supported values."""
+
+    normalized = str(order_type or "").lower()
+    mapping = {
+        "stop_market": "market",
+        "take_profit_market": "market",
+        "stop_limit": "limit",
+        "take_profit_limit": "limit",
+        "stop": "market",
+        "take_profit": "market",
+    }
+    return mapping.get(normalized, normalized)
+
+
 def _normalize_balance_params(exchange, params: dict | None) -> dict | None:
     """Translate generic balance parameters to exchange specific ones."""
 
@@ -1286,10 +1301,14 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
         best = best_price
         adj_price = _apply_filters(best, adj_price if adj_price is not None else best)
 
+    order_type_api = order_type
+    if _is_bybit_exchange(exchange):
+        order_type_api = _normalize_bybit_order_type_value(order_type)
+
     for attempt in range(2):
         try:
             price_arg = None if is_market_like else adj_price
-            order = exchange.create_order(symbol, order_type, side, qty, price_arg, params)
+            order = exchange.create_order(symbol, order_type_api, side, qty, price_arg, params)
             order_id = order.get("id") or order.get("orderId")
             status = str(order.get("status", "")).upper()
             if not order_id or status.lower() in {"rejected", "canceled"}:

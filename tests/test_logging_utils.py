@@ -144,6 +144,48 @@ class FallbackExchange(PercentFilterBase):
         return {"id": "2", "status": "FILLED", "price": price, "filled": qty}
 
 
+class BybitExitExchange:
+    id = "bybit"
+
+    def __init__(self):
+        self.calls = []
+        self.markets = {
+            "ETH/USDT": {
+                "symbol": "ETH/USDT",
+                "precision": {"amount": 3},
+                "limits": {
+                    "amount": {"min": 0.001, "step": 0.001},
+                    "cost": {"min": 5.0},
+                },
+                "info": {
+                    "filters": [
+                        {
+                            "filterType": "LOT_SIZE",
+                            "minQty": "0.001",
+                            "stepSize": "0.001",
+                        }
+                    ]
+                },
+            }
+        }
+
+    def market(self, symbol):
+        return self.markets.get(symbol, {})
+
+    def fetch_ticker(self, symbol):
+        return {"ask": 101.0, "bid": 100.0}
+
+    def price_to_precision(self, symbol, price):
+        return f"{float(price):.2f}"
+
+    def amount_to_precision(self, symbol, amount):
+        return f"{float(amount):.3f}"
+
+    def create_order(self, symbol, order_type, side, qty, price=None, params=None):
+        self.calls.append((order_type, side, qty, price, params))
+        return {"id": "3", "status": "FILLED", "filled": qty}
+
+
 def test_safe_create_order_percent_filter_retry(caplog):
     setup_logger()
     import logging
@@ -173,6 +215,21 @@ def test_safe_create_order_percent_filter_market_fallback(caplog):
     flush_symbol_logs("BTC/USDT")
     logged = caplog.text
     assert "order_market_fallback" in logged
+
+
+def test_safe_create_order_bybit_stop_market_normalized(caplog):
+    setup_logger()
+    import logging
+
+    logging.getLogger().addHandler(caplog.handler)
+    caplog.set_level("INFO")
+    ex = BybitExitExchange()
+    params = {"triggerPrice": 950.0, "orderType": "Market"}
+    order_id, err = safe_create_order(ex, "ETH/USDT", "STOP_MARKET", "sell", 1.0, None, params)
+    assert order_id == "3"
+    assert err is None
+    assert ex.calls[-1][0] == "market"
+    assert ex.calls[-1][-1]["orderType"] == "Market"
 
 
 def test_ensure_trades_csv_header_migrates(tmp_path):

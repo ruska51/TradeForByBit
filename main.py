@@ -3699,6 +3699,10 @@ def place_protected_exit(
         if trigger_direction is not None:
             params_local["triggerDirection"] = trigger_direction
             params_local.setdefault("triggerBy", "LastPrice")
+        if is_bybit:
+            params_local.setdefault("orderType", "Market" if is_market else "Limit")
+            if market_category:
+                params_local.setdefault("category", market_category)
         if "STOP" in upper_kind:
             params_local["slTriggerBy"] = "LastPrice"
             params_local["slOrderType"] = "Market" if is_market else "Limit"
