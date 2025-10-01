@@ -5580,32 +5580,35 @@ def run_bot_loop():
     logging.info("[run_bot_loop] Loop starting...")
     last_analysis = time.time()
     analysis_interval = 60 * 60 * 3  # 3 hours
-    while True:
-        ensure_model_loaded(ADAPTER, symbols)
-        try:
-            run_bot()
-        except Exception as e:
-            logging.error(f"Unhandled error in bot loop: {e}", exc_info=True)
-        global _cycle_counter
-        _cycle_counter += 1
-        if _cycle_counter % SUMMARY_CYCLES == 0:
-            _summarize_events()
-        if _cycle_counter % PATTERN_HIT_LOG_CYCLES == 0 and pattern_hit_rates:
-            for sym, rate in pattern_hit_rates.items():
-                logging.info("pattern_hit_rate | %s | %.2f", sym, rate)
-        if time.time() - last_analysis >= analysis_interval:
-            logging.info("[run_bot_loop] Running scheduled trade analysis...")
+    try:
+        while True:
+            ensure_model_loaded(ADAPTER, symbols)
             try:
-                run_trade_analysis(n_trials=100)
-                for sym, params in best_params_cache.items():
-                    if sym == "GLOBAL":
-                        continue
-                    apply_params(params)
+                run_bot()
             except Exception as e:
-                logging.error(f"Trade analysis error: {e}", exc_info=True)
-            last_analysis = time.time()
-        logging.info("[LOOP] Sleeping 5 minutes...")
-        time.sleep(60 * 5)
+                logging.error(f"Unhandled error in bot loop: {e}", exc_info=True)
+            global _cycle_counter
+            _cycle_counter += 1
+            if _cycle_counter % SUMMARY_CYCLES == 0:
+                _summarize_events()
+            if _cycle_counter % PATTERN_HIT_LOG_CYCLES == 0 and pattern_hit_rates:
+                for sym, rate in pattern_hit_rates.items():
+                    logging.info("pattern_hit_rate | %s | %.2f", sym, rate)
+            if time.time() - last_analysis >= analysis_interval:
+                logging.info("[run_bot_loop] Running scheduled trade analysis...")
+                try:
+                    run_trade_analysis(n_trials=100)
+                    for sym, params in best_params_cache.items():
+                        if sym == "GLOBAL":
+                            continue
+                        apply_params(params)
+                except Exception as e:
+                    logging.error(f"Trade analysis error: {e}", exc_info=True)
+                last_analysis = time.time()
+            logging.info("[LOOP] Sleeping 5 minutes...")
+            time.sleep(60 * 5)
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by user")
 
 
 def main() -> None:
@@ -5643,6 +5646,8 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by user")
     except Exception:
         logging.exception("fatal: unhandled")
         raise
