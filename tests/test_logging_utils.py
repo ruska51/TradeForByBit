@@ -1,5 +1,7 @@
 import builtins
 import csv
+import importlib
+import sys
 from logging_utils import (
     safe_create_order,
     flush_symbol_logs,
@@ -209,6 +211,46 @@ class FakeBybitLinearExchange:
         return result
 
 
+class _StubBybitExitExchange:
+    id = "bybit"
+
+    def __init__(self):
+        self.markets = {
+            "BTC/USDT": {
+                "symbol": "BTC/USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "info": {"category": "linear", "filters": []},
+            }
+        }
+        self.markets_by_id = self.markets
+
+    def market(self, symbol):
+        return self.markets[symbol]
+
+    def fetch_open_orders(self, symbol, *args, **kwargs):
+        return []
+
+    def price_to_precision(self, symbol, price):
+        return f"{float(price):.2f}"
+
+    def amount_to_precision(self, symbol, amount):
+        return f"{float(amount):.3f}"
+
+
+def _import_main(monkeypatch):
+    class _AdapterStub:
+        def __init__(self, *args, **kwargs):
+            self.x = _StubBybitExitExchange()
+
+        def load_markets(self):  # pragma: no cover - trivial stub
+            return None
+
+    monkeypatch.setattr("exchange_adapter.ExchangeAdapter", _AdapterStub)
+    sys.modules.pop("main", None)
+    return importlib.import_module("main")
+
+
 def test_safe_create_order_percent_filter_retry(caplog):
     setup_logger()
     import logging
@@ -319,3 +361,53 @@ def test_setup_logger_creates_directory(tmp_path):
     log_path = tmp_path / "nested" / "run.log"
     setup_logger(str(log_path))
     assert log_path.exists()
+
+
+def test_ensure_exit_orders_trigger_direction_long(monkeypatch):
+    main = _import_main(monkeypatch)
+    exchange = _StubBybitExitExchange()
+
+    class Adapter:
+        client = exchange
+
+    recorded: dict[str, list[dict]] = {}
+
+    def _recording_safe_create_order(_exchange, symbol, order_type, side, qty, price=None, params=None):
+        recorded.setdefault(order_type, []).append(dict(params or {}))
+        return "1", None
+
+    monkeypatch.setattr(main, "safe_create_order", _recording_safe_create_order)
+    main.open_trade_ctx.pop("BTC/USDT", None)
+    main.ensure_exit_orders(Adapter(), "BTC/USDT", "long", 1.0, 99.0, 101.0)
+
+    assert "STOP_MARKET" in recorded and recorded["STOP_MARKET"]
+    assert "TAKE_PROFIT_MARKET" in recorded and recorded["TAKE_PROFIT_MARKET"]
+    sl_params = recorded["STOP_MARKET"][0]
+    tp_params = recorded["TAKE_PROFIT_MARKET"][0]
+    assert sl_params["triggerDirection"] == 2
+    assert tp_params["triggerDirection"] == 1
+
+
+def test_ensure_exit_orders_trigger_direction_short(monkeypatch):
+    main = _import_main(monkeypatch)
+    exchange = _StubBybitExitExchange()
+
+    class Adapter:
+        client = exchange
+
+    recorded: dict[str, list[dict]] = {}
+
+    def _recording_safe_create_order(_exchange, symbol, order_type, side, qty, price=None, params=None):
+        recorded.setdefault(order_type, []).append(dict(params or {}))
+        return "1", None
+
+    monkeypatch.setattr(main, "safe_create_order", _recording_safe_create_order)
+    main.open_trade_ctx.pop("BTC/USDT", None)
+    main.ensure_exit_orders(Adapter(), "BTC/USDT", "short", 1.0, 101.0, 99.0)
+
+    assert "STOP_MARKET" in recorded and recorded["STOP_MARKET"]
+    assert "TAKE_PROFIT_MARKET" in recorded and recorded["TAKE_PROFIT_MARKET"]
+    sl_params = recorded["STOP_MARKET"][0]
+    tp_params = recorded["TAKE_PROFIT_MARKET"][0]
+    assert sl_params["triggerDirection"] == 1
+    assert tp_params["triggerDirection"] == 2
