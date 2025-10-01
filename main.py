@@ -3675,8 +3675,8 @@ def place_protected_exit(
 
     market_category = detect_market_category(exchange, symbol) if is_bybit else None
 
-    def _determine_trigger_direction(kind: str) -> str | None:
-        """Return Bybit trigger direction compatible with the latest API."""
+    def _determine_trigger_direction(kind: str) -> int | None:
+        """Return Bybit trigger direction value expected by the API."""
 
         if not is_bybit or market_category == "spot":
             return None
@@ -3684,8 +3684,8 @@ def place_protected_exit(
         is_tp = "TAKE_PROFIT" in upper_kind
         closing_long = side.lower() == "sell"
         if closing_long:
-            return "ascending" if is_tp else "descending"
-        return "descending" if is_tp else "ascending"
+            return 1 if is_tp else 2
+        return 2 if is_tp else 1
 
     def _build_params(kind: str, price: float) -> dict:
         params_local = {
@@ -3824,14 +3824,14 @@ def ensure_exit_orders(
     exit_side = "sell" if side_norm == "long" else "buy"
     closing_long = exit_side.lower() == "sell"
 
-    def _determine_trigger_direction(kind: str) -> str | None:
+    def _determine_trigger_direction(kind: str) -> int | None:
         if not is_bybit or category == "spot":
             return None
         upper_kind = str(kind or "").upper()
         is_tp = "TAKE_PROFIT" in upper_kind
         if closing_long:
-            return "ascending" if is_tp else "descending"
-        return "descending" if is_tp else "ascending"
+            return 1 if is_tp else 2
+        return 2 if is_tp else 1
 
     try:
         qty_value = float(exchange_obj.amount_to_precision(symbol, qty_value))
