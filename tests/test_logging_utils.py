@@ -186,6 +186,24 @@ class BybitExitExchange:
         return {"id": "3", "status": "FILLED", "filled": qty}
 
 
+class BybitSpotExitExchange(BybitExitExchange):
+    def __init__(self):
+        super().__init__()
+        meta = self.markets["ETH/USDT"]
+        meta["spot"] = True
+        info = meta.setdefault("info", {})
+        info["category"] = "spot"
+        info.setdefault("filters", [])
+        self.created_params = []
+
+    def fetch_open_orders(self, symbol, since=None, limit=None, params=None):
+        return []
+
+    def create_order(self, symbol, order_type, side, qty, price=None, params=None):
+        self.created_params.append(dict(params or {}))
+        return super().create_order(symbol, order_type, side, qty, price, params)
+
+
 def test_safe_create_order_percent_filter_retry(caplog):
     setup_logger()
     import logging
@@ -230,6 +248,32 @@ def test_safe_create_order_bybit_stop_market_normalized(caplog):
     assert err is None
     assert ex.calls[-1][0] == "market"
     assert ex.calls[-1][-1]["orderType"] == "Market"
+
+
+def test_ensure_exit_orders_bybit_spot_omits_trigger_direction(monkeypatch):
+    import importlib
+    import sys
+    import ccxt_stub as ccxt
+
+    sys.modules.setdefault("ccxt", ccxt)
+    main = importlib.import_module("main")
+
+    exchange = BybitSpotExitExchange()
+    main.open_trade_ctx.clear()
+
+    main.ensure_exit_orders(
+        exchange,
+        "ETH/USDT",
+        "long",
+        1.0,
+        sl_price=950.0,
+        tp_price=1050.0,
+    )
+
+    assert exchange.created_params, "expected exit orders to be created"
+    for params in exchange.created_params:
+        assert "triggerDirection" not in params
+        assert "triggerBy" not in params
 
 
 def test_ensure_trades_csv_header_migrates(tmp_path):
