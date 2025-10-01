@@ -1456,7 +1456,7 @@ def calculate_indicators(df):
     minus_di = 100 * (minus_dm.rolling(14, min_periods=1).mean() / atr_adx)
     adx_denom = (plus_di + minus_di).replace(0, np.nan)
     df["adx"] = 100 * (plus_di - minus_di).abs() / adx_denom
-    df["adx"].fillna(0.0, inplace=True)
+    df["adx"] = df["adx"].fillna(0.0)
 
     lag_periods = [1, 2, 3]
     for lag in lag_periods:
