@@ -146,3 +146,41 @@ def test_exchange_options_match(monkeypatch):
     assert ad.x.options.get("defaultType") == "swap"
     assert ad.x.options.get("defaultSubType") in (None, "linear", "inverse")
 
+
+def test_fetch_open_orders_normalizes_linear_symbol():
+    class DummyExchange:
+        def __init__(self):
+            self.last_call = None
+            self.markets = {
+                "XXX/USDT:USDT": {
+                    "symbol": "XXX/USDT:USDT",
+                    "info": {"category": "linear"},
+                    "type": "swap",
+                    "linear": True,
+                }
+            }
+
+        def market(self, symbol):
+            if symbol == "XXX/USDT":
+                return self.markets["XXX/USDT:USDT"]
+            return self.markets.get(symbol)
+
+        def fetch_open_orders(self, symbol=None, since=None, limit=None, params=None):
+            self.last_call = (symbol, params or {})
+            return []
+
+    adapter = ExchangeAdapter.__new__(ExchangeAdapter)
+    adapter.x = DummyExchange()
+    adapter.config = {"exchange_id": "bybit"}
+    adapter.exchange_id = "bybit"
+    adapter.futures = True
+    adapter.sandbox = False
+
+    count, ids = adapter.fetch_open_orders("XXX/USDT")
+
+    assert (count, ids) == (0, [])
+    assert adapter.x.last_call is not None
+    symbol_used, params_used = adapter.x.last_call
+    assert symbol_used == "XXX/USDT:USDT"
+    assert params_used.get("category") == "linear"
+

@@ -169,9 +169,12 @@ class ExchangeAdapter:
         ex_id = str(getattr(self, "exchange_id", "") or "").lower()
         if not ex_id and getattr(self, "x", None):
             ex_id = str(getattr(self.x, "id", "") or "").lower()
+        normalized_symbol = symbol
+        if symbol:
+            normalized_symbol = self._ccxt_symbol(symbol)
         if "bybit" in ex_id:
-            if symbol:
-                category = self._detect_bybit_category(symbol)
+            if normalized_symbol:
+                category = self._detect_bybit_category(normalized_symbol)
                 if category:
                     base.setdefault("category", category)
             elif self.futures:
@@ -857,9 +860,11 @@ class ExchangeAdapter:
 
         try:
             ex = getattr(self, "x", None)
+            normalized_symbol = self._ccxt_symbol(symbol) if symbol else symbol
             params = self._default_params(symbol=symbol)
             if ex and hasattr(ex, "fetch_open_orders"):
-                orders = _call_fetch(ex, symbol, params) or []
+                sym_arg = normalized_symbol if symbol is not None else None
+                orders = _call_fetch(ex, sym_arg, params) or []
                 ids = [o.get("id") or o.get("orderId") for o in orders]
                 return len(ids), ids
         except Exception as exc:  # pragma: no cover - logging only
@@ -868,9 +873,11 @@ class ExchangeAdapter:
                 time.sleep(1.0)
                 try:
                     ex = getattr(self, "x", None)
+                    normalized_symbol = self._ccxt_symbol(symbol) if symbol else symbol
                     params = self._default_params(symbol=symbol)
                     if ex and hasattr(ex, "fetch_open_orders"):
-                        orders = _call_fetch(ex, symbol, params) or []
+                        sym_arg = normalized_symbol if symbol is not None else None
+                        orders = _call_fetch(ex, sym_arg, params) or []
                         ids = [o.get("id") or o.get("orderId") for o in orders]
                         return len(ids), ids
                 except Exception as retry_exc:  # pragma: no cover - logging only
