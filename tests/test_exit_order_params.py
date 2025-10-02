@@ -180,7 +180,7 @@ def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, 
 
     adapter = types.SimpleNamespace(client=exchange)
 
-    monkeypatch.setattr(main, "open_trade_ctx", {}, raising=False)
+    monkeypatch.setattr(main, "open_trade_ctx", {"BTC/USDT": {"entry_price": 100.0}}, raising=False)
     monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
 
     captured_calls = []
@@ -204,16 +204,29 @@ def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, 
     for call in captured_calls:
         params = call["params"]
         assert params["triggerBy"] == "LastPrice"
+        assert params["triggerPrice"] in {95.0, 105.0}
+        assert params["closeOnTrigger"] is True
+        assert params["closePosition"] is True
+        assert params["reduceOnly"] is True
+        assert params["orderType"] == "Market"
+        assert params["category"] == "linear"
         if call["order_kind"] == "STOP_MARKET":
             assert (
                 params["triggerDirection"]
                 == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
             )
+            assert params["slTriggerBy"] == "LastPrice"
+            assert params["slOrderType"] == "Market"
+            assert params["stopPrice"] == params["triggerPrice"]
         elif call["order_kind"] == "TAKE_PROFIT_MARKET":
             assert (
                 params["triggerDirection"]
                 == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
             )
+            assert params["tpTriggerBy"] == "LastPrice"
+            assert params["tpOrderType"] == "Market"
+            assert params["stopPrice"] == params["triggerPrice"]
+            assert params["priceProtect"] is True
 
 
 def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch, main_module):
@@ -257,6 +270,48 @@ def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch,
                 params["triggerDirection"]
                 == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
             )
+
+
+def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main_module):
+    main = main_module
+
+    exchange = _make_dummy_exchange()
+
+    adapter = types.SimpleNamespace(client=exchange)
+
+    monkeypatch.setattr(
+        main,
+        "open_trade_ctx",
+        {"BTC/USDT": {"entry_price": 100.0}},
+        raising=False,
+    )
+    monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
+
+    captured_calls = []
+
+    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
+        captured_calls.append({"order_kind": order_kind, "params": dict(params or {})})
+        return f"{order_kind}-id", None
+
+    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+
+    main.ensure_exit_orders(
+        adapter,
+        "BTC/USDT",
+        "long",
+        1.0,
+        sl_price=105.0,
+        tp_price=None,
+    )
+
+    assert len(captured_calls) == 1
+    assert captured_calls[0]["order_kind"] == "STOP_MARKET"
+    params = captured_calls[0]["params"]
+    assert params["triggerPrice"] == 105.0
+    assert (
+        params["triggerDirection"]
+        == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
+    )
 
 
 def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):

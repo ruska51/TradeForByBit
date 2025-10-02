@@ -3842,7 +3842,7 @@ def ensure_exit_orders(
     exit_side = "sell" if side_norm == "long" else "buy"
     closing_long = exit_side.lower() == "sell"
 
-    def _determine_trigger_direction(kind: str) -> int | None:
+    def _determine_trigger_direction(kind: str, target_price: float | None = None) -> int | None:
         if not is_bybit:
             return None
         upper_kind = str(kind or "").upper()
@@ -3854,7 +3854,47 @@ def ensure_exit_orders(
             direction = "rising" if is_take_profit else "falling"
         else:
             direction = "falling" if is_take_profit else "rising"
+        if target_price is not None and entry_price > 0:
+            if direction == "rising" and target_price <= entry_price:
+                direction = "falling"
+            elif direction == "falling" and target_price >= entry_price:
+                direction = "rising"
         return BYBIT_TRIGGER_DIRECTIONS[direction]
+
+    def _build_params(kind: str, trigger_price: float) -> dict[str, Any]:
+        upper_kind = str(kind or "").upper()
+        is_market = upper_kind.endswith("MARKET")
+        params_local: dict[str, Any] = {
+            "triggerPrice": trigger_price,
+            "closeOnTrigger": True,
+            "closePosition": True,
+            "reduceOnly": True,
+        }
+        trigger_direction = _determine_trigger_direction(upper_kind, trigger_price)
+        if trigger_direction is not None and category != "spot":
+            params_local["triggerDirection"] = trigger_direction
+            params_local.setdefault("triggerBy", "LastPrice")
+        if "STOP" in upper_kind:
+            params_local["slTriggerBy"] = "LastPrice"
+            params_local["stopPrice"] = trigger_price
+            if is_bybit:
+                params_local.setdefault(
+                    "slOrderType", "Market" if is_market else "Limit"
+                )
+        if "TAKE_PROFIT" in upper_kind:
+            params_local["tpTriggerBy"] = "LastPrice"
+            params_local["stopPrice"] = trigger_price
+            params_local["priceProtect"] = True
+            if is_bybit:
+                params_local.setdefault(
+                    "tpOrderType", "Market" if is_market else "Limit"
+                )
+        if not is_market:
+            params_local["price"] = trigger_price
+        if is_bybit:
+            params_local.setdefault("orderType", "Market" if is_market else "Limit")
+            params_local.setdefault("category", category or "linear")
+        return params_local
 
     fetch_params: dict[str, Any] = {}
     if is_bybit:
@@ -3982,15 +4022,7 @@ def ensure_exit_orders(
                 sl_prec = float(exchange_obj.price_to_precision(symbol, adj_sl))
             except Exception:
                 sl_prec = float(adj_sl)
-            params = {
-                "stopPrice": sl_prec,
-                "closePosition": True,
-                "reduceOnly": True,
-            }
-            trigger_direction = _determine_trigger_direction("STOP_MARKET")
-            if trigger_direction is not None and category != "spot":
-                params["triggerDirection"] = trigger_direction
-                params.setdefault("triggerBy", "LastPrice")
+            params = _build_params("STOP_MARKET", sl_prec)
             order_id, err = safe_create_order(
                 exchange_obj,
                 symbol,
@@ -4017,15 +4049,7 @@ def ensure_exit_orders(
                 tp_prec = float(exchange_obj.price_to_precision(symbol, adj_tp))
             except Exception:
                 tp_prec = float(adj_tp)
-            params = {
-                "stopPrice": tp_prec,
-                "closePosition": True,
-                "priceProtect": True,
-            }
-            trigger_direction = _determine_trigger_direction("TAKE_PROFIT_MARKET")
-            if trigger_direction is not None and category != "spot":
-                params["triggerDirection"] = trigger_direction
-                params.setdefault("triggerBy", "LastPrice")
+            params = _build_params("TAKE_PROFIT_MARKET", tp_prec)
             order_id, err = safe_create_order(
                 exchange_obj,
                 symbol,
