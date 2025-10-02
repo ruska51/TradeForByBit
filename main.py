@@ -3904,6 +3904,33 @@ def ensure_exit_orders(
 
     normalized_symbol = symbol
     if is_bybit:
+        if not getattr(exchange_obj, "markets", None):
+            seen_ids: set[int] = set()
+
+            def _try_load_markets(obj: Any | None) -> None:
+                if obj is None:
+                    return
+                ident = id(obj)
+                if ident in seen_ids:
+                    return
+                seen_ids.add(ident)
+                for attr in ("load_markets_safe", "load_markets"):
+                    loader = getattr(obj, attr, None)
+                    if callable(loader):
+                        try:
+                            loader()
+                        except Exception:
+                            continue
+                        break
+
+            _try_load_markets(exchange_obj)
+            if not getattr(exchange_obj, "markets", None):
+                _try_load_markets(getattr(adapter, "client", None))
+            if not getattr(exchange_obj, "markets", None):
+                _try_load_markets(getattr(adapter, "x", None))
+            if not getattr(exchange_obj, "markets", None):
+                _try_load_markets(adapter)
+
         normalized_symbol = _normalize_bybit_symbol(
             exchange_obj,
             symbol,
@@ -4025,7 +4052,7 @@ def ensure_exit_orders(
             params = _build_params("STOP_MARKET", sl_prec)
             order_id, err = safe_create_order(
                 exchange_obj,
-                symbol,
+                normalized_symbol,
                 "STOP_MARKET",
                 exit_side,
                 qty_value,
@@ -4052,7 +4079,7 @@ def ensure_exit_orders(
             params = _build_params("TAKE_PROFIT_MARKET", tp_prec)
             order_id, err = safe_create_order(
                 exchange_obj,
-                symbol,
+                normalized_symbol,
                 "TAKE_PROFIT_MARKET",
                 exit_side,
                 qty_value,

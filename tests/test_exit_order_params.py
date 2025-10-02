@@ -510,3 +510,80 @@ def test_ensure_exit_orders_blocks_after_fetch_failure(
     state = main.exit_orders_fetch_guard.get("BTC/USDT")
     assert state and not state["blocked"] and not state["warned"]
     assert attempts["count"] == 3
+
+
+def test_ensure_exit_orders_loads_markets_before_normalization(
+    monkeypatch, main_module, caplog
+):
+    main = main_module
+
+    class DummyExchange:
+        id = "bybit"
+
+        def __init__(self):
+            self.markets = {}
+            self.markets_by_id = {}
+            self.load_calls = 0
+
+        def load_markets(self):
+            self.load_calls += 1
+            market_meta = {
+                "symbol": "BTC/USDT:USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "linear": True,
+            }
+            self.markets = {"BTC/USDT:USDT": market_meta}
+            self.markets_by_id = {"BTCUSDT": market_meta}
+            return self.markets
+
+        def market(self, symbol):
+            return self.markets.get(symbol) or self.markets_by_id.get(symbol.replace("/", ""))
+
+        def price_to_precision(self, symbol, price):
+            return price
+
+        def amount_to_precision(self, symbol, amount):
+            assert symbol == "BTC/USDT:USDT"
+            return amount
+
+        def fetch_open_orders(self, symbol, *args, **kwargs):
+            if symbol != "BTC/USDT:USDT":
+                logging.warning("Illegal category for %s", symbol)
+            return []
+
+        def fetch_ticker(self, symbol):
+            return {"last": 100.0}
+
+    exchange = DummyExchange()
+    adapter = types.SimpleNamespace(client=exchange)
+
+    monkeypatch.setattr(main, "open_trade_ctx", {}, raising=False)
+    monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
+    monkeypatch.setattr(main, "exit_orders_fetch_guard", {}, raising=False)
+
+    captured_symbols: list[str] = []
+
+    def fake_safe_create_order(
+        _exchange, symbol, order_kind, side, qty, price, params
+    ):
+        captured_symbols.append(symbol)
+        return f"{order_kind}-id", None
+
+    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+
+    caplog.set_level(logging.WARNING)
+
+    main.ensure_exit_orders(
+        adapter,
+        "BTC/USDT",
+        "long",
+        1.0,
+        sl_price=95.0,
+        tp_price=105.0,
+    )
+
+    assert exchange.load_calls >= 1
+    assert captured_symbols, "Expected safe_create_order invocations"
+    assert all(symbol == "BTC/USDT:USDT" for symbol in captured_symbols)
+    assert "Illegal category" not in caplog.text
