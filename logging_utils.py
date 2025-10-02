@@ -206,6 +206,68 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
     markets = getattr(exchange, "markets", {}) or {}
     markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
 
+    def _dict_prefers_linear(data: dict | None, *, _depth: int = 0) -> bool:
+        if not isinstance(data, dict) or _depth > 2:
+            return False
+
+        keywords = {"linear", "swap", "future", "futures", "contract"}
+        for key in (
+            "category",
+            "categoryType",
+            "defaultType",
+            "defaultSubType",
+            "type",
+            "subType",
+            "market",
+            "contractType",
+            "productType",
+            "settle",
+            "defaultSettle",
+        ):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                lowered = value.lower()
+                if lowered in keywords or any(word in lowered for word in keywords):
+                    return True
+
+        for key in ("linear", "swap"):
+            if data.get(key) is True:
+                return True
+
+        for nested in data.values():
+            if isinstance(nested, dict) and _dict_prefers_linear(nested, _depth=_depth + 1):
+                return True
+
+        return False
+
+    def _prefers_linear_market() -> bool:
+        def _prefers_from_obj(obj) -> bool:
+            if obj is None:
+                return False
+            if getattr(obj, "futures", False):
+                return True
+            for attr in ("params", "options", "config"):
+                if _dict_prefers_linear(getattr(obj, attr, None)):
+                    return True
+            return False
+
+        if _prefers_from_obj(exchange):
+            return True
+
+        adapter = getattr(exchange, "adapter", None)
+        if _prefers_from_obj(adapter):
+            return True
+
+        main_mod = sys.modules.get("main")
+        if main_mod is not None:
+            main_adapter = getattr(main_mod, "ADAPTER", None)
+            if getattr(main_adapter, "x", None) is exchange and _prefers_from_obj(main_adapter):
+                return True
+
+        return False
+
+    prefers_linear = category_norm not in {"spot", "inverse"} and _prefers_linear_market()
+
     def _extract_base_quote(meta: dict | None) -> tuple[str, str]:
         if not isinstance(meta, dict):
             return "", ""
@@ -251,11 +313,11 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
 
     if not category_norm or category_norm == "spot":
         mapped = _mapped_symbol(current)
-        if mapped:
+        if mapped and not prefers_linear:
             return mapped
         if symbol in markets:
             mapped = _mapped_symbol(markets.get(symbol))
-            if mapped:
+            if mapped and not prefers_linear:
                 return mapped
 
         base, quote = _extract_base_quote(current)
@@ -264,6 +326,7 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
             base = base or base_raw.upper()
             quote = quote or quote_raw.split(":", 1)[0].upper()
 
+        preferred_linear = None
         preferred_spot = None
         fallback_symbol = None
 
@@ -280,6 +343,17 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
             if not mapped_meta:
                 continue
             meta_category = _market_category_from_meta(meta)
+            if prefers_linear:
+                if (
+                    meta.get("linear")
+                    or meta.get("swap")
+                    or meta_category in {"linear", "swap"}
+                ) and preferred_linear is None:
+                    preferred_linear = mapped_meta
+                    if meta_category == "linear":
+                        break
+                if preferred_linear and meta_category in {"linear", "swap"}:
+                    continue
             if category_norm == "spot":
                 if meta_category == "spot" or (
                     meta_category is None and meta.get("spot") is not False
@@ -288,13 +362,15 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
                 continue
             if meta_category in {None, "", "spot"} and preferred_spot is None:
                 preferred_spot = mapped_meta
-                if meta_category == "spot":
+                if meta_category == "spot" and not prefers_linear:
                     break
             elif fallback_symbol is None:
                 fallback_symbol = mapped_meta
 
         if category_norm == "spot":
             return preferred_spot or symbol
+        if prefers_linear and preferred_linear:
+            return preferred_linear
         return preferred_spot or fallback_symbol or symbol
 
     mapped = _match_with_category(current)
