@@ -14,6 +14,7 @@ from logging_utils import (
     TRADES_CSV_HEADER,
     LOG_ENTRY_FIELDS,
     detect_market_category,
+    _normalize_bybit_symbol,
 )
 
 class DummyExchange:
@@ -371,6 +372,19 @@ def test_safe_create_order_loads_markets_before_symbol_normalization():
     last_call = exchange.calls[-1]
     assert last_call["symbol"] == "ETH/USDT:USDT"
     assert last_call["params"]["category"] == "linear"
+
+
+def test_normalize_bybit_symbol_linear_contract_fallback():
+    class DummyExchange:
+        id = "bybit"
+
+        def __init__(self):
+            self.markets = {}
+            self.markets_by_id = {}
+
+    exchange = DummyExchange()
+    normalized = _normalize_bybit_symbol(exchange, "ETH/USDT", "linear")
+    assert normalized == "ETH/USDT:USDT"
 
 
 def test_detect_market_category_linear_mapping():

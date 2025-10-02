@@ -215,6 +215,28 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
     markets = getattr(exchange, "markets", {}) or {}
     markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
 
+    def _derive_contract_symbol() -> str | None:
+        if ":" in symbol:
+            return None
+        if "/" not in symbol:
+            return None
+        if category_norm not in {"linear", "inverse"}:
+            return None
+        base_raw, quote_raw = symbol.split("/", 1)
+        base_raw = base_raw.upper()
+        quote_raw = quote_raw.split(":", 1)[0].upper()
+        settle = quote_raw if category_norm == "linear" else base_raw
+        candidate = f"{base_raw}/{quote_raw}:{settle}"
+        if not markets and not markets_by_id:
+            return candidate
+        if candidate in markets or candidate in markets_by_id:
+            return candidate
+        return None
+
+    derived_symbol = _derive_contract_symbol()
+    if derived_symbol is not None:
+        return derived_symbol
+
     def _dict_prefers_linear(data: dict | None, *, _depth: int = 0) -> bool:
         if not isinstance(data, dict) or _depth > 2:
             return False
