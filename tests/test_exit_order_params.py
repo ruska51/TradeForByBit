@@ -61,16 +61,45 @@ def main_module(monkeypatch):
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
     monkeypatch.setattr(main, "exchange", _make_dummy_exchange(), raising=False)
-    monkeypatch.setattr(main, "detect_market_category", lambda *_: "spot")
     return main
 
 
-def test_place_protected_exit_spot_sets_trigger_direction(monkeypatch, main_module):
+def test_place_protected_exit_spot_omits_trigger_direction(monkeypatch, main_module):
     main = main_module
 
     exchange = _make_dummy_exchange()
     monkeypatch.setattr(main, "exchange", exchange, raising=False)
     monkeypatch.setattr(main, "adjust_price_to_percent_filter", lambda _symbol, price: price)
+    monkeypatch.setattr(main, "detect_market_category", lambda *_: "spot")
+
+    captured_params = {}
+
+    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
+        captured_params.update(params or {})
+        return "order-id", None
+
+    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+
+    result = main.place_protected_exit(
+        "BTC/USDT",
+        "STOP_MARKET",
+        "sell",
+        1.0,
+        100.0,
+    )
+
+    assert result == "order-id"
+    assert "triggerDirection" not in captured_params
+    assert "triggerBy" not in captured_params
+
+
+def test_place_protected_exit_derivative_sets_trigger_direction(monkeypatch, main_module):
+    main = main_module
+
+    exchange = _make_dummy_exchange()
+    monkeypatch.setattr(main, "exchange", exchange, raising=False)
+    monkeypatch.setattr(main, "adjust_price_to_percent_filter", lambda _symbol, price: price)
+    monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
 
     captured_params = {}
 
@@ -93,7 +122,7 @@ def test_place_protected_exit_spot_sets_trigger_direction(monkeypatch, main_modu
     assert captured_params["triggerBy"] == "LastPrice"
 
 
-def test_ensure_exit_orders_spot_long_sets_trigger_direction(monkeypatch, main_module):
+def test_ensure_exit_orders_spot_long_omits_trigger_direction(monkeypatch, main_module):
     main = main_module
 
     exchange = _make_dummy_exchange()
@@ -101,6 +130,41 @@ def test_ensure_exit_orders_spot_long_sets_trigger_direction(monkeypatch, main_m
     adapter = types.SimpleNamespace(client=exchange)
 
     monkeypatch.setattr(main, "open_trade_ctx", {}, raising=False)
+    monkeypatch.setattr(main, "detect_market_category", lambda *_: "spot")
+
+    captured_calls = []
+
+    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
+        captured_calls.append({"order_kind": order_kind, "params": dict(params or {})})
+        return f"{order_kind}-id", None
+
+    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+
+    main.ensure_exit_orders(
+        adapter,
+        "BTC/USDT",
+        "long",
+        1.0,
+        sl_price=95.0,
+        tp_price=105.0,
+    )
+
+    assert captured_calls, "Expected at least one safe_create_order call"
+    for call in captured_calls:
+        params = call["params"]
+        assert "triggerDirection" not in params
+        assert "triggerBy" not in params
+
+
+def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, main_module):
+    main = main_module
+
+    exchange = _make_dummy_exchange()
+
+    adapter = types.SimpleNamespace(client=exchange)
+
+    monkeypatch.setattr(main, "open_trade_ctx", {}, raising=False)
+    monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
 
     captured_calls = []
 
@@ -127,39 +191,3 @@ def test_ensure_exit_orders_spot_long_sets_trigger_direction(monkeypatch, main_m
             assert params["triggerDirection"] == 2
         elif call["order_kind"] == "TAKE_PROFIT_MARKET":
             assert params["triggerDirection"] == 1
-
-
-def test_ensure_exit_orders_spot_short_sets_trigger_direction(monkeypatch, main_module):
-    main = main_module
-
-    exchange = _make_dummy_exchange()
-
-    adapter = types.SimpleNamespace(client=exchange)
-
-    monkeypatch.setattr(main, "open_trade_ctx", {}, raising=False)
-
-    captured_calls = []
-
-    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
-        captured_calls.append({"order_kind": order_kind, "params": dict(params or {})})
-        return f"{order_kind}-id", None
-
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
-
-    main.ensure_exit_orders(
-        adapter,
-        "BTC/USDT",
-        "short",
-        1.0,
-        sl_price=105.0,
-        tp_price=95.0,
-    )
-
-    assert captured_calls, "Expected at least one safe_create_order call"
-    for call in captured_calls:
-        params = call["params"]
-        assert params["triggerBy"] == "LastPrice"
-        if call["order_kind"] == "STOP_MARKET":
-            assert params["triggerDirection"] == 1
-        elif call["order_kind"] == "TAKE_PROFIT_MARKET":
-            assert params["triggerDirection"] == 2
