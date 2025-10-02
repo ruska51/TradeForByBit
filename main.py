@@ -152,12 +152,15 @@ from pattern_detector import (
     self_test as pattern_self_test,
 )
 
-# Bybit encodes trigger direction as integers: ``1`` for a rising trigger, and
-# ``2`` for a falling trigger. The constant is reused by the exit helpers to
-# ensure the numeric values stay aligned with the official API semantics.
+# Bybit requires explicit trigger direction values when placing conditional
+# orders.  The exchange expects the ``triggerDirection`` argument to be the
+# string ``"ascending"`` when the trigger fires as the price moves up, and
+# ``"descending"`` when it fires while the price moves down.  Keeping the
+# mapping in one place prevents drift between the trading helpers and the
+# official API semantics.
 BYBIT_TRIGGER_DIRECTIONS = {
-    "rising": 1,
-    "falling": 2,
+    "rising": "ascending",
+    "falling": "descending",
 }
 
 # Классификация паттернов по направлению
