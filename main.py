@@ -3678,11 +3678,11 @@ def place_protected_exit(
     def _determine_trigger_direction(kind: str) -> int | None:
         """Return Bybit trigger direction value expected by the API."""
 
-        if not is_bybit or market_category == "spot":
+        if not is_bybit:
             return None
-        upper_kind = kind.upper()
+        upper_kind = str(kind or "").upper()
         is_tp = "TAKE_PROFIT" in upper_kind
-        closing_long = side.lower() == "sell"
+        closing_long = str(side or "").lower() == "sell"
         if closing_long:
             return 1 if is_tp else 2
         return 2 if is_tp else 1
@@ -3825,7 +3825,7 @@ def ensure_exit_orders(
     closing_long = exit_side.lower() == "sell"
 
     def _determine_trigger_direction(kind: str) -> int | None:
-        if not is_bybit or category == "spot":
+        if not is_bybit:
             return None
         upper_kind = str(kind or "").upper()
         is_tp = "TAKE_PROFIT" in upper_kind
