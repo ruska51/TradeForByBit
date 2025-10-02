@@ -1,4 +1,5 @@
 import importlib
+import logging
 import sys
 import types
 
@@ -369,3 +370,88 @@ def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):
         params = call["params"]
         assert params["triggerDirection"] in main.BYBIT_TRIGGER_DIRECTIONS.values()
         assert params["triggerBy"] == "LastPrice"
+
+
+def test_ensure_exit_orders_blocks_after_fetch_failure(
+    monkeypatch, main_module, caplog
+):
+    main = main_module
+
+    exchange = _make_dummy_exchange()
+    attempts = {"count": 0}
+
+    def flaky_fetch_open_orders(*_args, **_kwargs):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise RuntimeError("temporary outage")
+        return []
+
+    monkeypatch.setattr(exchange, "fetch_open_orders", flaky_fetch_open_orders)
+
+    adapter = types.SimpleNamespace(client=exchange)
+
+    monkeypatch.setattr(main, "open_trade_ctx", {}, raising=False)
+    monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
+    monkeypatch.setattr(main, "exit_orders_fetch_guard", {}, raising=False)
+
+    captured_calls = []
+
+    def fake_safe_create_order(
+        _exchange, symbol, order_kind, side, qty, price, params
+    ):
+        captured_calls.append(
+            {
+                "order_kind": order_kind,
+                "params": dict(params or {}),
+            }
+        )
+        return f"{order_kind}-id", None
+
+    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+
+    caplog.set_level(logging.WARNING)
+
+    main.ensure_exit_orders(
+        adapter,
+        "BTC/USDT",
+        "long",
+        1.0,
+        sl_price=95.0,
+        tp_price=105.0,
+    )
+
+    assert not captured_calls
+    state = main.exit_orders_fetch_guard.get("BTC/USDT")
+    assert state and state["blocked"] and state["warned"]
+
+    main.ensure_exit_orders(
+        adapter,
+        "BTC/USDT",
+        "long",
+        1.0,
+        sl_price=95.0,
+        tp_price=105.0,
+    )
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "fetch_open_orders failed" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert not captured_calls
+
+    main.ensure_exit_orders(
+        adapter,
+        "BTC/USDT",
+        "long",
+        1.0,
+        sl_price=95.0,
+        tp_price=105.0,
+    )
+
+    assert captured_calls, "Expected orders after fetch snapshot restored"
+    state = main.exit_orders_fetch_guard.get("BTC/USDT")
+    assert state and not state["blocked"] and not state["warned"]
+    assert attempts["count"] == 3

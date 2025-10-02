@@ -1190,6 +1190,7 @@ def load_optuna_study(path: str = OPTUNA_STUDY_FILE) -> optuna.study.Study | Non
 # === Inactivity tracking ===
 symbol_activity: Dict[str, datetime] = {}
 open_trade_ctx: Dict[str, Dict[str, Any]] = {}
+exit_orders_fetch_guard: Dict[str, Dict[str, bool]] = {}
 fallback_cooldown: Dict[str, int] = {}
 tf_skip_counters: Dict[str, int] = defaultdict(int)
 TF_SKIP_THRESHOLD = 3
@@ -3900,8 +3901,23 @@ def ensure_exit_orders(
         else:
             orders = exchange_obj.fetch_open_orders(normalized_symbol) or []
     except Exception as exc:
-        logging.warning("exit_guard | %s | fetch_open_orders failed: %s", symbol, exc)
-        orders = []
+        guard_state = exit_orders_fetch_guard.setdefault(
+            symbol, {"blocked": False, "warned": False}
+        )
+        if not guard_state["warned"]:
+            logging.warning("exit_guard | %s | fetch_open_orders failed: %s", symbol, exc)
+            guard_state["warned"] = True
+        else:
+            logging.debug(
+                "exit_guard | %s | fetch_open_orders still failing: %s", symbol, exc
+            )
+        guard_state["blocked"] = True
+        return
+    else:
+        guard_state = exit_orders_fetch_guard.get(symbol)
+        if guard_state and (guard_state.get("blocked") or guard_state.get("warned")):
+            guard_state["blocked"] = False
+            guard_state["warned"] = False
 
     def _order_type(order: dict) -> str:
         if not isinstance(order, dict):
