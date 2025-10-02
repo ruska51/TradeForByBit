@@ -384,8 +384,14 @@ def test_ensure_exit_orders_trigger_direction_long(monkeypatch):
     assert "TAKE_PROFIT_MARKET" in recorded and recorded["TAKE_PROFIT_MARKET"]
     sl_params = recorded["STOP_MARKET"][0]
     tp_params = recorded["TAKE_PROFIT_MARKET"][0]
-    assert sl_params["triggerDirection"] == 2
-    assert tp_params["triggerDirection"] == 1
+    assert (
+        sl_params["triggerDirection"]
+        == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
+    )
+    assert (
+        tp_params["triggerDirection"]
+        == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
+    )
 
 
 def test_ensure_exit_orders_trigger_direction_short(monkeypatch):
@@ -409,5 +415,11 @@ def test_ensure_exit_orders_trigger_direction_short(monkeypatch):
     assert "TAKE_PROFIT_MARKET" in recorded and recorded["TAKE_PROFIT_MARKET"]
     sl_params = recorded["STOP_MARKET"][0]
     tp_params = recorded["TAKE_PROFIT_MARKET"][0]
-    assert sl_params["triggerDirection"] == 1
-    assert tp_params["triggerDirection"] == 2
+    assert (
+        sl_params["triggerDirection"]
+        == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
+    )
+    assert (
+        tp_params["triggerDirection"]
+        == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
+    )
