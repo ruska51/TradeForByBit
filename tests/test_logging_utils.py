@@ -189,6 +189,65 @@ class BybitExitExchange:
         return {"id": "3", "status": "FILLED", "filled": qty}
 
 
+class LazyLoadBybitLinearExchange:
+    id = "bybit"
+
+    def __init__(self):
+        self.markets = {}
+        self.markets_by_id = {}
+        self.calls = []
+        self.load_calls = 0
+
+    def load_markets(self):
+        self.load_calls += 1
+        market = {
+            "symbol": "ETH/USDT:USDT",
+            "precision": {"amount": 3},
+            "limits": {
+                "amount": {"min": 0.001, "step": 0.001},
+                "cost": {"min": 5.0},
+            },
+            "info": {
+                "filters": [
+                    {
+                        "filterType": "LOT_SIZE",
+                        "minQty": "0.001",
+                        "stepSize": "0.001",
+                    }
+                ],
+                "category": "linear",
+            },
+        }
+        self.markets = {market["symbol"]: market}
+        self.markets_by_id = self.markets
+        return self.markets
+
+    def market(self, symbol):
+        return self.markets[symbol]
+
+    def fetch_ticker(self, symbol):
+        return {"ask": 101.0, "bid": 100.0}
+
+    def price_to_precision(self, symbol, price):
+        return f"{float(price):.2f}"
+
+    def amount_to_precision(self, symbol, amount):
+        return f"{float(amount):.3f}"
+
+    def create_order(self, symbol, order_type, side, qty, price=None, params=None):
+        self.calls.append(
+            {
+                "symbol": symbol,
+                "order_type": order_type,
+                "side": side,
+                "qty": qty,
+                "price": price,
+                "params": params,
+            }
+        )
+        return {"id": "42", "status": "FILLED", "filled": qty}
+
+
 class FakeBybitLinearExchange:
     id = "bybit"
 
@@ -295,6 +354,23 @@ def test_safe_create_order_bybit_stop_market_normalized(caplog):
     assert err is None
     assert ex.calls[-1][0] == "market"
     assert ex.calls[-1][-1]["orderType"] == "Market"
+
+
+def test_safe_create_order_loads_markets_before_symbol_normalization():
+    exchange = LazyLoadBybitLinearExchange()
+    params = {"category": "linear"}
+
+    order_id, err = safe_create_order(
+        exchange, "ETH/USDT", "limit", "buy", 1.0, 100.0, params
+    )
+
+    assert order_id == "42"
+    assert err is None
+    assert exchange.load_calls == 1
+    assert exchange.calls, "Expected create_order to be invoked"
+    last_call = exchange.calls[-1]
+    assert last_call["symbol"] == "ETH/USDT:USDT"
+    assert last_call["params"]["category"] == "linear"
 
 
 def test_detect_market_category_linear_mapping():
