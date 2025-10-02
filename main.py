@@ -3696,7 +3696,7 @@ def place_protected_exit(
         upper_kind = kind.upper()
         is_market = upper_kind.endswith("MARKET")
         trigger_direction = _determine_trigger_direction(upper_kind)
-        if trigger_direction is not None:
+        if trigger_direction is not None and market_category != "spot":
             params_local["triggerDirection"] = trigger_direction
             params_local.setdefault("triggerBy", "LastPrice")
         if is_bybit:
@@ -3929,7 +3929,7 @@ def ensure_exit_orders(
                 "reduceOnly": True,
             }
             trigger_direction = _determine_trigger_direction("STOP_MARKET")
-            if trigger_direction is not None:
+            if trigger_direction is not None and category != "spot":
                 params["triggerDirection"] = trigger_direction
                 params.setdefault("triggerBy", "LastPrice")
             order_id, err = safe_create_order(
@@ -3964,7 +3964,7 @@ def ensure_exit_orders(
                 "priceProtect": True,
             }
             trigger_direction = _determine_trigger_direction("TAKE_PROFIT_MARKET")
-            if trigger_direction is not None:
+            if trigger_direction is not None and category != "spot":
                 params["triggerDirection"] = trigger_direction
                 params.setdefault("triggerBy", "LastPrice")
             order_id, err = safe_create_order(
