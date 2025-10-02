@@ -445,7 +445,9 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
     return symbol
 
 
-def _with_bybit_order_params(exchange, params: dict | None) -> dict | None:
+def _with_bybit_order_params(
+    exchange, symbol: str, params: dict | None
+) -> tuple[dict | None, str | None]:
     """Inject Bybit specific parameters when required.
 
     Recent versions of the Bybit API require the ``category`` argument for
@@ -456,14 +458,31 @@ def _with_bybit_order_params(exchange, params: dict | None) -> dict | None:
     """
 
     if not _is_bybit_exchange(exchange):
-        return params
+        return params, None
+
     merged = dict(params or {})
-    merged.setdefault("category", "linear")
-    # ``positionIdx`` defaults to 0 (one-way mode) which matches the bot
-    # assumptions but some unified accounts require the field to be set
-    # explicitly for conditional orders.
-    merged.setdefault("positionIdx", merged.get("positionIdx", 0))
-    return merged
+    resolved_category = str(merged.get("category") or "").lower()
+
+    if not resolved_category:
+        detected = detect_market_category(exchange, symbol)
+        if detected:
+            resolved_category = str(detected).lower()
+        else:
+            resolved_category = "linear"
+        merged.setdefault("category", resolved_category)
+    else:
+        merged["category"] = resolved_category
+
+    if resolved_category in {"linear", "inverse"}:
+        # ``positionIdx`` defaults to 0 (one-way mode) which matches the bot
+        # assumptions but some unified accounts require the field to be set
+        # explicitly for conditional orders.
+        merged.setdefault("positionIdx", merged.get("positionIdx", 0))
+    else:
+        # Avoid including derivatives-only parameters for spot / options.
+        merged.pop("positionIdx", None)
+
+    return merged, resolved_category
 
 
 def _normalize_bybit_order_type_value(order_type: str) -> str:
@@ -1440,8 +1459,7 @@ def safe_fetch_balance(exchange, params: dict | None = None, *, retries: int = 1
 def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                       qty: float, price=None, params=None):
     """Create an order with retry and PERCENT_PRICE handling."""
-    params = _with_bybit_order_params(exchange, params)
-    category = (params or {}).get("category")
+    params, category = _with_bybit_order_params(exchange, symbol, params)
     if not getattr(exchange, "markets", None):
         try:
             exchange.load_markets()

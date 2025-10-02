@@ -15,6 +15,7 @@ from logging_utils import (
     LOG_ENTRY_FIELDS,
     detect_market_category,
     _normalize_bybit_symbol,
+    _with_bybit_order_params,
 )
 
 class DummyExchange:
@@ -190,6 +191,46 @@ class BybitExitExchange:
         return {"id": "3", "status": "FILLED", "filled": qty}
 
 
+class BybitSpotMetaExchange:
+    id = "bybit"
+
+    def __init__(self):
+        self.markets = {
+            "BTC/USDT": {
+                "symbol": "BTC/USDT",
+                "spot": True,
+                "info": {"category": "spot"},
+            }
+        }
+        self.markets_by_id = {}
+
+    def market(self, symbol):
+        return self.markets.get(symbol)
+
+    def load_markets(self):
+        return self.markets
+
+
+class BybitLinearMetaExchange:
+    id = "bybit"
+
+    def __init__(self):
+        self.markets = {
+            "ETH/USDT": {
+                "symbol": "ETH/USDT",
+                "linear": True,
+                "info": {"category": "linear"},
+            }
+        }
+        self.markets_by_id = {}
+
+    def market(self, symbol):
+        return self.markets.get(symbol)
+
+    def load_markets(self):
+        return self.markets
+
+
 class LazyLoadBybitLinearExchange:
     id = "bybit"
 
@@ -248,6 +289,20 @@ class LazyLoadBybitLinearExchange:
         )
         return {"id": "42", "status": "FILLED", "filled": qty}
 
+
+def test_with_bybit_order_params_spot():
+    exchange = BybitSpotMetaExchange()
+    params, category = _with_bybit_order_params(exchange, "BTC/USDT", {})
+    assert category == "spot"
+    assert params == {"category": "spot"}
+
+
+def test_with_bybit_order_params_linear_defaults_position_idx():
+    exchange = BybitLinearMetaExchange()
+    params, category = _with_bybit_order_params(exchange, "ETH/USDT", {})
+    assert category == "linear"
+    assert params["category"] == "linear"
+    assert params["positionIdx"] == 0
 
 class FakeBybitLinearExchange:
     id = "bybit"
