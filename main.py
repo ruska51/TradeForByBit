@@ -124,6 +124,7 @@ from logging_utils import (
     emit_summary,
     _is_bybit_exchange,
     detect_market_category,
+    _normalize_bybit_symbol,
 )
 from retrain_utils import retrain_global_model
 from fallback import fallback_signal
@@ -3854,29 +3855,50 @@ def ensure_exit_orders(
             direction = "falling" if is_take_profit else "rising"
         return BYBIT_TRIGGER_DIRECTIONS[direction]
 
-    try:
-        qty_value = float(exchange_obj.amount_to_precision(symbol, qty_value))
-    except Exception:
-        qty_value = float(qty_value)
-    if qty_value <= 0:
-        return
-
     fetch_params: dict[str, Any] = {}
     if is_bybit:
         fetch_params["category"] = category or "linear"
         if category != "spot":
             fetch_params.setdefault("positionIdx", 0)
+
+    normalized_symbol = symbol
+    if is_bybit:
+        normalized_symbol = _normalize_bybit_symbol(
+            exchange_obj,
+            symbol,
+            fetch_params.get("category"),
+        )
+
+    try:
+        qty_value = float(exchange_obj.amount_to_precision(normalized_symbol, qty_value))
+    except Exception:
+        qty_value = float(qty_value)
+    if qty_value <= 0:
+        return
+
     try:
         if fetch_params:
             try:
-                orders = exchange_obj.fetch_open_orders(symbol, None, None, fetch_params) or []
+                orders = (
+                    exchange_obj.fetch_open_orders(
+                        normalized_symbol, None, None, fetch_params
+                    )
+                    or []
+                )
             except TypeError:
                 try:
-                    orders = exchange_obj.fetch_open_orders(symbol, None, fetch_params) or []
+                    orders = (
+                        exchange_obj.fetch_open_orders(
+                            normalized_symbol, None, fetch_params
+                        )
+                        or []
+                    )
                 except TypeError:
-                    orders = exchange_obj.fetch_open_orders(symbol, fetch_params) or []
+                    orders = (
+                        exchange_obj.fetch_open_orders(normalized_symbol, fetch_params) or []
+                    )
         else:
-            orders = exchange_obj.fetch_open_orders(symbol) or []
+            orders = exchange_obj.fetch_open_orders(normalized_symbol) or []
     except Exception as exc:
         logging.warning("exit_guard | %s | fetch_open_orders failed: %s", symbol, exc)
         orders = []
