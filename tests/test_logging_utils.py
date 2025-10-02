@@ -378,6 +378,38 @@ def test_detect_market_category_linear_mapping():
     assert detect_market_category(exchange, "ETH/USDT") == "linear"
 
 
+def test_detect_market_category_loads_markets_when_missing():
+    class LazyExchange:
+        id = "bybit"
+
+        def __init__(self):
+            self.markets = {}
+            self.markets_by_id = {}
+            self.load_calls = 0
+
+        def load_markets(self):
+            self.load_calls += 1
+            meta = {
+                "symbol": "ETH/USDT:USDT",
+                "info": {"category": "linear"},
+                "base": "ETH",
+                "quote": "USDT",
+                "linear": True,
+            }
+            self.markets = {"ETH/USDT:USDT": meta}
+            self.markets_by_id = {"ETHUSDT": meta}
+            return self.markets
+
+        def market(self, symbol):
+            if symbol not in self.markets:
+                raise KeyError(symbol)
+            return self.markets[symbol]
+
+    exchange = LazyExchange()
+    assert detect_market_category(exchange, "ETH/USDT") == "linear"
+    assert exchange.load_calls == 1
+
+
 def test_ensure_trades_csv_header_migrates(tmp_path):
     path = tmp_path / "trades.csv"
     # simulate old header missing ``trade_id`` as the first column

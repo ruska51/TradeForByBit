@@ -100,6 +100,15 @@ def detect_market_category(exchange, symbol: str) -> str | None:
     if not symbol:
         return None
 
+    markets_loaded = getattr(exchange, "markets", None)
+    if not markets_loaded:
+        loader = getattr(exchange, "load_markets", None)
+        if callable(loader):
+            try:  # pragma: no branch - network interaction only exercised at runtime
+                loader()
+            except Exception:
+                pass
+
     normalized_symbol = _normalize_bybit_symbol(exchange, symbol, None)
     search_symbols: list[str] = []
     for candidate in (normalized_symbol, symbol):
