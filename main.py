@@ -152,6 +152,14 @@ from pattern_detector import (
     self_test as pattern_self_test,
 )
 
+# Bybit encodes trigger direction as integers: ``1`` for a rising trigger, and
+# ``2`` for a falling trigger. The constant is reused by the exit helpers to
+# ensure the numeric values stay aligned with the official API semantics.
+BYBIT_TRIGGER_DIRECTIONS = {
+    "rising": 1,
+    "falling": 2,
+}
+
 # Классификация паттернов по направлению
 BULLISH_PATTERNS = {
     "bull_flag",
@@ -3681,11 +3689,16 @@ def place_protected_exit(
         if not is_bybit:
             return None
         upper_kind = str(kind or "").upper()
-        is_tp = "TAKE_PROFIT" in upper_kind
         closing_long = str(side or "").lower() == "sell"
-        if closing_long:
-            return 1 if is_tp else 2
-        return 2 if is_tp else 1
+        is_take_profit = "TAKE_PROFIT" in upper_kind or upper_kind.endswith("_TP")
+        is_stop = "STOP" in upper_kind
+        if not (is_take_profit or is_stop):
+            return None
+        if is_take_profit:
+            direction = "rising" if closing_long else "falling"
+        else:  # stop order
+            direction = "falling" if closing_long else "rising"
+        return BYBIT_TRIGGER_DIRECTIONS[direction]
 
     def _build_params(kind: str, price: float) -> dict:
         params_local = {
@@ -3828,10 +3841,15 @@ def ensure_exit_orders(
         if not is_bybit:
             return None
         upper_kind = str(kind or "").upper()
-        is_tp = "TAKE_PROFIT" in upper_kind
+        is_take_profit = "TAKE_PROFIT" in upper_kind or upper_kind.endswith("_TP")
+        is_stop = "STOP" in upper_kind
+        if not (is_take_profit or is_stop):
+            return None
         if closing_long:
-            return 1 if is_tp else 2
-        return 2 if is_tp else 1
+            direction = "rising" if is_take_profit else "falling"
+        else:
+            direction = "falling" if is_take_profit else "rising"
+        return BYBIT_TRIGGER_DIRECTIONS[direction]
 
     try:
         qty_value = float(exchange_obj.amount_to_precision(symbol, qty_value))
