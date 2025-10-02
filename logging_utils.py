@@ -1410,17 +1410,16 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                       qty: float, price=None, params=None):
     """Create an order with retry and PERCENT_PRICE handling."""
     params = _with_bybit_order_params(exchange, params)
-    normalized_symbol = _normalize_bybit_symbol(
-        exchange, symbol, (params or {}).get("category")
-    )
-    display_symbol = symbol
-    status_key = display_symbol
-    symbol = normalized_symbol
+    category = (params or {}).get("category")
     if not getattr(exchange, "markets", None):
         try:
             exchange.load_markets()
         except Exception:
             pass
+    normalized_symbol = _normalize_bybit_symbol(exchange, symbol, category)
+    display_symbol = symbol
+    status_key = display_symbol
+    symbol = normalized_symbol
 
     otype = order_type.lower()
     is_market_like = otype.endswith("market")
