@@ -18,6 +18,7 @@ from logging_utils import (
     detect_market_category,
     _normalize_bybit_symbol,
     _with_bybit_order_params,
+    _market_category_from_meta,
 )
 
 class DummyExchange:
@@ -493,6 +494,15 @@ def test_with_bybit_order_params_infers_linear_category(bybit_spot_and_linear_ex
     params, resolved = _with_bybit_order_params(exchange, "ETH/USDT", {})
     assert resolved == "linear"
     assert params.get("category") == "linear"
+
+
+def test_normalize_bybit_category_aliases():
+    meta = {
+        "symbol": "ETH/USDT:USDT",
+        "info": {"contractType": "LinearPerpetual"},
+        "linear": True,
+    }
+    assert _market_category_from_meta(meta) == "linear"
 
 
 def test_detect_market_category_loads_markets_when_missing():
