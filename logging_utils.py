@@ -1703,6 +1703,34 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
     resolved_category = category or ((params or {}).get("category") if params else None)
     base_params: dict | None = dict(params or {}) if params is not None else None
     is_bybit = _is_bybit_exchange(exchange)
+    if is_bybit:
+        p = dict(base_params or {})
+        has_sltype = "slOrderType" in p and str(p["slOrderType"] or "").strip() != ""
+        has_tp = p.get("takeProfit") is not None
+        has_sl = p.get("stopLoss") is not None
+
+        if has_sltype and not (has_tp or has_sl):
+            p.pop("slOrderType", None)
+
+        still_has_sltype = "slOrderType" in p and str(p["slOrderType"] or "").strip() != ""
+        if has_tp or has_sl or still_has_sltype:
+            p.setdefault("tpSlMode", "Full")
+            p.setdefault("tpslTriggerBy", "MarkPrice")
+
+        cat = str(p.get("category") or resolved_category or "").lower()
+        if cat in ("swap", ""):
+            cat = "linear"
+        allowed_categories = {"linear", "inverse", "option", "spot"}
+        cat = cat if cat in allowed_categories else "linear"
+        p["category"] = cat
+
+        if p["category"] in ("linear", "inverse"):
+            p.setdefault("positionIdx", 0)
+        else:
+            p.pop("positionIdx", None)
+
+        base_params = p
+        resolved_category = p.get("category") or resolved_category
     if not getattr(exchange, "markets", None):
         try:
             exchange.load_markets()
@@ -2001,10 +2029,13 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
 def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -> bool:
     """Set leverage with retry and structured logging."""
 
-    from exchange_adapter import set_valid_leverage
+    from exchange_adapter import LEVERAGE_SKIPPED, set_valid_leverage
 
     for attempt in range(attempts):
         L = set_valid_leverage(exchange, symbol, leverage)
+        if L is LEVERAGE_SKIPPED:
+            log(logging.INFO, "leverage", symbol, "Leverage setup skipped")
+            return True
         if L is not None:
             log(logging.INFO, "leverage", symbol, f"Leverage set to {L}x")
             return True
