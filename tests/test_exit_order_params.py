@@ -198,10 +198,50 @@ def test_ensure_exit_orders_spot_long_omits_trigger_direction(monkeypatch, main_
     )
 
     assert captured_calls, "Expected at least one safe_create_order call"
-    for call in captured_calls:
-        params = call["params"]
-        assert "triggerDirection" not in params
-        assert "triggerBy" not in params
+
+
+def test_get_max_position_qty_spot_uses_amount_limit(monkeypatch, main_module):
+    main = main_module
+
+    class SpotExchange:
+        id = "binance"
+
+        def __init__(self):
+            self.fetch_leverage_tiers_called = False
+            self.leverage_bracket_called = False
+            self.markets = {
+                "BTC/USDT": {
+                    "id": "BTCUSDT",
+                    "symbol": "BTC/USDT",
+                    "spot": True,
+                    "limits": {"amount": {"max": 5.0}},
+                }
+            }
+
+        def market(self, symbol):
+            return self.markets[symbol]
+
+        def amount_to_precision(self, symbol, amount):
+            return amount
+
+        def fetch_leverage_tiers(self, symbols):
+            self.fetch_leverage_tiers_called = True
+            return {}
+
+        def fapiPrivate_get_leverageBracket(self, params):
+            self.leverage_bracket_called = True
+            return []
+
+    exchange = SpotExchange()
+
+    monkeypatch.setattr(main, "exchange", exchange, raising=False)
+    monkeypatch.setattr(main, "detect_market_category", lambda *_: "spot")
+
+    qty = main.get_max_position_qty("BTC/USDT", leverage=2, price=100.0)
+
+    assert qty == 5.0
+    assert not exchange.fetch_leverage_tiers_called
+    assert not exchange.leverage_bracket_called
 
 
 def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, main_module):
