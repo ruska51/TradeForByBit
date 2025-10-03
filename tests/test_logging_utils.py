@@ -2,6 +2,8 @@ import builtins
 import csv
 import importlib
 import sys
+
+import pytest
 from logging_utils import (
     safe_create_order,
     flush_symbol_logs,
@@ -29,6 +31,40 @@ class FailExchange:
         raise RuntimeError("fail")
     def set_leverage(self, leverage, symbol):
         raise RuntimeError("bad")
+
+
+@pytest.fixture
+def bybit_spot_and_linear_exchange():
+    class Exchange:
+        id = "bybit"
+        futures = True
+
+        def __init__(self):
+            self.markets = {
+                "ETH/USDT": {
+                    "symbol": "ETH/USDT",
+                    "base": "ETH",
+                    "quote": "USDT",
+                    "spot": True,
+                    "info": {"category": "spot"},
+                },
+                "ETH/USDT:USDT": {
+                    "symbol": "ETH/USDT:USDT",
+                    "base": "ETH",
+                    "quote": "USDT",
+                    "linear": True,
+                    "info": {"category": "linear"},
+                },
+            }
+            self.markets_by_id = {}
+
+        def market(self, symbol):
+            meta = self.markets.get(symbol)
+            if meta is None:
+                raise KeyError(symbol)
+            return meta
+
+    return Exchange()
 
 
 def test_safe_create_order_success(caplog):
@@ -445,6 +481,18 @@ def test_normalize_bybit_symbol_linear_contract_fallback():
 def test_detect_market_category_linear_mapping():
     exchange = FakeBybitLinearExchange()
     assert detect_market_category(exchange, "ETH/USDT") == "linear"
+
+
+def test_detect_market_category_prefers_linear_with_futures_hint(bybit_spot_and_linear_exchange):
+    exchange = bybit_spot_and_linear_exchange
+    assert detect_market_category(exchange, "ETH/USDT") == "linear"
+
+
+def test_with_bybit_order_params_infers_linear_category(bybit_spot_and_linear_exchange):
+    exchange = bybit_spot_and_linear_exchange
+    params, resolved = _with_bybit_order_params(exchange, "ETH/USDT", {})
+    assert resolved == "linear"
+    assert params.get("category") == "linear"
 
 
 def test_detect_market_category_loads_markets_when_missing():
