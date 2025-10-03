@@ -125,6 +125,7 @@ def test_place_protected_exit_spot_omits_trigger_direction(monkeypatch, main_mod
     assert result == "order-id"
     assert "triggerDirection" not in captured_params
     assert "triggerBy" not in captured_params
+    assert "tpSlMode" not in captured_params
 
 
 @pytest.mark.parametrize(
@@ -168,6 +169,7 @@ def test_place_protected_exit_derivative_sets_trigger_direction(
         == main.BYBIT_TRIGGER_DIRECTIONS[expected_direction]
     )
     assert captured_params["triggerBy"] == "LastPrice"
+    assert captured_params["tpSlMode"] == "Full"
 
 
 def test_ensure_exit_orders_spot_long_omits_trigger_direction(monkeypatch, main_module):
@@ -289,6 +291,7 @@ def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, 
             assert params["slTriggerBy"] == "LastPrice"
             assert params["slOrderType"] == "Market"
             assert params["stopPrice"] == params["triggerPrice"]
+            assert params["tpSlMode"] == "Full"
         elif call["order_kind"] == "TAKE_PROFIT_MARKET":
             assert (
                 params["triggerDirection"]
@@ -298,6 +301,7 @@ def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, 
             assert params["tpOrderType"] == "Market"
             assert params["stopPrice"] == params["triggerPrice"]
             assert params["priceProtect"] is True
+            assert params["tpSlMode"] == "Full"
 
 
 def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch, main_module):
@@ -336,11 +340,13 @@ def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch,
                 params["triggerDirection"]
                 == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
             )
+            assert params["tpSlMode"] == "Full"
         elif call["order_kind"] == "TAKE_PROFIT_MARKET":
             assert (
                 params["triggerDirection"]
                 == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
             )
+            assert params["tpSlMode"] == "Full"
 
 
 def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main_module):
@@ -383,6 +389,7 @@ def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main
         params["triggerDirection"]
         == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
     )
+    assert params["tpSlMode"] == "Full"
 
 
 def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):
