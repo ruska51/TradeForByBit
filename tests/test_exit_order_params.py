@@ -169,7 +169,7 @@ def test_place_protected_exit_derivative_sets_trigger_direction(
         == main.BYBIT_TRIGGER_DIRECTIONS[expected_direction]
     )
     assert captured_params["triggerBy"] == "LastPrice"
-    assert captured_params["tpSlMode"] == "Full"
+    assert "tpSlMode" not in captured_params
 
 
 def test_ensure_exit_orders_spot_long_omits_trigger_direction(monkeypatch, main_module):
@@ -283,25 +283,26 @@ def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, 
         assert params["reduceOnly"] is True
         assert params["orderType"] == "Market"
         assert params["category"] == "linear"
+        assert params.get("tpslTriggerBy") == "MarkPrice"
         if call["order_kind"] == "STOP_MARKET":
             assert (
                 params["triggerDirection"]
                 == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
             )
             assert params["slTriggerBy"] == "LastPrice"
-            assert params["slOrderType"] == "Market"
             assert params["stopPrice"] == params["triggerPrice"]
-            assert params["tpSlMode"] == "Full"
+            assert "slOrderType" not in params
+            assert "tpSlMode" not in params
         elif call["order_kind"] == "TAKE_PROFIT_MARKET":
             assert (
                 params["triggerDirection"]
                 == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
             )
             assert params["tpTriggerBy"] == "LastPrice"
-            assert params["tpOrderType"] == "Market"
             assert params["stopPrice"] == params["triggerPrice"]
             assert params["priceProtect"] is True
-            assert params["tpSlMode"] == "Full"
+            assert "tpOrderType" not in params
+            assert "tpSlMode" not in params
 
 
 def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch, main_module):
@@ -340,13 +341,13 @@ def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch,
                 params["triggerDirection"]
                 == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
             )
-            assert params["tpSlMode"] == "Full"
+            assert "tpSlMode" not in params
         elif call["order_kind"] == "TAKE_PROFIT_MARKET":
             assert (
                 params["triggerDirection"]
                 == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
             )
-            assert params["tpSlMode"] == "Full"
+            assert "tpSlMode" not in params
 
 
 def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main_module):
@@ -389,7 +390,7 @@ def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main
         params["triggerDirection"]
         == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
     )
-    assert params["tpSlMode"] == "Full"
+    assert "tpSlMode" not in params
 
 
 def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):
