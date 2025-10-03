@@ -341,6 +341,27 @@ def test_with_bybit_order_params_linear_defaults_position_idx():
     assert params["category"] == "linear"
     assert params["positionIdx"] == 0
 
+
+def test_with_bybit_order_params_normalizes_swap_category(monkeypatch):
+    class _SwapExchange:
+        id = "bybit"
+        markets = {}
+
+    exchange = _SwapExchange()
+
+    monkeypatch.setattr(
+        "logging_utils.detect_market_category", lambda *_args, **_kwargs: "swap"
+    )
+
+    params, resolved = _with_bybit_order_params(exchange, "ETH/USDT", {})
+
+    assert resolved == "linear"
+    assert params.get("category") == "linear"
+    assert all(
+        not (isinstance(value, str) and "swap" in value.lower())
+        for value in params.values()
+    )
+
 class FakeBybitLinearExchange:
     id = "bybit"
 
