@@ -116,7 +116,7 @@ from logging_utils import (
     record_pattern,
     record_error,
     safe_create_order,
-    place_stop_market,
+    place_conditional_exit,
     SOFT_ORDER_ERRORS,
     flush_symbol_logs,
     flush_cycle_logs,
@@ -3716,21 +3716,22 @@ def place_protected_exit(
     if not (is_stop or is_take_profit):
         return None
 
-    is_bybit = _is_bybit_exchange(exchange)
-    category = None
-    normalized_symbol = symbol
-    if is_bybit:
+    def _pct(target: float | None, default: float) -> float:
+        if target is None:
+            return default
         try:
-            category = detect_market_category(exchange, symbol) or "linear"
+            base = float(reference_price) if reference_price and reference_price > 0 else None
         except Exception:
-            category = "linear"
+            base = None
+        if base is None:
+            base = float(target)
         try:
-            normalized_symbol = _normalize_bybit_symbol(exchange, symbol, category)
+            diff = abs(float(target) / base - 1)
+            if diff > 0:
+                return diff
         except Exception:
-            normalized_symbol = symbol
-
-    close_on_trigger = bool(close_all)
-    reduce_flag = True if reduce_only or close_on_trigger else False
+            pass
+        return default
 
     if is_stop:
         if stop_price is None:
@@ -3744,15 +3745,14 @@ def place_protected_exit(
             base_value = float(base_value)
         except (TypeError, ValueError):
             base_value = stop_prec
-        sl_pct = abs(stop_prec / base_value - 1) if base_value else 0.02
-        order_id, err = place_stop_market(
+        sl_pct = _pct(stop_prec, 0.02)
+        order_id, err = place_conditional_exit(
             exchange,
-            normalized_symbol,
+            symbol,
             position_side,
             base_value or stop_prec,
             sl_pct,
-            reduce_only=True,
-            close_on_trigger=close_on_trigger,
+            is_tp=False,
         )
         if err:
             message = f"order | {symbol} | stop order rejected: {err}"
@@ -3770,49 +3770,22 @@ def place_protected_exit(
     except Exception:
         tp_price = float(stop_price)
 
-    closing_long = side_norm == "sell"
-    direction_key = "rising" if closing_long else "falling"
-    trigger_direction = BYBIT_TRIGGER_DIRECTIONS[direction_key]
+    base_tp = reference_price if reference_price and reference_price > 0 else tp_price
+    try:
+        base_tp = float(base_tp)
+    except (TypeError, ValueError):
+        base_tp = tp_price
+    tp_pct = _pct(tp_price, 0.04)
 
-    params: dict[str, Any] = {
-        "triggerPrice": tp_price,
-        "triggerDirection": trigger_direction,
-        "triggerBy": "LastPrice",
-        "tpSlMode": "Full",
-        "tpTriggerBy": "LastPrice",
-        "reduceOnly": bool(reduce_flag),
-        "closeOnTrigger": close_on_trigger,
-    }
-
-    if is_bybit:
-        cat_norm = str(category or "").lower()
-        if cat_norm == "spot":
-            params["category"] = "spot"
-        else:
-            params["category"] = "linear"
-            params.setdefault("positionIdx", 0)
-
-    price_arg = None
-    if "MARKET" in upper_kind:
-        params["orderType"] = "Market"
-    else:
-        params["orderType"] = "Limit"
-        params["price"] = tp_price
-        price_arg = tp_price
-
-    order_id, err = safe_create_order(
+    order_id, err = place_conditional_exit(
         exchange,
-        normalized_symbol,
-        order_type,
-        side,
-        qty,
-        price_arg,
-        params,
+        symbol,
+        position_side,
+        base_tp or tp_price,
+        tp_pct,
+        is_tp=True,
     )
 
-    if err in SOFT_ORDER_ERRORS:
-        log(logging.INFO, "order", symbol, f"skipped: {err}")
-        return None
     if err:
         log_once(logging, "error", f"order | {symbol} | take-profit rejected: {err}")
         record_error(symbol, f"failed to set {order_type}")
@@ -3848,66 +3821,6 @@ def ensure_exit_orders(
 
     side_norm = str(side or "").lower()
     exit_side = "sell" if side_norm == "long" else "buy"
-    closing_long = exit_side.lower() == "sell"
-
-    def _determine_trigger_direction(kind: str, target_price: float | None = None) -> int | None:
-        if not is_bybit:
-            return None
-        upper_kind = str(kind or "").upper()
-        is_take_profit = "TAKE_PROFIT" in upper_kind or upper_kind.endswith("_TP")
-        is_stop = "STOP" in upper_kind
-        if not (is_take_profit or is_stop):
-            return None
-        if closing_long:
-            direction = "rising" if is_take_profit else "falling"
-        else:
-            direction = "falling" if is_take_profit else "rising"
-        if target_price is not None and entry_price > 0:
-            if direction == "rising" and target_price <= entry_price:
-                direction = "falling"
-            elif direction == "falling" and target_price >= entry_price:
-                direction = "rising"
-        return BYBIT_TRIGGER_DIRECTIONS[direction]
-
-    def _build_params(kind: str, trigger_price: float) -> dict[str, Any]:
-        upper_kind = str(kind or "").upper()
-        is_market = upper_kind.endswith("MARKET")
-        is_stop = "STOP" in upper_kind
-        is_take_profit = "TAKE_PROFIT" in upper_kind
-        params_local: dict[str, Any] = {
-            "triggerPrice": float(trigger_price),
-            "closeOnTrigger": True,
-            "closePosition": True,
-            "reduceOnly": True,
-        }
-        trigger_direction = _determine_trigger_direction(upper_kind, trigger_price)
-        if trigger_direction is not None and category != "spot":
-            params_local["triggerDirection"] = trigger_direction
-            params_local.setdefault("triggerBy", "LastPrice")
-        if is_stop:
-            params_local.setdefault("slTriggerBy", "LastPrice")
-            params_local["stopPrice"] = trigger_price
-        if is_take_profit:
-            params_local.setdefault("tpTriggerBy", "LastPrice")
-            params_local["stopPrice"] = trigger_price
-            params_local["priceProtect"] = True
-        if not is_market:
-            params_local["price"] = trigger_price
-        if is_bybit:
-            params_local.setdefault("orderType", "Market" if is_market else "Limit")
-            cat_norm = str(category or "").lower()
-            if cat_norm in {"linear", "inverse"}:
-                params_local.setdefault("category", cat_norm)
-                params_local.setdefault("positionIdx", 0)
-                params_local.setdefault("tpslTriggerBy", "MarkPrice")
-            elif cat_norm and cat_norm != "spot":
-                params_local.setdefault("category", "linear")
-                params_local.setdefault("positionIdx", 0)
-                params_local.setdefault("tpslTriggerBy", "MarkPrice")
-            elif cat_norm == "spot":
-                params_local.setdefault("category", "spot")
-        return params_local
-
     fetch_params: dict[str, Any] = {}
     if is_bybit:
         fetch_params["category"] = category or "linear"
@@ -4030,109 +3943,64 @@ def ensure_exit_orders(
     except (TypeError, ValueError):
         entry_price = 0.0
 
-    def _stretch_price(target: float | None, is_tp: bool) -> float | None:
-        if target is None:
-            return None
-        base = entry_price if entry_price > 0 else None
-        if base and base != target:
-            diff = target - base
-            stretched = base + diff * 1.5
-        elif base and base == target:
-            adjust = abs(base) * 0.01 or 0.01
-            direction = 1.0 if (is_tp == (side_norm == "long")) else -1.0
-            stretched = base + adjust * direction * 1.5
-        else:
-            factor = 1.5
-            stretched = target * factor if target != 0 else target
-        if stretched <= 0 and target > 0:
-            stretched = max(target * 1.5, target + 0.01)
-        return stretched
-
-    adj_sl = float(sl_price) if sl_price is not None else None
-    adj_tp = float(tp_price) if tp_price is not None else None
-    attempt = 0
     placed_any = False
 
-    while attempt < 3 and (need_sl or need_tp):
-        widen_required = False
-
-        if need_sl and adj_sl is not None:
+    def _pct(target: float | None, default: float = 0.02) -> float:
+        if target is None:
+            return default
+        if entry_price > 0:
             try:
-                sl_prec = float(exchange_obj.price_to_precision(symbol, adj_sl))
+                ratio = abs(float(target) / entry_price - 1)
+                if ratio > 0:
+                    return ratio
             except Exception:
-                sl_prec = float(adj_sl)
-            params = _build_params("STOP_MARKET", sl_prec)
-            order_id, err = safe_create_order(
-                exchange_obj,
-                normalized_symbol,
-                "STOP_MARKET",
-                exit_side,
-                qty_value,
-                price=sl_prec,
-                params=params,
-            )
-            if order_id and not err:
-                need_sl = False
-                placed_any = True
-                adj_sl = sl_prec
-            elif err:
-                if "-2021" in err:
-                    widen_required = True
-                else:
-                    logging.warning(
-                        "exit_guard | %s | stop order rejected: %s", symbol, err
-                    )
+                pass
+        return default
 
-        if need_tp and adj_tp is not None:
-            try:
-                tp_prec = float(exchange_obj.price_to_precision(symbol, adj_tp))
-            except Exception:
-                tp_prec = float(adj_tp)
-            params = _build_params("TAKE_PROFIT_MARKET", tp_prec)
-            order_id, err = safe_create_order(
-                exchange_obj,
-                normalized_symbol,
-                "TAKE_PROFIT_MARKET",
-                exit_side,
-                qty_value,
-                price=tp_prec,
-                params=params,
-            )
-            if order_id and not err:
-                need_tp = False
-                placed_any = True
-                adj_tp = tp_prec
-            elif err:
-                if "-2021" in err:
-                    widen_required = True
-                else:
-                    logging.warning(
-                        "exit_guard | %s | take-profit rejected: %s", symbol, err
-                    )
+    side_open = "buy" if side_norm == "long" else "sell"
+    sl_base = entry_price if entry_price > 0 else (float(sl_price) if sl_price else 0.0)
+    tp_base = entry_price if entry_price > 0 else (float(tp_price) if tp_price else sl_base)
 
-        if widen_required:
-            attempt += 1
-            if adj_sl is not None:
-                adj_sl = _stretch_price(adj_sl, is_tp=False)
-            if adj_tp is not None:
-                adj_tp = _stretch_price(adj_tp, is_tp=True)
-            continue
-        break
+    if need_sl and sl_price is not None:
+        sl_pct = _pct(sl_price)
+        order_id, err = place_conditional_exit(
+            exchange_obj,
+            symbol,
+            side_open,
+            sl_base,
+            sl_pct,
+            is_tp=False,
+        )
+        if order_id and not err:
+            placed_any = True
+            ctx["sl_price"] = float(sl_price)
+        elif err:
+            logging.warning("exit_guard | %s | stop order rejected: %s", symbol, err)
+
+    if need_tp and tp_price is not None:
+        tp_pct = _pct(tp_price, default=0.04)
+        order_id, err = place_conditional_exit(
+            exchange_obj,
+            symbol,
+            side_open,
+            tp_base,
+            tp_pct,
+            is_tp=True,
+        )
+        if order_id and not err:
+            placed_any = True
+            ctx["tp_price"] = float(tp_price)
+        elif err:
+            logging.warning("exit_guard | %s | take-profit rejected: %s", symbol, err)
 
     if placed_any:
-        ctx.update(
-            {
-                "sl_price": float(adj_sl) if adj_sl is not None else ctx.get("sl_price"),
-                "tp_price": float(adj_tp) if adj_tp is not None else ctx.get("tp_price"),
-                "qty": float(qty_value),
-            }
-        )
+        ctx["qty"] = float(qty_value)
         open_trade_ctx[symbol] = ctx
         msg_parts: list[str] = []
-        if adj_sl is not None:
-            msg_parts.append(f"sl={adj_sl:.6f}")
-        if adj_tp is not None:
-            msg_parts.append(f"tp={adj_tp:.6f}")
+        if ctx.get("sl_price") is not None:
+            msg_parts.append(f"sl={float(ctx['sl_price']):.6f}")
+        if ctx.get("tp_price") is not None:
+            msg_parts.append(f"tp={float(ctx['tp_price']):.6f}")
         log(
             logging.INFO,
             "exit_guard",

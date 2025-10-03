@@ -2,6 +2,7 @@ import importlib
 import logging
 import sys
 import types
+from typing import Any
 
 import pytest
 
@@ -25,6 +26,27 @@ def _make_dummy_exchange():
             return []
 
     return DummyExchange()
+
+
+def _capture_conditional_calls(monkeypatch, main):
+    calls: list[dict[str, Any]] = []
+
+    def fake_place_conditional_exit(
+        _exchange, symbol, side_open, base_price, pct, *, is_tp
+    ):
+        calls.append(
+            {
+                "symbol": symbol,
+                "side_open": side_open,
+                "base_price": base_price,
+                "pct": pct,
+                "is_tp": is_tp,
+            }
+        )
+        return ("tp" if is_tp else "sl") + "-id", None
+
+    monkeypatch.setattr(main, "place_conditional_exit", fake_place_conditional_exit)
+    return calls
 
 
 def test_bybit_spot_category_respected_with_futures_adapter():
@@ -106,13 +128,7 @@ def test_place_protected_exit_spot_omits_trigger_direction(monkeypatch, main_mod
     monkeypatch.setattr(main, "adjust_price_to_percent_filter", lambda _symbol, price: price)
     monkeypatch.setattr(main, "detect_market_category", lambda *_: "spot")
 
-    captured_params = {}
-
-    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
-        captured_params.update(params or {})
-        return "order-id", None
-
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+    calls = _capture_conditional_calls(monkeypatch, main)
 
     result = main.place_protected_exit(
         "BTC/USDT",
@@ -122,23 +138,26 @@ def test_place_protected_exit_spot_omits_trigger_direction(monkeypatch, main_mod
         100.0,
     )
 
-    assert result == "order-id"
-    assert "triggerDirection" not in captured_params
-    assert "triggerBy" not in captured_params
-    assert "tpSlMode" not in captured_params
+    assert result == "sl-id"
+    assert calls
+    call = calls[0]
+    assert call["symbol"] == "BTC/USDT"
+    assert call["side_open"] == "buy"
+    assert call["is_tp"] is False
+    assert call["pct"] > 0
 
 
 @pytest.mark.parametrize(
-    "side, order_type, expected_direction",
+    "side, order_type",
     [
-        ("sell", "STOP_MARKET", "falling"),
-        ("sell", "TAKE_PROFIT_MARKET", "rising"),
-        ("buy", "STOP_MARKET", "rising"),
-        ("buy", "TAKE_PROFIT_MARKET", "falling"),
+        ("sell", "STOP_MARKET"),
+        ("sell", "TAKE_PROFIT_MARKET"),
+        ("buy", "STOP_MARKET"),
+        ("buy", "TAKE_PROFIT_MARKET"),
     ],
 )
 def test_place_protected_exit_derivative_sets_trigger_direction(
-    monkeypatch, main_module, side, order_type, expected_direction
+    monkeypatch, main_module, side, order_type
 ):
     main = main_module
 
@@ -147,13 +166,7 @@ def test_place_protected_exit_derivative_sets_trigger_direction(
     monkeypatch.setattr(main, "adjust_price_to_percent_filter", lambda _symbol, price: price)
     monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
 
-    captured_params = {}
-
-    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
-        captured_params.update(params or {})
-        return "order-id", None
-
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+    captured_calls = _capture_conditional_calls(monkeypatch, main)
 
     result = main.place_protected_exit(
         "BTC/USDT",
@@ -163,13 +176,14 @@ def test_place_protected_exit_derivative_sets_trigger_direction(
         100.0,
     )
 
-    assert result == "order-id"
-    assert (
-        captured_params["triggerDirection"]
-        == main.BYBIT_TRIGGER_DIRECTIONS[expected_direction]
-    )
-    assert captured_params["triggerBy"] == "LastPrice"
-    assert "tpSlMode" not in captured_params
+    expected_id = "tp-id" if "TAKE_PROFIT" in order_type else "sl-id"
+    assert result == expected_id
+    assert captured_calls
+    call = captured_calls[-1]
+    expected_side_open = "buy" if side == "sell" else "sell"
+    assert call["side_open"] == expected_side_open
+    assert call["is_tp"] is ("TAKE_PROFIT" in order_type)
+    assert call["pct"] > 0
 
 
 def test_ensure_exit_orders_spot_long_omits_trigger_direction(monkeypatch, main_module):
@@ -182,13 +196,7 @@ def test_ensure_exit_orders_spot_long_omits_trigger_direction(monkeypatch, main_
     monkeypatch.setattr(main, "open_trade_ctx", {}, raising=False)
     monkeypatch.setattr(main, "detect_market_category", lambda *_: "spot")
 
-    captured_calls = []
-
-    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
-        captured_calls.append({"order_kind": order_kind, "params": dict(params or {})})
-        return f"{order_kind}-id", None
-
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+    captured_calls = _capture_conditional_calls(monkeypatch, main)
 
     main.ensure_exit_orders(
         adapter,
@@ -199,7 +207,9 @@ def test_ensure_exit_orders_spot_long_omits_trigger_direction(monkeypatch, main_
         tp_price=105.0,
     )
 
-    assert captured_calls, "Expected at least one safe_create_order call"
+    assert captured_calls, "Expected at least one conditional exit call"
+    assert {call["is_tp"] for call in captured_calls} <= {False, True}
+    assert all(call["side_open"] == "buy" for call in captured_calls)
 
 
 def test_get_max_position_qty_spot_uses_amount_limit(monkeypatch, main_module):
@@ -256,13 +266,23 @@ def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, 
     monkeypatch.setattr(main, "open_trade_ctx", {"BTC/USDT": {"entry_price": 100.0}}, raising=False)
     monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
 
-    captured_calls = []
+    captured_calls: list[dict[str, Any]] = []
 
-    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
-        captured_calls.append({"order_kind": order_kind, "params": dict(params or {})})
-        return f"{order_kind}-id", None
+    def fake_place_conditional_exit(
+        _exchange, symbol, side_open, base_price, pct, *, is_tp
+    ):
+        captured_calls.append(
+            {
+                "symbol": symbol,
+                "side_open": side_open,
+                "base_price": base_price,
+                "pct": pct,
+                "is_tp": is_tp,
+            }
+        )
+        return ("tp" if is_tp else "sl") + "-id", None
 
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+    monkeypatch.setattr(main, "place_conditional_exit", fake_place_conditional_exit)
 
     main.ensure_exit_orders(
         adapter,
@@ -273,36 +293,9 @@ def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, 
         tp_price=105.0,
     )
 
-    assert captured_calls, "Expected at least one safe_create_order call"
-    for call in captured_calls:
-        params = call["params"]
-        assert params["triggerBy"] == "LastPrice"
-        assert params["triggerPrice"] in {95.0, 105.0}
-        assert params["closeOnTrigger"] is True
-        assert params["closePosition"] is True
-        assert params["reduceOnly"] is True
-        assert params["orderType"] == "Market"
-        assert params["category"] == "linear"
-        assert params.get("tpslTriggerBy") == "MarkPrice"
-        if call["order_kind"] == "STOP_MARKET":
-            assert (
-                params["triggerDirection"]
-                == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
-            )
-            assert params["slTriggerBy"] == "LastPrice"
-            assert params["stopPrice"] == params["triggerPrice"]
-            assert "slOrderType" not in params
-            assert "tpSlMode" not in params
-        elif call["order_kind"] == "TAKE_PROFIT_MARKET":
-            assert (
-                params["triggerDirection"]
-                == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
-            )
-            assert params["tpTriggerBy"] == "LastPrice"
-            assert params["stopPrice"] == params["triggerPrice"]
-            assert params["priceProtect"] is True
-            assert "tpOrderType" not in params
-            assert "tpSlMode" not in params
+    assert captured_calls, "Expected at least one conditional exit call"
+    assert {call["is_tp"] for call in captured_calls} == {False, True}
+    assert all(call["side_open"] == "buy" for call in captured_calls)
 
 
 def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch, main_module):
@@ -315,13 +308,23 @@ def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch,
     monkeypatch.setattr(main, "open_trade_ctx", {}, raising=False)
     monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
 
-    captured_calls = []
+    captured_calls: list[dict[str, Any]] = []
 
-    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
-        captured_calls.append({"order_kind": order_kind, "params": dict(params or {})})
-        return f"{order_kind}-id", None
+    def fake_place_conditional_exit(
+        _exchange, symbol, side_open, base_price, pct, *, is_tp
+    ):
+        captured_calls.append(
+            {
+                "symbol": symbol,
+                "side_open": side_open,
+                "base_price": base_price,
+                "pct": pct,
+                "is_tp": is_tp,
+            }
+        )
+        return ("tp" if is_tp else "sl") + "-id", None
 
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+    monkeypatch.setattr(main, "place_conditional_exit", fake_place_conditional_exit)
 
     main.ensure_exit_orders(
         adapter,
@@ -332,22 +335,9 @@ def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch,
         tp_price=95.0,
     )
 
-    assert captured_calls, "Expected at least one safe_create_order call"
-    for call in captured_calls:
-        params = call["params"]
-        assert params["triggerBy"] == "LastPrice"
-        if call["order_kind"] == "STOP_MARKET":
-            assert (
-                params["triggerDirection"]
-                == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
-            )
-            assert "tpSlMode" not in params
-        elif call["order_kind"] == "TAKE_PROFIT_MARKET":
-            assert (
-                params["triggerDirection"]
-                == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
-            )
-            assert "tpSlMode" not in params
+    assert captured_calls, "Expected at least one conditional exit call"
+    assert {call["is_tp"] for call in captured_calls} == {False, True}
+    assert all(call["side_open"] == "sell" for call in captured_calls)
 
 
 def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main_module):
@@ -365,13 +355,23 @@ def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main
     )
     monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
 
-    captured_calls = []
+    captured_calls: list[dict[str, Any]] = []
 
-    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
-        captured_calls.append({"order_kind": order_kind, "params": dict(params or {})})
-        return f"{order_kind}-id", None
+    def fake_place_conditional_exit(
+        _exchange, symbol, side_open, base_price, pct, *, is_tp
+    ):
+        captured_calls.append(
+            {
+                "symbol": symbol,
+                "side_open": side_open,
+                "base_price": base_price,
+                "pct": pct,
+                "is_tp": is_tp,
+            }
+        )
+        return ("tp" if is_tp else "sl") + "-id", None
 
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+    monkeypatch.setattr(main, "place_conditional_exit", fake_place_conditional_exit)
 
     main.ensure_exit_orders(
         adapter,
@@ -383,14 +383,10 @@ def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main
     )
 
     assert len(captured_calls) == 1
-    assert captured_calls[0]["order_kind"] == "STOP_MARKET"
-    params = captured_calls[0]["params"]
-    assert params["triggerPrice"] == 105.0
-    assert (
-        params["triggerDirection"]
-        == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
-    )
-    assert "tpSlMode" not in params
+    call = captured_calls[0]
+    assert call["is_tp"] is False
+    assert call["side_open"] == "buy"
+    assert call["pct"] > 0
 
 
 def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):
@@ -456,20 +452,7 @@ def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):
     monkeypatch.setattr(main, "exchange", exchange, raising=False)
     monkeypatch.setattr(main, "adjust_price_to_percent_filter", lambda _symbol, price: price)
 
-    captured_orders = []
-
-    def fake_safe_create_order(_exchange, symbol, order_kind, side, qty, price, params):
-        captured_orders.append(
-            {
-                "order_kind": order_kind,
-                "side": side,
-                "symbol": symbol,
-                "params": dict(params or {}),
-            }
-        )
-        return f"{order_kind}-id", None
-
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+    captured_orders = _capture_conditional_calls(monkeypatch, main)
 
     place_result = main.place_protected_exit(
         "ETH/USDT",
@@ -479,11 +462,12 @@ def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):
         100.0,
     )
 
-    assert place_result == "STOP_MARKET-id"
+    assert place_result == "sl-id"
     assert captured_orders
-    stop_params = captured_orders[-1]["params"]
-    assert stop_params["triggerDirection"] == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
-    assert stop_params["triggerBy"] == "LastPrice"
+    stop_call = captured_orders[0]
+    assert stop_call["side_open"] == "buy"
+    assert stop_call["is_tp"] is False
+    assert stop_call["pct"] > 0
 
     captured_orders.clear()
 
@@ -500,10 +484,7 @@ def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):
     )
 
     assert captured_orders, "Expected exit orders for dual market futures setup"
-    for call in captured_orders:
-        params = call["params"]
-        assert params["triggerDirection"] in main.BYBIT_TRIGGER_DIRECTIONS.values()
-        assert params["triggerBy"] == "LastPrice"
+    assert {call["is_tp"] for call in captured_orders} == {False, True}
 
 
 def test_ensure_exit_orders_blocks_after_fetch_failure(
@@ -528,20 +509,7 @@ def test_ensure_exit_orders_blocks_after_fetch_failure(
     monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
     monkeypatch.setattr(main, "exit_orders_fetch_guard", {}, raising=False)
 
-    captured_calls = []
-
-    def fake_safe_create_order(
-        _exchange, symbol, order_kind, side, qty, price, params
-    ):
-        captured_calls.append(
-            {
-                "order_kind": order_kind,
-                "params": dict(params or {}),
-            }
-        )
-        return f"{order_kind}-id", None
-
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+    captured_calls = _capture_conditional_calls(monkeypatch, main)
 
     caplog.set_level(logging.WARNING)
 
@@ -641,15 +609,7 @@ def test_ensure_exit_orders_loads_markets_before_normalization(
     monkeypatch.setattr(main, "detect_market_category", lambda *_: "linear")
     monkeypatch.setattr(main, "exit_orders_fetch_guard", {}, raising=False)
 
-    captured_symbols: list[str] = []
-
-    def fake_safe_create_order(
-        _exchange, symbol, order_kind, side, qty, price, params
-    ):
-        captured_symbols.append(symbol)
-        return f"{order_kind}-id", None
-
-    monkeypatch.setattr(main, "safe_create_order", fake_safe_create_order)
+    captured_calls = _capture_conditional_calls(monkeypatch, main)
 
     caplog.set_level(logging.WARNING)
 
@@ -663,6 +623,5 @@ def test_ensure_exit_orders_loads_markets_before_normalization(
     )
 
     assert exchange.load_calls >= 1
-    assert captured_symbols, "Expected safe_create_order invocations"
-    assert all(symbol == "BTC/USDT:USDT" for symbol in captured_symbols)
+    assert captured_calls, "Expected conditional exit invocations"
     assert "Illegal category" not in caplog.text

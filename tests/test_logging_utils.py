@@ -2,11 +2,12 @@ import builtins
 import csv
 import importlib
 import sys
+from typing import Any
 
 import pytest
 from logging_utils import (
     safe_create_order,
-    place_stop_market,
+    place_conditional_exit,
     flush_symbol_logs,
     safe_set_leverage,
     setup_logger,
@@ -211,12 +212,20 @@ class BybitExitExchange:
                 },
             }
         }
+        self.markets_by_id = self.markets
 
     def market(self, symbol):
         return self.markets.get(symbol, {})
 
     def fetch_ticker(self, symbol):
         return {"ask": 101.0, "bid": 100.0}
+
+    def fetch_open_orders(self, symbol, params=None):
+        return []
+
+    def cancel_order(self, order_id, symbol, params=None):
+        self.calls.append(("cancel", order_id, params))
+        return {"id": order_id, "status": "canceled"}
 
     def price_to_precision(self, symbol, price):
         return f"{float(price):.2f}"
@@ -485,24 +494,33 @@ def test_safe_create_order_percent_filter_market_fallback(caplog):
     assert "order_market_fallback" in logged
 
 
-def test_place_stop_market_normalized(caplog):
+def test_place_conditional_exit_normalized(caplog):
     setup_logger()
     import logging
 
     logging.getLogger().addHandler(caplog.handler)
     caplog.set_level("INFO")
     ex = BybitExitExchange()
-    order_id, err = place_stop_market(ex, "ETH/USDT", "buy", 1000.0, 0.02)
+    order_id, err = place_conditional_exit(
+        ex,
+        "ETH/USDT",
+        "buy",
+        1000.0,
+        0.02,
+        is_tp=False,
+    )
     assert order_id == "3"
     assert err is None
     assert ex.calls, "Expected create_order to be invoked"
     otype, side, qty, price, params = ex.calls[-1]
-    assert otype == "STOP_MARKET"
+    assert otype == "market"
     assert side == "sell"
     assert qty is None
     assert price is None
     assert params["tpSlMode"] == "Full"
     assert params["triggerBy"] == "LastPrice"
+    assert params["orderType"] == "Market"
+    assert params["triggerDirection"] == "descending"
 
 
 def test_safe_create_order_loads_markets_before_symbol_normalization():
@@ -661,28 +679,29 @@ def test_ensure_exit_orders_trigger_direction_long(monkeypatch):
     class Adapter:
         client = exchange
 
-    recorded: dict[str, list[dict]] = {}
+    recorded: list[dict[str, Any]] = []
 
-    def _recording_safe_create_order(_exchange, symbol, order_type, side, qty, price=None, params=None):
-        recorded.setdefault(order_type, []).append(dict(params or {}))
-        return "1", None
+    def _recording_place_conditional_exit(
+        _exchange, symbol, side_open, base_price, pct, *, is_tp
+    ):
+        recorded.append(
+            {
+                "symbol": symbol,
+                "side_open": side_open,
+                "base_price": base_price,
+                "pct": pct,
+                "is_tp": is_tp,
+            }
+        )
+        return ("tp" if is_tp else "sl"), None
 
-    monkeypatch.setattr(main, "safe_create_order", _recording_safe_create_order)
+    monkeypatch.setattr(main, "place_conditional_exit", _recording_place_conditional_exit)
     main.open_trade_ctx.pop("BTC/USDT", None)
     main.ensure_exit_orders(Adapter(), "BTC/USDT", "long", 1.0, 99.0, 101.0)
 
-    assert "STOP_MARKET" in recorded and recorded["STOP_MARKET"]
-    assert "TAKE_PROFIT_MARKET" in recorded and recorded["TAKE_PROFIT_MARKET"]
-    sl_params = recorded["STOP_MARKET"][0]
-    tp_params = recorded["TAKE_PROFIT_MARKET"][0]
-    assert (
-        sl_params["triggerDirection"]
-        == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
-    )
-    assert (
-        tp_params["triggerDirection"]
-        == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
-    )
+    assert recorded, "Expected conditional exits"
+    assert {call["is_tp"] for call in recorded} == {False, True}
+    assert all(call["side_open"] == "buy" for call in recorded)
 
 
 def test_ensure_exit_orders_trigger_direction_short(monkeypatch):
@@ -692,25 +711,26 @@ def test_ensure_exit_orders_trigger_direction_short(monkeypatch):
     class Adapter:
         client = exchange
 
-    recorded: dict[str, list[dict]] = {}
+    recorded: list[dict[str, Any]] = []
 
-    def _recording_safe_create_order(_exchange, symbol, order_type, side, qty, price=None, params=None):
-        recorded.setdefault(order_type, []).append(dict(params or {}))
-        return "1", None
+    def _recording_place_conditional_exit(
+        _exchange, symbol, side_open, base_price, pct, *, is_tp
+    ):
+        recorded.append(
+            {
+                "symbol": symbol,
+                "side_open": side_open,
+                "base_price": base_price,
+                "pct": pct,
+                "is_tp": is_tp,
+            }
+        )
+        return ("tp" if is_tp else "sl"), None
 
-    monkeypatch.setattr(main, "safe_create_order", _recording_safe_create_order)
+    monkeypatch.setattr(main, "place_conditional_exit", _recording_place_conditional_exit)
     main.open_trade_ctx.pop("BTC/USDT", None)
     main.ensure_exit_orders(Adapter(), "BTC/USDT", "short", 1.0, 101.0, 99.0)
 
-    assert "STOP_MARKET" in recorded and recorded["STOP_MARKET"]
-    assert "TAKE_PROFIT_MARKET" in recorded and recorded["TAKE_PROFIT_MARKET"]
-    sl_params = recorded["STOP_MARKET"][0]
-    tp_params = recorded["TAKE_PROFIT_MARKET"][0]
-    assert (
-        sl_params["triggerDirection"]
-        == main.BYBIT_TRIGGER_DIRECTIONS["rising"]
-    )
-    assert (
-        tp_params["triggerDirection"]
-        == main.BYBIT_TRIGGER_DIRECTIONS["falling"]
-    )
+    assert recorded, "Expected conditional exits"
+    assert {call["is_tp"] for call in recorded} == {False, True}
+    assert all(call["side_open"] == "sell" for call in recorded)
