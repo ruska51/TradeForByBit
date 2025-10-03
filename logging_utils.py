@@ -139,6 +139,39 @@ def _clean_params(d: dict | None) -> dict | None:
     return out
 
 
+def _bybit_trigger_for_exit(
+    side_open: str,
+    last: float,
+    base_price: float,
+    pct: float,
+    *,
+    is_tp: bool,
+) -> tuple[float, str, str]:
+    """Return trigger price, direction and closing side for Bybit exits."""
+
+    min_off = 0.001
+    side_norm = str(side_open or "").lower()
+    if side_norm == "buy":
+        if is_tp:
+            trig = max(base_price * (1 + pct), last * (1 + min_off))
+            direction = "ascending"
+            side_to_send = "sell"
+        else:
+            trig = min(base_price * (1 - pct), last * (1 - min_off))
+            direction = "descending"
+            side_to_send = "sell"
+    else:
+        if is_tp:
+            trig = min(base_price * (1 - pct), last * (1 - min_off))
+            direction = "descending"
+            side_to_send = "buy"
+        else:
+            trig = max(base_price * (1 + pct), last * (1 + min_off))
+            direction = "ascending"
+            side_to_send = "buy"
+    return float(trig), direction, side_to_send
+
+
 def normalize_bybit_category(value: str | None) -> str | None:
     """Return canonical Bybit category name for *value*.
 
@@ -2077,7 +2110,22 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
             if is_bybit:
                 order_type_api_current = _normalize_bybit_order_type_value(send_type)
 
-            order = exchange.create_order(symbol, order_type_api_current, side, qty, price_arg, final_params)
+            params_for_call, category_for_call = _with_bybit_order_params(
+                exchange,
+                display_symbol,
+                final_params,
+            )
+            params_for_call = _clean_params(params_for_call)
+            call_symbol = _normalize_bybit_symbol(exchange, display_symbol, category_for_call)
+
+            order = exchange.create_order(
+                call_symbol,
+                order_type_api_current,
+                side,
+                qty,
+                price_arg,
+                params_for_call,
+            )
             order_id = order.get("id") or order.get("orderId")
             status = str(order.get("status", "")).upper()
             if not order_id or status.lower() in {"rejected", "canceled"}:
@@ -2153,118 +2201,128 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
     return None, last_error or "order_failed"
 
 
-def place_stop_market(
+def place_conditional_exit(
     exchange,
     symbol: str,
-    position_side: str,
+    side_open: str,
     base_price: float,
-    sl_pct: float,
+    pct: float,
     *,
-    reduce_only: bool = True,
-    close_on_trigger: bool = True,
+    is_tp: bool,
 ):
-    """Place a Bybit STOP_MARKET order with automatic direction handling."""
+    """Place a Bybit conditional exit order (stop or take-profit)."""
+
+    base_params = {"category": "linear", "reduceOnly": True, "closeOnTrigger": True}
+    base_params, category = _with_bybit_order_params(exchange, symbol, base_params)
+    category = category or str((base_params or {}).get("category") or "linear").lower()
+    symbol_normalized = _normalize_bybit_symbol(exchange, symbol, category)
+    base_params = _clean_params(base_params)
 
     try:
-        ticker = exchange.fetch_ticker(symbol)
+        ticker = exchange.fetch_ticker(symbol_normalized)
     except Exception:
         ticker = {}
 
-    last_candidates = []
+    last = None
     if isinstance(ticker, dict):
-        last_candidates.extend(
-            ticker.get(key)
-            for key in ("last", "close", "markPrice", "price")
-        )
-        if str(position_side or "").lower() == "buy":
-            last_candidates.extend([ticker.get("bid"), ticker.get("ask")])
-        else:
-            last_candidates.extend([ticker.get("ask"), ticker.get("bid")])
+        for key in ("last", "close", "markPrice", "price", "bid", "ask"):
+            raw = ticker.get(key)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value) and value > 0:
+                last = value
+                break
 
-    last_price = None
-    for candidate in last_candidates:
-        if candidate is None:
-            continue
+    if last is None:
         try:
-            value = float(candidate)
+            last = float(base_price)
         except (TypeError, ValueError):
-            continue
-        if math.isfinite(value) and value > 0:
-            last_price = value
-            break
+            last = 0.0
 
     try:
         base_value = float(base_price)
     except (TypeError, ValueError):
-        base_value = last_price or 0.0
+        base_value = last
 
     try:
-        sl_value = abs(float(sl_pct))
+        pct_value = abs(float(pct))
     except (TypeError, ValueError):
-        sl_value = 0.0
+        pct_value = 0.0
 
-    min_offset = 0.001
-    side_norm = str(position_side or "").lower()
-    mapping = getattr(sys.modules.get("main"), "BYBIT_TRIGGER_DIRECTIONS", {}) or {}
+    trigger_price, direction, side_to_send = _bybit_trigger_for_exit(
+        side_open,
+        last,
+        base_value,
+        pct_value,
+        is_tp=is_tp,
+    )
+    trigger_price, _ = _price_qty_to_precision(exchange, symbol_normalized, price=trigger_price, amount=None)
 
-    if side_norm == "buy":
-        stop_side = "sell"
-        target = base_value * (1 - sl_value) if base_value else None
-        if last_price is not None:
-            ref = last_price * (1 - min_offset)
-            target = min(target, ref) if target is not None else ref
-        direction = mapping.get("falling") or mapping.get("descending") or "descending"
-    else:
-        stop_side = "buy"
-        target = base_value * (1 + sl_value) if base_value else None
-        if last_price is not None:
-            ref = last_price * (1 + min_offset)
-            target = max(target, ref) if target is not None else ref
-        direction = mapping.get("rising") or mapping.get("ascending") or "ascending"
+    try:
+        open_orders = exchange.fetch_open_orders(
+            symbol_normalized,
+            params={"category": category, "orderFilter": "StopOrder"},
+        )
+        if isinstance(open_orders, list) and len(open_orders) > 3:
+            for o in open_orders[3:]:
+                try:
+                    exchange.cancel_order(o.get("id"), symbol_normalized, {"category": category})
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
-    if target is None:
-        target = last_price or base_value
-    trigger_price, _ = _price_qty_to_precision(exchange, symbol, price=target, amount=None)
-
-    params = {
-        "reduceOnly": bool(reduce_only),
-        "closeOnTrigger": bool(close_on_trigger),
+    conditional = {
+        "category": category or "linear",
+        "orderType": "Market",
         "triggerPrice": trigger_price,
         "triggerDirection": direction,
         "triggerBy": "LastPrice",
+        "reduceOnly": True,
+        "closeOnTrigger": True,
         "tpSlMode": "Full",
-        "category": "linear",
         "positionIdx": 0,
     }
+    conditional = _clean_params(conditional) or {}
 
-    def _submit(current_price):
-        params["triggerPrice"] = current_price
-        return exchange.create_order(symbol, "STOP_MARKET", stop_side, None, None, params)
+    def _submit(params_dict):
+        call_params, call_category = _with_bybit_order_params(exchange, symbol, params_dict)
+        call_params = _clean_params(call_params)
+        call_symbol = _normalize_bybit_symbol(exchange, symbol, call_category)
+        return exchange.create_order(call_symbol, "market", side_to_send, None, None, call_params)
 
     try:
-        order = _submit(trigger_price)
+        order = _submit(conditional)
     except Exception as exc:
-        err_text = str(exc)
-        lower = err_text.lower()
+        err = exc
         adjust = 0.002
-        if "should" in lower and ("lower" in lower or "higher" in lower) and last_price:
-            if side_norm == "buy":
-                adjusted = min(trigger_price, float(last_price * (1 - adjust)))
+        try:
+            if direction == "ascending":
+                retry_price = max(trigger_price, last * (1 + adjust))
             else:
-                adjusted = max(trigger_price, float(last_price * (1 + adjust)))
-            adjusted, _ = _price_qty_to_precision(exchange, symbol, price=adjusted, amount=None)
-            try:
-                order = _submit(adjusted)
-            except Exception as final_exc:
-                log_once(logging, "error", f"order | {symbol} | stop order failed: {final_exc}")
-                return None, str(final_exc)
-        else:
-            log_once(logging, "error", f"order | {symbol} | stop order failed: {err_text}")
-            return None, err_text
+                retry_price = min(trigger_price, last * (1 - adjust))
+            retry_price, _ = _price_qty_to_precision(
+                exchange,
+                symbol_normalized,
+                price=retry_price,
+                amount=None,
+            )
+            retry_params = dict(conditional)
+            retry_params["triggerPrice"] = retry_price
+            order = _submit(retry_params)
+        except Exception as final_exc:
+            return None, str(final_exc or err)
 
-    order_id = None
     if isinstance(order, dict):
         order_id = order.get("id") or order.get("orderId")
+    else:
+        order_id = None
+    if not order_id:
+        return None, "order_failed"
     return order_id, None
 
 
