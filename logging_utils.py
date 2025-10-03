@@ -50,6 +50,50 @@ def _is_bybit_exchange(exchange) -> bool:
     return "bybit" in ex_id
 
 
+def normalize_bybit_category(value: str | None) -> str | None:
+    """Return canonical Bybit category name for *value*.
+
+    Bybit's unified v5 API frequently reports categories such as
+    ``LinearPerpetual`` or ``optionU`` via the CCXT metadata.  Passing those
+    raw strings back to the order endpoints leads to ``Illegal category``
+    errors.  The helper collapses the various aliases to the small set of
+    values accepted by the API.
+    """
+
+    if not isinstance(value, str):
+        return None
+
+    lowered = value.strip().lower()
+    if not lowered:
+        return None
+
+    explicit = {
+        "spot": "spot",
+        "linear": "linear",
+        "inverse": "inverse",
+        "option": "option",
+        "options": "option",
+        "swap": "swap",
+        "future": "swap",
+        "futures": "swap",
+    }
+    if lowered in explicit:
+        return explicit[lowered]
+
+    if "linear" in lowered or "usdt" in lowered or "perpetual" in lowered:
+        return "linear"
+    if "inverse" in lowered or "coin" in lowered:
+        return "inverse"
+    if "option" in lowered:
+        return "option"
+    if "spot" in lowered:
+        return "spot"
+    if "swap" in lowered or "future" in lowered:
+        return "swap"
+
+    return None
+
+
 def _market_category_from_meta(market: dict | None) -> str | None:
     """Return Bybit-style market category from a CCXT market description."""
 
@@ -59,9 +103,26 @@ def _market_category_from_meta(market: dict | None) -> str | None:
     info = market.get("info") or {}
     if isinstance(info, dict):
         for key in ("category", "contractType", "productType", "market"):
-            value = info.get(key)
-            if isinstance(value, str) and value:
-                return value.lower()
+            value = normalize_bybit_category(info.get(key))
+            if value:
+                return value
+
+    market_type = normalize_bybit_category(market.get("type"))
+    if market_type:
+        if market_type == "spot":
+            return "spot"
+        if market_type == "option":
+            return "option"
+        if market_type == "linear":
+            return "linear"
+        if market_type == "inverse":
+            return "inverse"
+        if market_type == "swap":
+            settle = str(market.get("settle") or market.get("settleId") or "").upper()
+            quote = str(market.get("quote") or "").upper()
+            if settle and quote and settle != quote:
+                return "inverse"
+            return "linear"
 
     market_type = str(market.get("type") or "").lower()
     if market.get("spot") or market_type == "spot":

@@ -10,7 +10,7 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, Optional, Callable
 
-from logging_utils import log
+from logging_utils import log, normalize_bybit_category
 
 
 # ``ccxt`` is imported lazily so tests can monkeypatch the module before the
@@ -254,9 +254,14 @@ class ExchangeAdapter:
             return None
 
         info = market.get("info") or {}
-        category = info.get("category") or info.get("contractType") or info.get("productType")
-        if isinstance(category, str) and category:
-            return category.lower()
+        category_raw = (
+            info.get("category")
+            or info.get("contractType")
+            or info.get("productType")
+        )
+        category = normalize_bybit_category(category_raw)
+        if category:
+            return category
 
         market_type = str(market.get("type") or "").lower()
         if market.get("spot") or market_type == "spot":
