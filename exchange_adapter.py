@@ -18,6 +18,9 @@ from logging_utils import (
 )
 
 
+LEVERAGE_SKIPPED = object()
+
+
 # ``ccxt`` is imported lazily so tests can monkeypatch the module before the
 # adapter attempts to use it.  The variable is populated on first use.
 _ccxt = None
@@ -68,40 +71,97 @@ def to_sdk(symbol: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def set_valid_leverage(exchange, symbol: str, leverage: int):
+def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     try:
         L = int(leverage)
     except Exception:
-        L = 1
+        try:
+            L = int(float(leverage))
+        except Exception:
+            L = 1
     if L <= 0:
         L = 1
 
     exid = getattr(exchange, "id", "")
     is_bybit = str(exid).lower() == "bybit"
 
-    params = {}
+    params: dict[str, Any] = {}
     norm_symbol = symbol
+    category_hint: str | None = None
+
     if is_bybit:
-        cat = detect_market_category(exchange, symbol) or "linear"
-        # Сводим swap -> linear
-        cat = "linear" if cat in (None, "", "swap") else cat
-        params["category"] = cat
+        detected_category = detect_market_category(exchange, symbol)
+        normalized = normalize_bybit_category(detected_category) if detected_category else None
+        if normalized == "spot":
+            return LEVERAGE_SKIPPED
+        if normalized not in {"linear", "inverse", "option"}:
+            normalized = "linear"
+        category_hint = normalized or "linear"
+        params["category"] = category_hint
         params["buyLeverage"] = L
         params["sellLeverage"] = L
-        params.setdefault("positionIdx", 0)  # one-way; помогает unified-account
+        if category_hint in {"linear", "inverse"}:
+            params.setdefault("positionIdx", 0)
+        else:
+            params.pop("positionIdx", None)
         try:
-            norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+            norm_symbol = _normalize_bybit_symbol(exchange, symbol, category_hint)
         except Exception:
             norm_symbol = symbol
 
-    try:
-        # ccxt v5: set_leverage(leverage, symbol, params)
-        return (
-            exchange.set_leverage(L, norm_symbol, params)
-            if params
-            else exchange.set_leverage(L, norm_symbol)
+    market_meta: dict[str, Any] | None = None
+    candidates: list[str] = []
+    for candidate in (norm_symbol, symbol):
+        if isinstance(candidate, str) and candidate and candidate not in candidates:
+            candidates.append(candidate)
+    for candidate in candidates:
+        try:
+            market_obj = exchange.market(candidate)
+        except Exception:
+            markets = getattr(exchange, "markets", {}) or {}
+            market_obj = markets.get(candidate)
+        if isinstance(market_obj, dict):
+            market_meta = market_obj
+            break
+
+    if isinstance(market_meta, dict):
+        derivative_hint = bool(
+            market_meta.get("linear")
+            or market_meta.get("inverse")
+            or market_meta.get("swap")
         )
-    except Exception:
+        market_type = str(market_meta.get("type") or "").lower()
+        spot_hint = bool(market_meta.get("spot") or market_type == "spot")
+        info = market_meta.get("info")
+        if isinstance(info, dict):
+            for key in ("category", "contractType", "productType", "market"):
+                hint = normalize_bybit_category(info.get(key))
+                if hint == "spot":
+                    spot_hint = True
+                elif hint in {"linear", "inverse"}:
+                    derivative_hint = True
+        type_hint = normalize_bybit_category(market_meta.get("type"))
+        if type_hint == "spot":
+            spot_hint = True
+        elif type_hint in {"linear", "inverse"}:
+            derivative_hint = True
+        if spot_hint and not derivative_hint:
+            return LEVERAGE_SKIPPED
+
+    if category_hint is None and is_bybit:
+        category_hint = params.get("category") if params else None
+
+    if is_bybit and not category_hint:
+        params["category"] = "linear"
+
+    try:
+        if params:
+            exchange.set_leverage(L, norm_symbol, params)
+        else:
+            exchange.set_leverage(L, norm_symbol)
+        return L
+    except Exception as exc:
+        logging.info("exchange_adapter | leverage | %s | soft-skip: %s", symbol, exc)
         return None
 
 
