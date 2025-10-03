@@ -638,9 +638,25 @@ def _with_bybit_order_params(
                     market_category = "linear"
 
             resolved_category = market_category or "spot"
-        merged.setdefault("category", resolved_category)
-    else:
+
+    if resolved_category == "swap":
+        resolved_category = "linear"
+
+    derivative_hint = False
+    for flag in ("reduceOnly", "closeOnTrigger", "closePosition"):
+        if merged.get(flag) is True:
+            derivative_hint = True
+            break
+    if not derivative_hint:
+        derivative_hint = any(key in merged for key in ("slOrderType", "tpOrderType"))
+
+    if resolved_category == "spot" and derivative_hint:
+        resolved_category = "linear"
+
+    if resolved_category:
         merged["category"] = resolved_category
+    else:
+        merged.pop("category", None)
 
     if resolved_category in {"linear", "inverse"}:
         # ``positionIdx`` defaults to 0 (one-way mode) which matches the bot
@@ -650,6 +666,9 @@ def _with_bybit_order_params(
     else:
         # Avoid including derivatives-only parameters for spot / options.
         merged.pop("positionIdx", None)
+
+    if derivative_hint and merged.get("tpSlMode") in (None, ""):
+        merged.setdefault("tpSlMode", "Full")
 
     return merged, resolved_category
 

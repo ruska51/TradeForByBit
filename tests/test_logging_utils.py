@@ -341,6 +341,55 @@ def test_with_bybit_order_params_linear_defaults_position_idx():
     assert params["category"] == "linear"
     assert params["positionIdx"] == 0
 
+
+def test_with_bybit_order_params_normalizes_swap_category(monkeypatch):
+    class _SwapExchange:
+        id = "bybit"
+        markets = {}
+
+    exchange = _SwapExchange()
+
+    monkeypatch.setattr(
+        "logging_utils.detect_market_category", lambda *_args, **_kwargs: "swap"
+    )
+
+    params, resolved = _with_bybit_order_params(exchange, "ETH/USDT", {})
+
+    assert resolved == "linear"
+    assert params.get("category") == "linear"
+    assert all(
+        not (isinstance(value, str) and "swap" in value.lower())
+        for value in params.values()
+    )
+
+
+def test_with_bybit_order_params_sets_tp_sl_mode_for_exit_hints(monkeypatch):
+    class _HintExchange:
+        id = "bybit"
+        markets = {}
+
+    exchange = _HintExchange()
+
+    # Pretend the detector still believes the market is spot even though the
+    # order parameters clearly describe a derivatives exit order.
+    monkeypatch.setattr(
+        "logging_utils.detect_market_category", lambda *_args, **_kwargs: "spot"
+    )
+
+    params, resolved = _with_bybit_order_params(
+        exchange,
+        "ETH/USDT",
+        {
+            "reduceOnly": True,
+            "closeOnTrigger": True,
+            "slOrderType": "Market",
+        },
+    )
+
+    assert resolved == "linear"
+    assert params["category"] == "linear"
+    assert params["tpSlMode"] == "Full"
+
 class FakeBybitLinearExchange:
     id = "bybit"
 
