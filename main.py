@@ -3624,13 +3624,34 @@ def get_max_position_qty(symbol: str, leverage: int, price: float) -> float | No
     """
     try:
         market = exchange.market(symbol)
+        market_category = None
+        if market:
+            market_category = (
+                market.get("type")
+                or ("spot" if market.get("spot") else None)
+            )
+        if not market_category:
+            try:
+                market_category = detect_market_category(exchange, symbol)
+            except Exception as detect_err:  # pragma: no cover - best effort logging
+                logging.debug(
+                    "Unable to detect market category for %s: %s", symbol, detect_err
+                )
+
+        # For spot markets we only rely on the amount limit and avoid derivatives API calls
+        if str(market_category).lower() == "spot":
+            max_amt = (market or {}).get("limits", {}).get("amount", {}).get("max")
+            if max_amt:
+                return float(exchange.amount_to_precision(symbol, max_amt))
+            return None
+
         tiers = None
         if hasattr(exchange, "fetch_leverage_tiers"):
             try:
                 tiers_info = exchange.fetch_leverage_tiers([symbol])
                 tiers = tiers_info.get(symbol)
             except Exception as e:
-                logging.error(f"Failed to fetch leverage tiers for {symbol}: {e}")
+                logging.info("Failed to fetch leverage tiers for %s: %s", symbol, e)
         if tiers is None:
             # CCXT exposes this endpoint under various naming conventions
             fetch_lb = (
@@ -3643,9 +3664,13 @@ def get_max_position_qty(symbol: str, leverage: int, price: float) -> float | No
                     info = fetch_lb({"symbol": market["id"]})
                     tiers = info[0].get("brackets", [])
                 except Exception as e:
-                    logging.error(f"Failed to fetch leverage bracket for {symbol}: {e}")
+                    logging.info(
+                        "Failed to fetch leverage bracket for %s: %s", symbol, e
+                    )
             else:
-                logging.error(f"Failed to fetch leverage bracket for {symbol}: API method missing")
+                logging.debug(
+                    "Failed to fetch leverage bracket for %s: API method missing", symbol
+                )
         if tiers:
             notional_cap = None
             for br in tiers:
@@ -3658,11 +3683,11 @@ def get_max_position_qty(symbol: str, leverage: int, price: float) -> float | No
                 notional_cap = float(last.get("notionalCap", 0))
             if notional_cap:
                 return float(exchange.amount_to_precision(symbol, notional_cap / price))
-        max_amt = market.get("limits", {}).get("amount", {}).get("max")
+        max_amt = (market or {}).get("limits", {}).get("amount", {}).get("max")
         if max_amt:
             return float(exchange.amount_to_precision(symbol, max_amt))
     except Exception as e:
-        logging.error(f"Failed to fetch leverage bracket for {symbol}: {e}")
+        logging.info("Failed to determine leverage bracket for %s: %s", symbol, e)
     return None
 
 
