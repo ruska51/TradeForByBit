@@ -681,7 +681,7 @@ def _bybit_tpsl_params(
     sl_order_type: str | None = None,
     tpsl_mode: str = "Full",
     tpsl_trigger_by: str = "MarkPrice",
-    trigger_direction: str | None = None,
+    trigger_direction: str | int | None = None,
     extra: dict | None = None,
 ) -> dict:
     """Return Bybit specific parameters for take-profit / stop-loss orders."""
@@ -698,7 +698,23 @@ def _bybit_tpsl_params(
             if sl_order_type:
                 params["slOrderType"] = sl_order_type
         if trigger_direction:
-            params["triggerDirection"] = trigger_direction
+            td = trigger_direction
+            if isinstance(td, str):
+                low = td.strip().lower()
+                if low in ("ascending", "rising", "up"):
+                    td = 1
+                elif low in ("descending", "falling", "down"):
+                    td = 2
+                else:
+                    try:
+                        td = int(low)
+                    except Exception:
+                        td = None
+            try:
+                if td is not None:
+                    params["triggerDirection"] = int(td)
+            except Exception:
+                pass
     return params
 
 
@@ -1684,6 +1700,7 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
     tpSlMode is empty`` while keeping the public function signature unchanged.
     """
     params, category = _with_bybit_order_params(exchange, symbol, params)
+    resolved_category = category or ((params or {}).get("category") if params else None)
     base_params: dict | None = dict(params or {}) if params is not None else None
     is_bybit = _is_bybit_exchange(exchange)
     if not getattr(exchange, "markets", None):
@@ -1691,7 +1708,7 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
             exchange.load_markets()
         except Exception:
             pass
-    normalized_symbol = _normalize_bybit_symbol(exchange, symbol, category)
+    normalized_symbol = _normalize_bybit_symbol(exchange, symbol, resolved_category)
     display_symbol = symbol
     status_key = display_symbol
     symbol = normalized_symbol
@@ -1769,6 +1786,28 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
 
     final_params: dict | None = base_params
     if is_bybit:
+        def _normalize_trigger_direction_value(value):
+            if value is None:
+                return None
+            td = value
+            if isinstance(td, str):
+                low = td.strip().lower()
+                if low in ("ascending", "rising", "up"):
+                    td = 1
+                elif low in ("descending", "falling", "down"):
+                    td = 2
+                else:
+                    try:
+                        td = int(low)
+                    except Exception:
+                        td = None
+            try:
+                if td is not None:
+                    return int(td)
+            except Exception:
+                return None
+            return td
+
         params_dict = dict(base_params or {})
         upper_type = str(order_type or "").upper()
         is_exit_order = any(token in upper_type for token in ("STOP", "TAKE_PROFIT"))
@@ -1814,7 +1853,9 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                 stop_loss = stop_loss if stop_loss is not None else None
                 take_profit = take_profit if take_profit is not None else None
 
-        trigger_direction = params_dict.get("triggerDirection")
+        trigger_direction = _normalize_trigger_direction_value(
+            params_dict.get("triggerDirection")
+        )
         if trigger_direction is None and stop_loss is not None and entry_reference:
             try:
                 entry_value = float(entry_reference)
@@ -1828,8 +1869,32 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                 elif stop_value > entry_value:
                     trigger_direction = mapping.get("rising") or "ascending"
 
+        trigger_direction = _normalize_trigger_direction_value(trigger_direction)
+
+        resolved_category = (
+            resolved_category
+            or params_dict.get("category")
+            or (category if category else None)
+            or "linear"
+        )
+        if resolved_category:
+            params_dict["category"] = resolved_category
+
+        if (
+            params_dict.get("tpSlMode")
+            and stop_loss is None
+            and take_profit is None
+            and sl_order_type is None
+        ):
+            params_dict.pop("tpSlMode", None)
+
+        if trigger_direction is None:
+            params_dict.pop("triggerDirection", None)
+        else:
+            params_dict["triggerDirection"] = trigger_direction
+
         final_params = _bybit_tpsl_params(
-            category="linear",
+            category=str(resolved_category or "linear"),
             stop_loss=stop_loss,
             take_profit=take_profit,
             sl_order_type=sl_order_type if stop_loss is not None else None,
