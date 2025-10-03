@@ -3738,6 +3738,8 @@ def place_protected_exit(
         }
         upper_kind = kind.upper()
         is_market = upper_kind.endswith("MARKET")
+        is_stop = "STOP" in upper_kind
+        is_take_profit = "TAKE_PROFIT" in upper_kind
         trigger_direction = _determine_trigger_direction(upper_kind)
         if trigger_direction is not None and market_category != "spot":
             params_local["triggerDirection"] = trigger_direction
@@ -3746,10 +3748,12 @@ def place_protected_exit(
             params_local.setdefault("orderType", "Market" if is_market else "Limit")
             if market_category:
                 params_local.setdefault("category", market_category)
-        if "STOP" in upper_kind:
+            if (is_stop or is_take_profit) and (market_category or "").lower() != "spot":
+                params_local.setdefault("tpSlMode", "Full")
+        if is_stop:
             params_local["slTriggerBy"] = "LastPrice"
             params_local["slOrderType"] = "Market" if is_market else "Limit"
-        if "TAKE_PROFIT" in upper_kind:
+        if is_take_profit:
             params_local["tpTriggerBy"] = "LastPrice"
             params_local["tpOrderType"] = "Market" if is_market else "Limit"
         if not is_market:
@@ -3889,6 +3893,8 @@ def ensure_exit_orders(
     def _build_params(kind: str, trigger_price: float) -> dict[str, Any]:
         upper_kind = str(kind or "").upper()
         is_market = upper_kind.endswith("MARKET")
+        is_stop = "STOP" in upper_kind
+        is_take_profit = "TAKE_PROFIT" in upper_kind
         params_local: dict[str, Any] = {
             "triggerPrice": trigger_price,
             "closeOnTrigger": True,
@@ -3899,14 +3905,14 @@ def ensure_exit_orders(
         if trigger_direction is not None and category != "spot":
             params_local["triggerDirection"] = trigger_direction
             params_local.setdefault("triggerBy", "LastPrice")
-        if "STOP" in upper_kind:
+        if is_stop:
             params_local["slTriggerBy"] = "LastPrice"
             params_local["stopPrice"] = trigger_price
             if is_bybit:
                 params_local.setdefault(
                     "slOrderType", "Market" if is_market else "Limit"
                 )
-        if "TAKE_PROFIT" in upper_kind:
+        if is_take_profit:
             params_local["tpTriggerBy"] = "LastPrice"
             params_local["stopPrice"] = trigger_price
             params_local["priceProtect"] = True
@@ -3919,6 +3925,8 @@ def ensure_exit_orders(
         if is_bybit:
             params_local.setdefault("orderType", "Market" if is_market else "Limit")
             params_local.setdefault("category", category or "linear")
+            if (is_stop or is_take_profit) and (category or "").lower() != "spot":
+                params_local.setdefault("tpSlMode", "Full")
         return params_local
 
     fetch_params: dict[str, Any] = {}

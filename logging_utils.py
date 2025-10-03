@@ -638,9 +638,14 @@ def _with_bybit_order_params(
                     market_category = "linear"
 
             resolved_category = market_category or "spot"
-        merged.setdefault("category", resolved_category)
-    else:
+
+    if resolved_category == "swap":
+        resolved_category = "linear"
+
+    if resolved_category:
         merged["category"] = resolved_category
+    else:
+        merged.pop("category", None)
 
     if resolved_category in {"linear", "inverse"}:
         # ``positionIdx`` defaults to 0 (one-way mode) which matches the bot
