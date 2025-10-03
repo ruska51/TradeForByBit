@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from logging_utils import detect_market_category
+from logging_utils import detect_market_category, _with_bybit_order_params
 
 
 def _make_dummy_exchange():
@@ -25,6 +25,37 @@ def _make_dummy_exchange():
             return []
 
     return DummyExchange()
+
+
+def test_bybit_spot_category_respected_with_futures_adapter():
+    class DummyBybitExchange:
+        id = "bybit"
+
+        def __init__(self):
+            self.futures = True
+            self.adapter = types.SimpleNamespace(futures=True)
+            self.markets = {
+                "BTC/USDT": {
+                    "symbol": "BTC/USDT",
+                    "base": "BTC",
+                    "quote": "USDT",
+                    "spot": True,
+                    "info": {"category": "spot"},
+                }
+            }
+
+        def market(self, symbol):
+            return self.markets.get(symbol)
+
+    exchange = DummyBybitExchange()
+
+    assert detect_market_category(exchange, "BTC/USDT") == "spot"
+
+    params, category = _with_bybit_order_params(exchange, "BTC/USDT", {})
+
+    assert category == "spot"
+    assert params["category"] == "spot"
+    assert "positionIdx" not in params
 
 
 @pytest.fixture

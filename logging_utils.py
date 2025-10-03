@@ -109,6 +109,26 @@ def detect_market_category(exchange, symbol: str) -> str | None:
             except Exception:
                 pass
 
+    def _explicit_spot_meta(meta: dict | None) -> bool:
+        if not isinstance(meta, dict):
+            return False
+
+        if meta.get("spot") is True:
+            return True
+
+        market_type = str(meta.get("type") or "").lower()
+        if market_type == "spot":
+            return True
+
+        info = meta.get("info")
+        if isinstance(info, dict):
+            for key in ("category", "contractType", "productType", "market"):
+                value = info.get(key)
+                if isinstance(value, str) and value.lower() == "spot":
+                    return True
+
+        return False
+
     normalized_symbol = _normalize_bybit_symbol(exchange, symbol, None)
     search_symbols: list[str] = []
     for candidate in (normalized_symbol, symbol):
@@ -127,18 +147,36 @@ def detect_market_category(exchange, symbol: str) -> str | None:
     lookup_symbol = search_symbols[0] if search_symbols else symbol
 
     category = _market_category_from_meta(market)
+    spot_confident = False
     if category:
-        return category
+        if category == "spot":
+            spot_confident = _explicit_spot_meta(market)
+            if spot_confident:
+                return "spot"
+        else:
+            return category
 
     markets = getattr(exchange, "markets", {}) or {}
     if lookup_symbol in markets:
         category = _market_category_from_meta(markets.get(lookup_symbol))
         if category:
-            return category
+            if category == "spot":
+                spot_confident = spot_confident or _explicit_spot_meta(
+                    markets.get(lookup_symbol)
+                )
+                if spot_confident:
+                    return "spot"
+            else:
+                return category
     if lookup_symbol != symbol and symbol in markets:
         category = _market_category_from_meta(markets.get(symbol))
         if category:
-            return category
+            if category == "spot":
+                spot_confident = spot_confident or _explicit_spot_meta(markets.get(symbol))
+                if spot_confident:
+                    return "spot"
+            else:
+                return category
 
     base = quote = None
     if isinstance(market, dict):
@@ -166,16 +204,30 @@ def detect_market_category(exchange, symbol: str) -> str | None:
                     meta_quote = meta_quote.split(":", 1)[0].upper()
             if meta_base != base or meta_quote != quote:
                 continue
-            category = _market_category_from_meta(meta)
-            if category:
-                return category
+            candidate_category = _market_category_from_meta(meta)
+            if candidate_category:
+                if candidate_category == "spot":
+                    spot_confident = spot_confident or _explicit_spot_meta(meta)
+                    if spot_confident:
+                        return "spot"
+                else:
+                    return candidate_category
 
     category = None
 
     if lookup_symbol in markets:
         category = _market_category_from_meta(markets.get(lookup_symbol))
-    if not category and lookup_symbol != symbol and symbol in markets:
-        category = _market_category_from_meta(markets.get(symbol))
+        if category == "spot":
+            spot_confident = spot_confident or _explicit_spot_meta(markets.get(lookup_symbol))
+    if (not category or category == "spot") and lookup_symbol != symbol and symbol in markets:
+        other_category = _market_category_from_meta(markets.get(symbol))
+        if other_category:
+            if other_category == "spot":
+                spot_confident = spot_confident or _explicit_spot_meta(markets.get(symbol))
+            else:
+                return other_category
+        if not category:
+            category = other_category
 
     if category == "spot":
         def _has_linear_params(obj) -> bool:
@@ -199,8 +251,34 @@ def detect_market_category(exchange, symbol: str) -> str | None:
             if main_adapter and getattr(main_adapter, "x", None) is exchange:
                 futures_hint = bool(getattr(main_adapter, "futures", False))
                 futures_hint = futures_hint or _has_linear_params(main_adapter)
-        if futures_hint:
-            return "linear"
+        if spot_confident or not futures_hint:
+            return "spot"
+
+        derivative_category: str | None = None
+        if markets and base and quote:
+            for meta in markets.values():
+                if not isinstance(meta, dict):
+                    continue
+                meta_base = str(meta.get("base") or "").upper()
+                meta_quote = str(meta.get("quote") or "").upper()
+                mapped_symbol = meta.get("symbol") or meta.get("id")
+                if (not meta_base or not meta_quote) and isinstance(mapped_symbol, str) and "/" in mapped_symbol:
+                    meta_base, meta_quote = mapped_symbol.split("/", 1)
+                    meta_base = meta_base.upper()
+                    meta_quote = meta_quote.split(":", 1)[0].upper()
+                if meta_base != base or meta_quote != quote:
+                    continue
+                meta_category = _market_category_from_meta(meta)
+                if meta_category in {"linear", "inverse"}:
+                    derivative_category = meta_category
+                    break
+                if meta_category == "swap":
+                    derivative_category = "linear"
+                    break
+
+        if derivative_category:
+            return derivative_category
+        return "spot"
 
     return category
 
@@ -468,7 +546,44 @@ def _with_bybit_order_params(
         if detected:
             resolved_category = str(detected).lower()
         else:
-            resolved_category = "linear"
+            markets = getattr(exchange, "markets", {}) or {}
+            normalized_symbol = _normalize_bybit_symbol(exchange, symbol, None)
+            market_category = None
+
+            for candidate in (symbol, normalized_symbol):
+                if not isinstance(candidate, str) or not candidate:
+                    continue
+                meta = markets.get(candidate)
+                if not isinstance(meta, dict):
+                    continue
+                candidate_category = _market_category_from_meta(meta)
+                if not candidate_category:
+                    continue
+                if candidate_category == "swap":
+                    market_category = "linear"
+                else:
+                    market_category = candidate_category
+                break
+
+            if not market_category and markets:
+                derivative_symbols: set[str] = set()
+                for meta in markets.values():
+                    if not isinstance(meta, dict):
+                        continue
+                    meta_category = _market_category_from_meta(meta)
+                    if meta_category in {"linear", "inverse", "swap"}:
+                        mapped = meta.get("symbol") or meta.get("id")
+                        if isinstance(mapped, str) and mapped:
+                            derivative_symbols.add(mapped)
+                if any(
+                    isinstance(candidate, str)
+                    and candidate
+                    and candidate in derivative_symbols
+                    for candidate in (symbol, normalized_symbol)
+                ):
+                    market_category = "linear"
+
+            resolved_category = market_category or "spot"
         merged.setdefault("category", resolved_category)
     else:
         merged["category"] = resolved_category
