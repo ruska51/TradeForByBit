@@ -151,8 +151,6 @@ def detect_market_category(exchange, symbol: str) -> str | None:
     if category:
         if category == "spot":
             spot_confident = _explicit_spot_meta(market)
-            if spot_confident:
-                return "spot"
         else:
             return category
 
@@ -164,8 +162,6 @@ def detect_market_category(exchange, symbol: str) -> str | None:
                 spot_confident = spot_confident or _explicit_spot_meta(
                     markets.get(lookup_symbol)
                 )
-                if spot_confident:
-                    return "spot"
             else:
                 return category
     if lookup_symbol != symbol and symbol in markets:
@@ -173,8 +169,6 @@ def detect_market_category(exchange, symbol: str) -> str | None:
         if category:
             if category == "spot":
                 spot_confident = spot_confident or _explicit_spot_meta(markets.get(symbol))
-                if spot_confident:
-                    return "spot"
             else:
                 return category
 
@@ -208,8 +202,6 @@ def detect_market_category(exchange, symbol: str) -> str | None:
             if candidate_category:
                 if candidate_category == "spot":
                     spot_confident = spot_confident or _explicit_spot_meta(meta)
-                    if spot_confident:
-                        return "spot"
                 else:
                     return candidate_category
 
@@ -251,11 +243,8 @@ def detect_market_category(exchange, symbol: str) -> str | None:
             if main_adapter and getattr(main_adapter, "x", None) is exchange:
                 futures_hint = bool(getattr(main_adapter, "futures", False))
                 futures_hint = futures_hint or _has_linear_params(main_adapter)
-        if spot_confident or not futures_hint:
-            return "spot"
-
         derivative_category: str | None = None
-        if markets and base and quote:
+        if futures_hint and markets and base and quote:
             for meta in markets.values():
                 if not isinstance(meta, dict):
                     continue
@@ -278,6 +267,10 @@ def detect_market_category(exchange, symbol: str) -> str | None:
 
         if derivative_category:
             return derivative_category
+
+        if spot_confident or not futures_hint:
+            return "spot"
+
         return "spot"
 
     return category
