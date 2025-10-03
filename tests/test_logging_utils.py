@@ -6,6 +6,7 @@ import sys
 import pytest
 from logging_utils import (
     safe_create_order,
+    place_stop_market,
     flush_symbol_logs,
     safe_set_leverage,
     setup_logger,
@@ -181,8 +182,8 @@ class FallbackExchange(PercentFilterBase):
 
     def create_order(self, symbol, order_type, side, qty, price=None, params=None):
         self.calls.append((order_type, price))
-        if len(self.calls) <= 2:
-            raise RuntimeError("{\"code\":-4131}")
+        if order_type == "limit":
+            raise RuntimeError('{"retCode":30208}')
         return {"id": "2", "status": "FILLED", "price": price, "filled": qty}
 
 
@@ -463,7 +464,9 @@ def test_safe_create_order_percent_filter_retry(caplog):
     assert err is None
     flush_symbol_logs("BTC/USDT")
     logged = caplog.text
-    assert "order_retry_limit_price_adjusted" in logged
+    assert "order_price_band_retry" in logged
+    assert ex.calls[0][0] == "limit"
+    assert ex.calls[1][0] == "market"
 
 
 def test_safe_create_order_percent_filter_market_fallback(caplog):
@@ -482,19 +485,24 @@ def test_safe_create_order_percent_filter_market_fallback(caplog):
     assert "order_market_fallback" in logged
 
 
-def test_safe_create_order_bybit_stop_market_normalized(caplog):
+def test_place_stop_market_normalized(caplog):
     setup_logger()
     import logging
 
     logging.getLogger().addHandler(caplog.handler)
     caplog.set_level("INFO")
     ex = BybitExitExchange()
-    params = {"triggerPrice": 950.0, "orderType": "Market"}
-    order_id, err = safe_create_order(ex, "ETH/USDT", "STOP_MARKET", "sell", 1.0, None, params)
+    order_id, err = place_stop_market(ex, "ETH/USDT", "buy", 1000.0, 0.02)
     assert order_id == "3"
     assert err is None
-    assert ex.calls[-1][0] == "market"
-    assert ex.calls[-1][-1]["orderType"] == "Market"
+    assert ex.calls, "Expected create_order to be invoked"
+    otype, side, qty, price, params = ex.calls[-1]
+    assert otype == "STOP_MARKET"
+    assert side == "sell"
+    assert qty is None
+    assert price is None
+    assert params["tpSlMode"] == "Full"
+    assert params["triggerBy"] == "LastPrice"
 
 
 def test_safe_create_order_loads_markets_before_symbol_normalization():
