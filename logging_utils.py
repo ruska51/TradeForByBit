@@ -673,6 +673,35 @@ def _with_bybit_order_params(
     return merged, resolved_category
 
 
+def _bybit_tpsl_params(
+    *,
+    category: str = "linear",
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
+    sl_order_type: str | None = None,
+    tpsl_mode: str = "Full",
+    tpsl_trigger_by: str = "MarkPrice",
+    trigger_direction: str | None = None,
+    extra: dict | None = None,
+) -> dict:
+    """Return Bybit specific parameters for take-profit / stop-loss orders."""
+
+    params: dict = dict(extra or {})
+    params["category"] = category
+    if (stop_loss is not None) or (take_profit is not None) or (sl_order_type is not None):
+        params["tpSlMode"] = tpsl_mode
+        params["tpslTriggerBy"] = tpsl_trigger_by
+        if take_profit is not None:
+            params["takeProfit"] = float(take_profit)
+        if stop_loss is not None:
+            params["stopLoss"] = float(stop_loss)
+            if sl_order_type:
+                params["slOrderType"] = sl_order_type
+        if trigger_direction:
+            params["triggerDirection"] = trigger_direction
+    return params
+
+
 def _normalize_bybit_order_type_value(order_type: str) -> str:
     """Translate high level order types to Bybit supported values."""
 
@@ -1646,8 +1675,17 @@ def safe_fetch_balance(exchange, params: dict | None = None, *, retries: int = 1
 
 def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                       qty: float, price=None, params=None):
-    """Create an order with retry and PERCENT_PRICE handling."""
+    """Create an order with retry and exchange specific safeguards.
+
+    For Bybit v5 the helper automatically injects ``category='linear'`` and
+    ensures that attached take-profit / stop-loss instructions include the
+    mandatory ``tpSlMode`` metadata when ``slOrderType`` is present.  This
+    prevents API rejections such as ``slOrderType can not have a value when
+    tpSlMode is empty`` while keeping the public function signature unchanged.
+    """
     params, category = _with_bybit_order_params(exchange, symbol, params)
+    base_params: dict | None = dict(params or {}) if params is not None else None
+    is_bybit = _is_bybit_exchange(exchange)
     if not getattr(exchange, "markets", None):
         try:
             exchange.load_markets()
@@ -1726,13 +1764,88 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
         adj_price = _apply_filters(best, adj_price if adj_price is not None else best)
 
     order_type_api = order_type
-    if _is_bybit_exchange(exchange):
+    if is_bybit:
         order_type_api = _normalize_bybit_order_type_value(order_type)
+
+    final_params: dict | None = base_params
+    if is_bybit:
+        params_dict = dict(base_params or {})
+        upper_type = str(order_type or "").upper()
+        is_exit_order = any(token in upper_type for token in ("STOP", "TAKE_PROFIT"))
+
+        stop_loss = params_dict.get("stopLoss")
+        take_profit = params_dict.get("takeProfit")
+        if stop_loss is None and "STOP" in upper_type:
+            stop_loss = params_dict.get("stopPrice") or params_dict.get("triggerPrice")
+        if take_profit is None and "TAKE_PROFIT" in upper_type:
+            take_profit = params_dict.get("stopPrice") or params_dict.get("triggerPrice")
+
+        sl_order_type = params_dict.get("slOrderType")
+        tpsl_mode = params_dict.get("tpSlMode") or "Full"
+        tpsl_trigger_by = (
+            params_dict.get("tpslTriggerBy")
+            or params_dict.get("tpsl_trigger_by")
+            or "MarkPrice"
+        )
+
+        entry_reference = adj_price if adj_price is not None else best_price
+        if entry_reference is None:
+            entry_reference = price
+
+        main_module = sys.modules.get("main")
+        if (stop_loss is None or take_profit is None) and not is_exit_order and entry_reference:
+            try:
+                entry_value = float(entry_reference)
+                sl_pct = float(getattr(main_module, "SL_PCT", 0.02) or 0.02)
+                tp_pct = float(getattr(main_module, "TP_PCT", 0.04) or 0.04)
+                if side.lower() == "buy":
+                    stop_candidate = entry_value * (1 - sl_pct)
+                    take_candidate = entry_value * (1 + tp_pct)
+                else:
+                    stop_candidate = entry_value * (1 + sl_pct)
+                    take_candidate = entry_value * (1 - tp_pct)
+                if stop_loss is None:
+                    stop_loss = stop_candidate
+                if take_profit is None:
+                    take_profit = take_candidate if take_candidate > 0 else None
+                if stop_loss is not None and not sl_order_type:
+                    sl_order_type = "Market"
+            except (TypeError, ValueError):
+                stop_loss = stop_loss if stop_loss is not None else None
+                take_profit = take_profit if take_profit is not None else None
+
+        trigger_direction = params_dict.get("triggerDirection")
+        if trigger_direction is None and stop_loss is not None and entry_reference:
+            try:
+                entry_value = float(entry_reference)
+                stop_value = float(stop_loss)
+            except (TypeError, ValueError):
+                entry_value = stop_value = None
+            if entry_value is not None and stop_value is not None:
+                mapping = getattr(main_module, "BYBIT_TRIGGER_DIRECTIONS", {}) or {}
+                if stop_value < entry_value:
+                    trigger_direction = mapping.get("falling") or "descending"
+                elif stop_value > entry_value:
+                    trigger_direction = mapping.get("rising") or "ascending"
+
+        final_params = _bybit_tpsl_params(
+            category="linear",
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            sl_order_type=sl_order_type if stop_loss is not None else None,
+            tpsl_mode=tpsl_mode,
+            tpsl_trigger_by=tpsl_trigger_by,
+            trigger_direction=trigger_direction,
+            extra=params_dict,
+        )
+
+    if final_params is not None and not final_params:
+        final_params = None
 
     for attempt in range(2):
         try:
             price_arg = None if is_market_like else adj_price
-            order = exchange.create_order(symbol, order_type_api, side, qty, price_arg, params)
+            order = exchange.create_order(symbol, order_type_api, side, qty, price_arg, final_params)
             order_id = order.get("id") or order.get("orderId")
             status = str(order.get("status", "")).upper()
             if not order_id or status.lower() in {"rejected", "canceled"}:
@@ -1795,7 +1908,7 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                     _order_status[status_key].append("order_market_fallback")
                     _order_status[status_key].append("order_cancelled")
                     try:
-                        order = exchange.create_order(symbol, "market", side, qty, None, params)
+                        order = exchange.create_order(symbol, "market", side, qty, None, final_params)
                         order_id = order.get("id") or order.get("orderId")
                         if order_id:
                             return order_id, None
