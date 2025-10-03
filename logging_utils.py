@@ -13,7 +13,30 @@ from pathlib import Path
 
 from memory_utils import memory_manager
 
+try:  # pragma: no cover - optional dependency for runtime environments
+    import ccxt  # type: ignore
+except Exception:  # pragma: no cover - ccxt may be stubbed in tests
+    ccxt = None  # type: ignore
+
 LOG_DIR = Path(__file__).resolve().parent / "logs"
+
+_LAST_LOGGED_MESSAGE: dict[str, float | str | None] = {"text": None, "ts": 0.0}
+
+
+def log_once(logger, level: str, text: str, window: float = 5.0) -> None:
+    """Emit *text* via *logger* at *level* unless repeated within *window* seconds."""
+
+    try:
+        now = time.time()
+    except Exception:
+        now = 0.0
+    last_text = _LAST_LOGGED_MESSAGE.get("text")
+    last_ts = float(_LAST_LOGGED_MESSAGE.get("ts") or 0.0)
+    if last_text == text and now - last_ts < window:
+        return
+    _LAST_LOGGED_MESSAGE["text"] = text
+    _LAST_LOGGED_MESSAGE["ts"] = now
+    getattr(logger, level)(text)
 
 # ``colorama`` is an optional dependency used only for colored console output.
 # In minimal environments (such as some CI systems) it may be absent.  Import it
@@ -48,6 +71,57 @@ def _is_bybit_exchange(exchange) -> bool:
         name = getattr(getattr(exchange, "__class__", None), "__name__", "")
         ex_id = str(name).lower()
     return "bybit" in ex_id
+
+
+def _tick_info(market):
+    """Return Bybit tick and lot size information from *market* metadata."""
+
+    if not isinstance(market, dict):
+        return 0.0, 0.0
+    precision = market.get("precision") or {}
+    info = market.get("info") or {}
+    try:
+        tick = float(precision.get("price", 0) or 0)
+    except Exception:
+        tick = 0.0
+    if tick <= 0:
+        tick_raw = ((info.get("priceFilter") or {}).get("tickSize")) if isinstance(info, dict) else 0
+        try:
+            tick = float(tick_raw or 0)
+        except Exception:
+            tick = 0.0
+    try:
+        step = float(precision.get("amount", 0) or 0)
+    except Exception:
+        step = 0.0
+    if step <= 0 and isinstance(info, dict):
+        lot_info = info.get("lotSizeFilter") or {}
+        try:
+            step = float(lot_info.get("qtyStep", 0) or 0)
+        except Exception:
+            step = 0.0
+    return tick, step
+
+
+def _price_qty_to_precision(ex, symbol, price=None, amount=None):
+    """Return *price* and *amount* adjusted to exchange precision."""
+
+    market = None
+    try:
+        market = ex.market(symbol)
+    except Exception:
+        market = None
+    if price is not None:
+        try:
+            price = float(ex.price_to_precision(symbol, price))
+        except Exception:
+            price = float(price)
+    if amount is not None:
+        try:
+            amount = float(ex.amount_to_precision(symbol, amount))
+        except Exception:
+            amount = float(amount)
+    return price, amount
 
 
 def _clean_params(d: dict | None) -> dict | None:
@@ -1728,43 +1802,65 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
     status_key = display_symbol
     symbol = normalized_symbol
 
-    otype = order_type.lower()
-    is_market_like = otype.endswith("market")
-    side = side.lower()
-    adj_price = None if is_market_like else price
+    otype = str(order_type or "").lower()
+    requested_market = otype.endswith("market")
+    side = str(side or "").lower()
+    adj_price = None if requested_market else price
 
-    def _best_price():
-        try:
-            ticker = exchange.fetch_ticker(symbol)
-            return ticker.get("ask") if side == "buy" else ticker.get("bid")
-        except Exception:
+    ticker = None
+    try:
+        fetched = exchange.fetch_ticker(symbol)
+        if isinstance(fetched, dict):
+            ticker = fetched
+    except Exception:
+        ticker = None
+
+    def _extract_last_price() -> float | None:
+        if not ticker:
             return None
+        candidates = []
+        for key in ("last", "close", "markPrice", "price"):
+            if key in ticker:
+                candidates.append(ticker.get(key))
+        if side == "buy":
+            candidates.extend([ticker.get("ask"), ticker.get("bid")])
+        else:
+            candidates.extend([ticker.get("bid"), ticker.get("ask")])
+        for raw in candidates:
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value) and value > 0:
+                return value
+        return None
 
-    def _apply_filters(b_price, target):
+    last_price = _extract_last_price()
+    entry_price = adj_price
+    is_exit_order = any(tok in str(order_type).upper() for tok in ("STOP", "TAKE_PROFIT"))
+    is_entry_order = not is_exit_order and otype in {"market", "limit"}
+
+    if is_entry_order and last_price is not None:
+        offset = 0.001 if side == "buy" else -0.001
         try:
-            market = exchange.market(symbol)
-            filters = {f["filterType"]: f for f in market["info"].get("filters", [])}
-            pf = filters.get("PERCENT_PRICE")
-            if pf and b_price:
-                up = float(pf.get("multiplierUp", 1)) - 1
-                down = 1 - float(pf.get("multiplierDown", 1))
-                pct = min(up, down, MAX_PERCENT_DIFF)
-            else:
-                pct = MAX_PERCENT_DIFF
-            if b_price:
-                diff = b_price * pct
-                target = max(min(target, b_price + diff), b_price - diff)
-            return float(exchange.price_to_precision(symbol, target))
+            entry_price = float(last_price * (1 + offset))
         except Exception:
-            return float(exchange.price_to_precision(symbol, target)) if target is not None else None
+            entry_price = last_price
+    elif adj_price is not None:
+        entry_price = adj_price
 
-    best_price = price if adj_price is not None else _best_price()
+    if entry_price is not None:
+        entry_price, _ = _price_qty_to_precision(exchange, symbol, price=entry_price, amount=None)
+
+    price_reference = entry_price if entry_price is not None else last_price
     try:
         norm_qty, skip_reason = _normalize_order_qty(
             exchange,
             symbol,
             qty,
-            best_price,
+            price_reference,
             order_type=order_type,
             side=side,
         )
@@ -1791,13 +1887,12 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
         return None, skip_reason
     qty = norm_qty
 
-    if adj_price is not None:
-        best = best_price
-        adj_price = _apply_filters(best, adj_price if adj_price is not None else best)
+    if entry_price is not None:
+        entry_price, qty = _price_qty_to_precision(exchange, symbol, price=entry_price, amount=qty)
+    else:
+        _, qty = _price_qty_to_precision(exchange, symbol, price=None, amount=qty)
 
-    order_type_api = order_type
-    if is_bybit:
-        order_type_api = _normalize_bybit_order_type_value(order_type)
+    adj_price = entry_price
 
     final_params: dict | None = base_params
     if is_bybit:
@@ -1857,7 +1952,7 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
             or "MarkPrice"
         )
 
-        entry_reference = adj_price if adj_price is not None else best_price
+        entry_reference = adj_price if adj_price is not None else last_price
         if entry_reference is None:
             entry_reference = price
 
@@ -1949,15 +2044,40 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
 
         final_params = params_dict
 
+    if not is_exit_order:
+        if final_params is None:
+            final_params = {}
+        final_params.setdefault("reduceOnly", False)
+
     final_params = _clean_params(final_params)
 
     if final_params is not None and not final_params:
         final_params = None
 
+    market_retry_allowed = False
+    market_retry_used = False
+    last_error: str | None = None
+
     for attempt in range(2):
         try:
-            price_arg = None if is_market_like else adj_price
-            order = exchange.create_order(symbol, order_type_api, side, qty, price_arg, final_params)
+            if is_entry_order:
+                if attempt == 0:
+                    send_type = "limit"
+                    price_arg = adj_price
+                elif attempt == 1 and market_retry_allowed:
+                    send_type = "market"
+                    price_arg = None
+                else:
+                    break
+            else:
+                send_type = order_type
+                price_arg = None if requested_market else adj_price
+
+            order_type_api_current = send_type
+            if is_bybit:
+                order_type_api_current = _normalize_bybit_order_type_value(send_type)
+
+            order = exchange.create_order(symbol, order_type_api_current, side, qty, price_arg, final_params)
             order_id = order.get("id") or order.get("orderId")
             status = str(order.get("status", "")).upper()
             if not order_id or status.lower() in {"rejected", "canceled"}:
@@ -1971,6 +2091,10 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                 for m in _order_status[status_key]
                 if not m.lower().startswith("order failed")
             ]
+            if market_retry_used:
+                fallback_tag = "order_market_fallback"
+                if fallback_tag not in _order_status[status_key]:
+                    _order_status[status_key].append(fallback_tag)
             if status == "FILLED" or filled == original:
                 msg = f"✅ Order {side.upper()} {filled:g} @ {avg_price} ({status or 'FILLED'})"
                 if msg not in _order_status[status_key]:
@@ -1984,6 +2108,23 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
         except Exception as e:
             err_str = str(e)
             err_lower = err_str.lower()
+            last_error = err_str
+            if is_entry_order and attempt == 0:
+                band_error = any(code in err_str for code in ("30208", "10001", "-4131"))
+                band_error = band_error or ("price" in err_lower and "band" in err_lower)
+                param_error = "request parameter error" in err_lower
+                if ALLOW_MARKET_FALLBACK and (band_error or param_error):
+                    market_retry_allowed = True
+                    log_once(
+                        logging,
+                        "warning",
+                        f"order | {display_symbol} | limit rejected ({err_str}); retrying as MARKET",
+                    )
+                    tag = "order_price_band_retry"
+                    if tag not in _order_status[status_key]:
+                        _order_status[status_key].append(tag)
+                    market_retry_used = True
+                    continue
             if "170131" in err_str or "insufficient balance" in err_lower:
                 msg = "order_insufficient_balance"
                 if msg not in _order_status[status_key]:
@@ -1995,41 +2136,6 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                     "insufficient balance while creating order",
                 )
                 return None, "insufficient_balance"
-            if "-4131" in err_str and not is_market_like:
-                if attempt == 0:
-                    log(
-                        logging.WARNING,
-                        "order",
-                        display_symbol,
-                        "Order failed due to percent price filter, retrying...",
-                    )
-                    _order_status[status_key].append("order_retry_limit_price_adjusted")
-                    best = _best_price()
-                    if best:
-                        factor = 1.001 if side == "buy" else 0.999
-                        adj_price = _apply_filters(best, best * factor)
-                    continue
-                if ALLOW_MARKET_FALLBACK:
-                    log(
-                        logging.WARNING,
-                        "order",
-                        display_symbol,
-                        "Switched to market order",
-                    )
-                    _order_status[status_key].append("order_fallback_to_market")
-                    _order_status[status_key].append("order_market_fallback")
-                    _order_status[status_key].append("order_cancelled")
-                    try:
-                        order = exchange.create_order(symbol, "market", side, qty, None, final_params)
-                        order_id = order.get("id") or order.get("orderId")
-                        if order_id:
-                            return order_id, None
-                    except Exception as me:
-                        err_str = str(me)
-                    msg = "order_failed_percent_filter"
-                    if msg not in _order_status[status_key]:
-                        _order_status[status_key].append(msg)
-                    return None, err_str
             specific = None
             if "-2019" in err_str and "Margin is insufficient" in err_str:
                 specific = "❌ Недостаточно маржи, позиция не может быть открыта."
@@ -2043,6 +2149,123 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
             if msg not in _order_status[status_key]:
                 _order_status[status_key].append(msg)
             return None, err_str
+
+    return None, last_error or "order_failed"
+
+
+def place_stop_market(
+    exchange,
+    symbol: str,
+    position_side: str,
+    base_price: float,
+    sl_pct: float,
+    *,
+    reduce_only: bool = True,
+    close_on_trigger: bool = True,
+):
+    """Place a Bybit STOP_MARKET order with automatic direction handling."""
+
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+    except Exception:
+        ticker = {}
+
+    last_candidates = []
+    if isinstance(ticker, dict):
+        last_candidates.extend(
+            ticker.get(key)
+            for key in ("last", "close", "markPrice", "price")
+        )
+        if str(position_side or "").lower() == "buy":
+            last_candidates.extend([ticker.get("bid"), ticker.get("ask")])
+        else:
+            last_candidates.extend([ticker.get("ask"), ticker.get("bid")])
+
+    last_price = None
+    for candidate in last_candidates:
+        if candidate is None:
+            continue
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0:
+            last_price = value
+            break
+
+    try:
+        base_value = float(base_price)
+    except (TypeError, ValueError):
+        base_value = last_price or 0.0
+
+    try:
+        sl_value = abs(float(sl_pct))
+    except (TypeError, ValueError):
+        sl_value = 0.0
+
+    min_offset = 0.001
+    side_norm = str(position_side or "").lower()
+    mapping = getattr(sys.modules.get("main"), "BYBIT_TRIGGER_DIRECTIONS", {}) or {}
+
+    if side_norm == "buy":
+        stop_side = "sell"
+        target = base_value * (1 - sl_value) if base_value else None
+        if last_price is not None:
+            ref = last_price * (1 - min_offset)
+            target = min(target, ref) if target is not None else ref
+        direction = mapping.get("falling") or mapping.get("descending") or "descending"
+    else:
+        stop_side = "buy"
+        target = base_value * (1 + sl_value) if base_value else None
+        if last_price is not None:
+            ref = last_price * (1 + min_offset)
+            target = max(target, ref) if target is not None else ref
+        direction = mapping.get("rising") or mapping.get("ascending") or "ascending"
+
+    if target is None:
+        target = last_price or base_value
+    trigger_price, _ = _price_qty_to_precision(exchange, symbol, price=target, amount=None)
+
+    params = {
+        "reduceOnly": bool(reduce_only),
+        "closeOnTrigger": bool(close_on_trigger),
+        "triggerPrice": trigger_price,
+        "triggerDirection": direction,
+        "triggerBy": "LastPrice",
+        "tpSlMode": "Full",
+        "category": "linear",
+        "positionIdx": 0,
+    }
+
+    def _submit(current_price):
+        params["triggerPrice"] = current_price
+        return exchange.create_order(symbol, "STOP_MARKET", stop_side, None, None, params)
+
+    try:
+        order = _submit(trigger_price)
+    except Exception as exc:
+        err_text = str(exc)
+        lower = err_text.lower()
+        adjust = 0.002
+        if "should" in lower and ("lower" in lower or "higher" in lower) and last_price:
+            if side_norm == "buy":
+                adjusted = min(trigger_price, float(last_price * (1 - adjust)))
+            else:
+                adjusted = max(trigger_price, float(last_price * (1 + adjust)))
+            adjusted, _ = _price_qty_to_precision(exchange, symbol, price=adjusted, amount=None)
+            try:
+                order = _submit(adjusted)
+            except Exception as final_exc:
+                log_once(logging, "error", f"order | {symbol} | stop order failed: {final_exc}")
+                return None, str(final_exc)
+        else:
+            log_once(logging, "error", f"order | {symbol} | stop order failed: {err_text}")
+            return None, err_text
+
+    order_id = None
+    if isinstance(order, dict):
+        order_id = order.get("id") or order.get("orderId")
+    return order_id, None
 
 
 def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -> bool:

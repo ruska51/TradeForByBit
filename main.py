@@ -116,12 +116,14 @@ from logging_utils import (
     record_pattern,
     record_error,
     safe_create_order,
+    place_stop_market,
     SOFT_ORDER_ERRORS,
     flush_symbol_logs,
     flush_cycle_logs,
     log_prediction_error,
     record_summary,
     emit_summary,
+    log_once,
     _is_bybit_exchange,
     detect_market_category,
     _normalize_bybit_symbol,
@@ -2969,7 +2971,7 @@ def run_trade(
                 log(logging.INFO, "order", symbol, f"skipped: {err}")
                 log_decision(symbol, err)
                 return False
-            logging.error(f"trade | {symbol} | ❌ Order failed: {err}")
+            log_once(logging, "error", f"trade | {symbol} | ❌ Order failed: {err}")
             log_decision(symbol, "order_failed")
             return False
 
@@ -2984,7 +2986,7 @@ def run_trade(
             reference_price=price,
         )
     except Exception as e:
-        logging.error(f"Failed to set SL for {symbol}: {e}")
+        log_once(logging, "error", f"Failed to set SL for {symbol}: {e}")
         sl_price = None
     try:
         qty_remain = qty
@@ -3015,7 +3017,7 @@ def run_trade(
         if sl_price is not None:
             logging.info(f"trade | {symbol} | SL set @ {sl_price:.5f} | TP set @ {tp_price:.5f}")
     except Exception as e:
-        logging.error(f"Failed to set TP for {symbol}: {e}")
+        log_once(logging, "error", f"Failed to set TP for {symbol}: {e}")
 
     current_bar_index = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -3271,7 +3273,7 @@ def attempt_direct_market_entry(
             reference_price=last_price,
         )
     except Exception as exc:
-        logging.error("fallback trade | %s | Failed to set SL: %s", symbol, exc)
+        log_once(logging, "error", f"fallback trade | {symbol} | Failed to set SL: {exc}")
         sl_price = None
 
     try:
@@ -3307,7 +3309,7 @@ def attempt_direct_market_entry(
             reference_price=last_price,
         )
     except Exception as exc:
-        logging.error("fallback trade | %s | Failed to set TP: %s", symbol, exc)
+        log_once(logging, "error", f"fallback trade | {symbol} | Failed to set TP: {exc}")
 
     now = datetime.now(timezone.utc)
     ctx_copy = {k: v for k, v in ctx.items() if v is not None}
@@ -3703,144 +3705,121 @@ def place_protected_exit(
     reference_price: float | None = None,
     max_retries: int = 2,
 ):
-    """Place TP/SL order with adaptive widening on immediate-trigger errors."""
+    """Place TP/SL orders with Bybit-compliant parameters and logging."""
 
-    def _normalize_price(raw: float) -> float:
-        adj = adjust_price_to_percent_filter(symbol, raw)
-        return float(exchange.price_to_precision(symbol, adj))
+    upper_kind = str(order_type or "").upper()
+    side_norm = str(side or "").lower()
+    position_side = "buy" if side_norm == "sell" else "sell"
+    is_stop = "STOP" in upper_kind and "TAKE_PROFIT" not in upper_kind
+    is_take_profit = "TAKE_PROFIT" in upper_kind
+
+    if not (is_stop or is_take_profit):
+        return None
 
     is_bybit = _is_bybit_exchange(exchange)
+    category = None
+    normalized_symbol = symbol
+    if is_bybit:
+        try:
+            category = detect_market_category(exchange, symbol) or "linear"
+        except Exception:
+            category = "linear"
+        try:
+            normalized_symbol = _normalize_bybit_symbol(exchange, symbol, category)
+        except Exception:
+            normalized_symbol = symbol
 
-    market_category = detect_market_category(exchange, symbol) if is_bybit else None
+    close_on_trigger = bool(close_all)
+    reduce_flag = True if reduce_only or close_on_trigger else False
 
-    def _determine_trigger_direction(kind: str) -> int | None:
-        """Return Bybit trigger direction value expected by the API."""
-
-        if not is_bybit:
+    if is_stop:
+        if stop_price is None:
             return None
-        upper_kind = str(kind or "").upper()
-        closing_long = str(side or "").lower() == "sell"
-        is_take_profit = "TAKE_PROFIT" in upper_kind or upper_kind.endswith("_TP")
-        is_stop = "STOP" in upper_kind
-        if not (is_take_profit or is_stop):
+        try:
+            stop_prec = float(exchange.price_to_precision(symbol, stop_price))
+        except Exception:
+            stop_prec = float(stop_price)
+        base_value = reference_price if reference_price and reference_price > 0 else stop_prec
+        try:
+            base_value = float(base_value)
+        except (TypeError, ValueError):
+            base_value = stop_prec
+        sl_pct = abs(stop_prec / base_value - 1) if base_value else 0.02
+        order_id, err = place_stop_market(
+            exchange,
+            normalized_symbol,
+            position_side,
+            base_value or stop_prec,
+            sl_pct,
+            reduce_only=True,
+            close_on_trigger=close_on_trigger,
+        )
+        if err:
+            message = f"order | {symbol} | stop order rejected: {err}"
+            log_once(logging, "error", message)
+            record_error(symbol, f"failed to set {order_type}")
             return None
-        if is_take_profit:
-            direction = "rising" if closing_long else "falling"
-        else:  # stop order
-            direction = "falling" if closing_long else "rising"
-        return BYBIT_TRIGGER_DIRECTIONS[direction]
+        logging.info("order | %s | %s placed", symbol, order_type)
+        return order_id
 
-    def _build_params(kind: str, price: float) -> dict:
-        params_local = {
-            "triggerPrice": float(price),
-            "reduceOnly": True,
-            "closeOnTrigger": True,
-        }
-        upper_kind = kind.upper()
-        is_market = upper_kind.endswith("MARKET")
-        is_stop = "STOP" in upper_kind
-        is_take_profit = "TAKE_PROFIT" in upper_kind
-        trigger_direction = _determine_trigger_direction(upper_kind)
-        if trigger_direction is not None and market_category != "spot":
-            params_local["triggerDirection"] = trigger_direction
-            params_local.setdefault("triggerBy", "LastPrice")
-        if is_bybit:
-            params_local.setdefault("orderType", "Market" if is_market else "Limit")
-            if market_category and market_category.lower() not in {"", "spot"}:
-                params_local.setdefault("category", "linear")
-                params_local.setdefault("positionIdx", 0)
-                params_local.setdefault("tpslTriggerBy", "MarkPrice")
-            elif market_category:
-                params_local.setdefault("category", market_category)
-        if is_take_profit:
-            params_local.setdefault("tpTriggerBy", "LastPrice")
-        if is_stop:
-            params_local.setdefault("slTriggerBy", "LastPrice")
-        if not is_market:
-            params_local["price"] = price
-        return params_local
+    if stop_price is None:
+        return None
 
-    def _is_trigger_error(error: Exception | str | None) -> bool:
-        if not error:
-            return False
-        msg = str(error).lower()
-        return "would immediately trigger" in msg or "-2021" in msg
+    try:
+        tp_price = float(exchange.price_to_precision(symbol, stop_price))
+    except Exception:
+        tp_price = float(stop_price)
 
-    def _widen_price(kind: str, current: float, attempt: int) -> tuple[str, float]:
-        factor = 1.5 if attempt == 0 else 2.0
-        ref_price = reference_price
-        if not ref_price or ref_price <= 0:
-            ref_price = current
-            try:
-                ticker = exchange.fetch_ticker(symbol)
-                if isinstance(ticker, dict):
-                    for key in ("last", "close", "markPrice", "price"):
-                        val = ticker.get(key)
-                        if val is None:
-                            continue
-                        try:
-                            candidate = float(val)
-                        except (TypeError, ValueError):
-                            continue
-                        if math.isfinite(candidate) and candidate > 0:
-                            ref_price = candidate
-                            break
-            except Exception:
-                pass
-        diff = abs(ref_price - current)
-        min_diff = max(ref_price * 0.005, 0.01)
-        if diff < min_diff:
-            diff = min_diff
-        closing_long = side.lower() == "sell"
-        is_tp = "TAKE_PROFIT" in kind
-        if closing_long:
-            new_price = ref_price + diff * factor if is_tp else ref_price - diff * factor
+    closing_long = side_norm == "sell"
+    direction_key = "rising" if closing_long else "falling"
+    trigger_direction = BYBIT_TRIGGER_DIRECTIONS[direction_key]
+
+    params: dict[str, Any] = {
+        "triggerPrice": tp_price,
+        "triggerDirection": trigger_direction,
+        "triggerBy": "LastPrice",
+        "tpSlMode": "Full",
+        "tpTriggerBy": "LastPrice",
+        "reduceOnly": bool(reduce_flag),
+        "closeOnTrigger": close_on_trigger,
+    }
+
+    if is_bybit:
+        cat_norm = str(category or "").lower()
+        if cat_norm == "spot":
+            params["category"] = "spot"
         else:
-            new_price = ref_price - diff * factor if is_tp else ref_price + diff * factor
-        new_price = max(new_price, 0.0)
-        base_type = "TAKE_PROFIT" if is_tp else "STOP"
-        if "MARKET" in kind:
-            new_type = f"{base_type}_MARKET"
-        elif "LIMIT" in kind:
-            new_type = f"{base_type}_LIMIT"
-        else:
-            new_type = base_type
-        return new_type, _normalize_price(new_price)
+            params["category"] = "linear"
+            params.setdefault("positionIdx", 0)
 
-    order_kind = order_type.upper()
-    current_price = _normalize_price(stop_price)
-    attempts = 0
+    price_arg = None
+    if "MARKET" in upper_kind:
+        params["orderType"] = "Market"
+    else:
+        params["orderType"] = "Limit"
+        params["price"] = tp_price
+        price_arg = tp_price
 
-    while attempts <= max_retries:
-        params = _build_params(order_kind, current_price)
-        order_id, err = safe_create_order(exchange, symbol, order_kind, side, qty, None, params)
-        if err in SOFT_ORDER_ERRORS:
-            log(logging.INFO, "order", symbol, f"skipped: {err}")
-            return None
-        if err == "insufficient_balance":
-            log(logging.WARNING, "order", symbol, "skip exit order: insufficient_balance")
-            return None
-        if order_id is not None:
-            logging.info(
-                "order | %s | %s placed qty=%s price=%s", symbol, order_kind, qty, current_price
-            )
-            return order_id
-        if _is_trigger_error(err) and attempts < max_retries:
-            attempts += 1
-            order_kind, current_price = _widen_price(order_kind, current_price, attempts - 1)
-            logging.info(
-                "order | %s | widening %s to %s @ %.6f after trigger rejection",
-                symbol,
-                order_type,
-                order_kind,
-                current_price,
-            )
-            continue
-        break
+    order_id, err = safe_create_order(
+        exchange,
+        normalized_symbol,
+        order_type,
+        side,
+        qty,
+        price_arg,
+        params,
+    )
 
-    record_error(symbol, f"failed to set {order_type}")
-    logging.error(f"Failed to set {order_type} for {symbol}: {err}")
-    return None
+    if err in SOFT_ORDER_ERRORS:
+        log(logging.INFO, "order", symbol, f"skipped: {err}")
+        return None
+    if err:
+        log_once(logging, "error", f"order | {symbol} | take-profit rejected: {err}")
+        record_error(symbol, f"failed to set {order_type}")
+        return None
+
+    logging.info("order | %s | %s placed qty=%s price=%s", symbol, order_type, qty, tp_price)
+    return order_id
 
 
 def ensure_exit_orders(
