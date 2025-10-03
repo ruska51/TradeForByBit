@@ -50,6 +50,21 @@ def _is_bybit_exchange(exchange) -> bool:
     return "bybit" in ex_id
 
 
+def _clean_params(d: dict | None) -> dict | None:
+    """Return a copy of *d* without ``None`` or blank-string values."""
+
+    if d is None:
+        return None
+    out: dict = {}
+    for key, value in d.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        out[key] = value
+    return out
+
+
 def normalize_bybit_category(value: str | None) -> str | None:
     """Return canonical Bybit category name for *value*.
 
@@ -1703,34 +1718,6 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
     resolved_category = category or ((params or {}).get("category") if params else None)
     base_params: dict | None = dict(params or {}) if params is not None else None
     is_bybit = _is_bybit_exchange(exchange)
-    if is_bybit:
-        p = dict(base_params or {})
-        has_sltype = "slOrderType" in p and str(p["slOrderType"] or "").strip() != ""
-        has_tp = p.get("takeProfit") is not None
-        has_sl = p.get("stopLoss") is not None
-
-        if has_sltype and not (has_tp or has_sl):
-            p.pop("slOrderType", None)
-
-        still_has_sltype = "slOrderType" in p and str(p["slOrderType"] or "").strip() != ""
-        if has_tp or has_sl or still_has_sltype:
-            p.setdefault("tpSlMode", "Full")
-            p.setdefault("tpslTriggerBy", "MarkPrice")
-
-        cat = str(p.get("category") or resolved_category or "").lower()
-        if cat in ("swap", ""):
-            cat = "linear"
-        allowed_categories = {"linear", "inverse", "option", "spot"}
-        cat = cat if cat in allowed_categories else "linear"
-        p["category"] = cat
-
-        if p["category"] in ("linear", "inverse"):
-            p.setdefault("positionIdx", 0)
-        else:
-            p.pop("positionIdx", None)
-
-        base_params = p
-        resolved_category = p.get("category") or resolved_category
     if not getattr(exchange, "markets", None):
         try:
             exchange.load_markets()
@@ -1836,19 +1823,34 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                 return None
             return td
 
+        def _float_or_none(value):
+            if value is None:
+                return None
+            try:
+                result = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(result):
+                return None
+            return result
+
         params_dict = dict(base_params or {})
         upper_type = str(order_type or "").upper()
-        is_exit_order = any(token in upper_type for token in ("STOP", "TAKE_PROFIT"))
+        is_exit_order = any(tok in upper_type for tok in ("STOP", "TAKE_PROFIT"))
 
-        stop_loss = params_dict.get("stopLoss")
-        take_profit = params_dict.get("takeProfit")
-        if stop_loss is None and "STOP" in upper_type:
-            stop_loss = params_dict.get("stopPrice") or params_dict.get("triggerPrice")
-        if take_profit is None and "TAKE_PROFIT" in upper_type:
-            take_profit = params_dict.get("stopPrice") or params_dict.get("triggerPrice")
+        stop_loss = _float_or_none(params_dict.get("stopLoss"))
+        take_profit = _float_or_none(params_dict.get("takeProfit"))
+        if not is_exit_order:
+            if stop_loss is None and "STOP" in upper_type:
+                stop_loss = _float_or_none(
+                    params_dict.get("stopPrice") or params_dict.get("triggerPrice")
+                )
+            if take_profit is None and "TAKE_PROFIT" in upper_type:
+                take_profit = _float_or_none(
+                    params_dict.get("stopPrice") or params_dict.get("triggerPrice")
+                )
 
         sl_order_type = params_dict.get("slOrderType")
-        tpsl_mode = params_dict.get("tpSlMode") or "Full"
         tpsl_trigger_by = (
             params_dict.get("tpslTriggerBy")
             or params_dict.get("tpsl_trigger_by")
@@ -1898,39 +1900,56 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                     trigger_direction = mapping.get("rising") or "ascending"
 
         trigger_direction = _normalize_trigger_direction_value(trigger_direction)
-
-        resolved_category = (
-            resolved_category
-            or params_dict.get("category")
-            or (category if category else None)
-            or "linear"
-        )
-        if resolved_category:
-            params_dict["category"] = resolved_category
-
-        if (
-            params_dict.get("tpSlMode")
-            and stop_loss is None
-            and take_profit is None
-            and sl_order_type is None
-        ):
-            params_dict.pop("tpSlMode", None)
-
         if trigger_direction is None:
             params_dict.pop("triggerDirection", None)
         else:
             params_dict["triggerDirection"] = trigger_direction
 
-        final_params = _bybit_tpsl_params(
-            category=str(resolved_category or "linear"),
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            sl_order_type=sl_order_type if stop_loss is not None else None,
-            tpsl_mode=tpsl_mode,
-            tpsl_trigger_by=tpsl_trigger_by,
-            trigger_direction=trigger_direction,
-            extra=params_dict,
-        )
+        if stop_loss is not None:
+            params_dict["stopLoss"] = float(stop_loss)
+        else:
+            params_dict.pop("stopLoss", None)
+        if take_profit is not None:
+            params_dict["takeProfit"] = float(take_profit)
+        else:
+            params_dict.pop("takeProfit", None)
+
+        cat = str(params_dict.get("category") or resolved_category or "").lower()
+        if cat in ("", "swap", "usdt_perp"):
+            cat = "linear"
+        if cat not in ("linear", "inverse", "option", "spot"):
+            cat = "linear"
+        params_dict["category"] = cat
+        if cat in ("linear", "inverse"):
+            params_dict.setdefault("positionIdx", 0)
+        else:
+            params_dict.pop("positionIdx", None)
+        resolved_category = cat
+
+        has_sl = params_dict.get("stopLoss") is not None
+        has_tp = params_dict.get("takeProfit") is not None
+        if not is_exit_order and (has_sl or has_tp):
+            params_dict.setdefault("tpSlMode", "Full")
+            params_dict.setdefault("tpslTriggerBy", tpsl_trigger_by)
+        if params_dict.get("slOrderType") and not (has_sl or has_tp):
+            params_dict.pop("slOrderType", None)
+
+        if is_exit_order:
+            for key in (
+                "slOrderType",
+                "tpSlMode",
+                "tpslMode",
+                "tpslTriggerBy",
+                "stopLoss",
+                "takeProfit",
+            ):
+                params_dict.pop(key, None)
+            params_dict.setdefault("reduceOnly", True)
+            params_dict.setdefault("closeOnTrigger", True)
+
+        final_params = params_dict
+
+    final_params = _clean_params(final_params)
 
     if final_params is not None and not final_params:
         final_params = None
