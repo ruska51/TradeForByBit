@@ -362,6 +362,33 @@ def test_with_bybit_order_params_normalizes_swap_category(monkeypatch):
         for value in params.values()
     )
 
+
+def test_with_bybit_order_params_sets_tp_sl_mode_for_exit_hints(monkeypatch):
+    class _HintExchange:
+        id = "bybit"
+        markets = {}
+
+    exchange = _HintExchange()
+
+    monkeypatch.setattr(
+        "logging_utils.detect_market_category", lambda *_args, **_kwargs: "spot"
+    )
+
+    params, resolved = _with_bybit_order_params(
+        exchange,
+        "ETH/USDT",
+        {
+            "reduceOnly": True,
+            "closeOnTrigger": True,
+            "slOrderType": "Market",
+        },
+    )
+
+    assert resolved == "linear"
+    assert params["category"] == "linear"
+    assert params["tpSlMode"] == "Full"
+
+
 class FakeBybitLinearExchange:
     id = "bybit"
 
