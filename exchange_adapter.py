@@ -10,7 +10,12 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, Optional, Callable
 
-from logging_utils import log, normalize_bybit_category
+from logging_utils import (
+    log,
+    normalize_bybit_category,
+    detect_market_category,
+    _normalize_bybit_symbol,
+)
 
 
 # ``ccxt`` is imported lazily so tests can monkeypatch the module before the
@@ -63,36 +68,41 @@ def to_sdk(symbol: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def set_valid_leverage(exchange, symbol: str, desired: int):
-    """Apply leverage respecting exchange limits."""
+def set_valid_leverage(exchange, symbol: str, leverage: int):
+    try:
+        L = int(leverage)
+    except Exception:
+        L = 1
+    if L <= 0:
+        L = 1
 
-    import logging
+    exid = getattr(exchange, "id", "")
+    is_bybit = str(exid).lower() == "bybit"
+
+    params = {}
+    norm_symbol = symbol
+    if is_bybit:
+        cat = detect_market_category(exchange, symbol) or "linear"
+        # Сводим swap -> linear
+        cat = "linear" if cat in (None, "", "swap") else cat
+        params["category"] = cat
+        params["buyLeverage"] = L
+        params["sellLeverage"] = L
+        params.setdefault("positionIdx", 0)  # one-way; помогает unified-account
+        try:
+            norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+        except Exception:
+            norm_symbol = symbol
 
     try:
-        limits = (exchange.market(symbol) or {}).get("limits", {}) or {}
-    except Exception:  # pragma: no cover - defensive
-        limits = {}
-    lev = limits.get("leverage", {}) or {}
-
-    min_l = int(lev.get("min") or 1)
-    max_l = int(lev.get("max") or 20)
-    step = int(lev.get("step") or 1)
-
-    L = max(min(desired, max_l), min_l)
-    L = int((L // step) * step)
-
-    try:
-        if hasattr(exchange, "set_leverage"):
-            exchange.set_leverage(L, symbol)
-        else:
-            exchange.setLeverage(L, symbol)  # type: ignore[attr-defined]
-        logging.info("leverage | %s | set %s", symbol, L)
-    except Exception as e:  # pragma: no cover - network errors
-        logging.warning(
-            "leverage | %s | failed to set leverage %s (soft): %s", symbol, L, e
+        # ccxt v5: set_leverage(leverage, symbol, params)
+        return (
+            exchange.set_leverage(L, norm_symbol, params)
+            if params
+            else exchange.set_leverage(L, norm_symbol)
         )
+    except Exception:
         return None
-    return L
 
 
 def safe_fetch_closed_orders(exchange, symbol: str | None = None, limit: int = 50, params: dict | None = None):
