@@ -25,11 +25,20 @@ def _make_dummy_exchange():
         def fetch_open_orders(self, *args, **kwargs):
             return []
 
+        def fetch_positions(self, symbols=None, params=None):
+            symbol = None
+            if isinstance(symbols, (list, tuple)) and symbols:
+                symbol = symbols[0]
+            symbol = symbol or "BTC/USDT"
+            return [{"symbol": symbol, "contracts": "1"}]
+
     return DummyExchange()
 
 
 def _capture_conditional_calls(monkeypatch, main):
     calls: list[dict[str, Any]] = []
+
+    main._last_exit_qty = {}
 
     def fake_place_conditional_exit(
         _exchange, symbol, side_open, base_price, pct, *, is_tp
@@ -46,6 +55,7 @@ def _capture_conditional_calls(monkeypatch, main):
         return ("tp" if is_tp else "sl") + "-id", None
 
     monkeypatch.setattr(main, "place_conditional_exit", fake_place_conditional_exit)
+    main._last_exit_qty = {}
     return calls
 
 
@@ -198,6 +208,7 @@ def test_ensure_exit_orders_spot_long_omits_trigger_direction(monkeypatch, main_
 
     captured_calls = _capture_conditional_calls(monkeypatch, main)
 
+    main._last_exit_qty = {}
     main.ensure_exit_orders(
         adapter,
         "BTC/USDT",
@@ -284,6 +295,7 @@ def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, 
 
     monkeypatch.setattr(main, "place_conditional_exit", fake_place_conditional_exit)
 
+    main._last_exit_qty = {}
     main.ensure_exit_orders(
         adapter,
         "BTC/USDT",
@@ -326,6 +338,7 @@ def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch,
 
     monkeypatch.setattr(main, "place_conditional_exit", fake_place_conditional_exit)
 
+    main._last_exit_qty = {}
     main.ensure_exit_orders(
         adapter,
         "BTC/USDT",
@@ -373,6 +386,7 @@ def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main
 
     monkeypatch.setattr(main, "place_conditional_exit", fake_place_conditional_exit)
 
+    main._last_exit_qty = {}
     main.ensure_exit_orders(
         adapter,
         "BTC/USDT",
@@ -445,6 +459,13 @@ def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):
         def market(self, symbol):
             return self.markets.get(symbol) or self.markets_by_id.get(symbol)
 
+        def fetch_positions(self, symbols=None, params=None):
+            symbol = None
+            if isinstance(symbols, (list, tuple)) and symbols:
+                symbol = symbols[0]
+            symbol = symbol or "ETH/USDT:USDT"
+            return [{"symbol": symbol, "contracts": "1"}]
+
     exchange = DualMarketExchange()
 
     assert detect_market_category(exchange, "ETH/USDT") == "linear"
@@ -474,6 +495,7 @@ def test_bybit_dual_market_prefers_linear_for_futures(monkeypatch, main_module):
     adapter = types.SimpleNamespace(client=exchange)
     monkeypatch.setattr(main, "open_trade_ctx", {}, raising=False)
 
+    main._last_exit_qty = {}
     main.ensure_exit_orders(
         adapter,
         "ETH/USDT",
@@ -513,6 +535,7 @@ def test_ensure_exit_orders_blocks_after_fetch_failure(
 
     caplog.set_level(logging.WARNING)
 
+    main._last_exit_qty = {}
     main.ensure_exit_orders(
         adapter,
         "BTC/USDT",
@@ -602,6 +625,13 @@ def test_ensure_exit_orders_loads_markets_before_normalization(
         def fetch_ticker(self, symbol):
             return {"last": 100.0}
 
+        def fetch_positions(self, symbols=None, params=None):
+            symbol = None
+            if isinstance(symbols, (list, tuple)) and symbols:
+                symbol = symbols[0]
+            symbol = symbol or "BTC/USDT:USDT"
+            return [{"symbol": symbol, "contracts": "1"}]
+
     exchange = DummyExchange()
     adapter = types.SimpleNamespace(client=exchange)
 
@@ -613,6 +643,7 @@ def test_ensure_exit_orders_loads_markets_before_normalization(
 
     caplog.set_level(logging.WARNING)
 
+    main._last_exit_qty = {}
     main.ensure_exit_orders(
         adapter,
         "BTC/USDT",

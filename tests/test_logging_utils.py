@@ -220,6 +220,13 @@ class BybitExitExchange:
     def fetch_ticker(self, symbol):
         return {"ask": 101.0, "bid": 100.0}
 
+    def fetch_positions(self, symbols=None, params=None):
+        symbol = None
+        if isinstance(symbols, (list, tuple)) and symbols:
+            symbol = symbols[0]
+        symbol = symbol or "ETH/USDT"
+        return [{"symbol": symbol, "contracts": "1"}]
+
     def fetch_open_orders(self, symbol, params=None):
         return []
 
@@ -441,6 +448,13 @@ class _StubBybitExitExchange:
     def fetch_open_orders(self, symbol, *args, **kwargs):
         return []
 
+    def fetch_positions(self, symbols=None, params=None):
+        symbol = None
+        if isinstance(symbols, (list, tuple)) and symbols:
+            symbol = symbols[0]
+        symbol = symbol or "BTC/USDT"
+        return [{"symbol": symbol, "contracts": "1"}]
+
     def price_to_precision(self, symbol, price):
         return f"{float(price):.2f}"
 
@@ -515,7 +529,7 @@ def test_place_conditional_exit_normalized(caplog):
     otype, side, qty, price, params = ex.calls[-1]
     assert otype == "market"
     assert side == "sell"
-    assert qty is None
+    assert qty == pytest.approx(1.0)
     assert price is None
     assert params["tpSlMode"] == "Full"
     assert params["triggerBy"] == "LastPrice"
@@ -697,6 +711,7 @@ def test_ensure_exit_orders_trigger_direction_long(monkeypatch):
 
     monkeypatch.setattr(main, "place_conditional_exit", _recording_place_conditional_exit)
     main.open_trade_ctx.pop("BTC/USDT", None)
+    main._last_exit_qty = {}
     main.ensure_exit_orders(Adapter(), "BTC/USDT", "long", 1.0, 99.0, 101.0)
 
     assert recorded, "Expected conditional exits"
@@ -729,6 +744,7 @@ def test_ensure_exit_orders_trigger_direction_short(monkeypatch):
 
     monkeypatch.setattr(main, "place_conditional_exit", _recording_place_conditional_exit)
     main.open_trade_ctx.pop("BTC/USDT", None)
+    main._last_exit_qty = {}
     main.ensure_exit_orders(Adapter(), "BTC/USDT", "short", 1.0, 101.0, 99.0)
 
     assert recorded, "Expected conditional exits"
