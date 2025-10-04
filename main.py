@@ -117,6 +117,9 @@ from logging_utils import (
     record_error,
     safe_create_order,
     place_conditional_exit,
+    enter_ensure_filled,
+    wait_position_after_entry,
+    has_pending_entry,
     SOFT_ORDER_ERRORS,
     flush_symbol_logs,
     flush_cycle_logs,
@@ -128,6 +131,7 @@ from logging_utils import (
     detect_market_category,
     _normalize_bybit_symbol,
     _price_qty_to_precision,
+    _round_qty,
 )
 from retrain_utils import retrain_global_model
 from fallback import fallback_signal
@@ -2966,133 +2970,114 @@ def run_trade(
     if max_pos_qty:
         qty = min(qty, max_pos_qty)
 
-    params = {"newOrderRespType": "RESULT"}
-    logging.info(colorize(f"trade | {symbol} | Opening {side.upper()} position | qty={qty} | price={price}", "open"))
-    order_id, err = safe_create_order(exchange, symbol, "market", side, qty, None, params)
-    if err in SOFT_ORDER_ERRORS:
-        log(logging.INFO, "order", symbol, f"skipped: {err}")
-        log_decision(symbol, err)
+    category = detect_market_category(ADAPTER.x, symbol) or "linear"
+    category = str(category or "linear")
+    symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
+    qty = _round_qty(ADAPTER.x, symbol_norm, qty)
+    if qty <= 0:
+        logging.warning("order | %s | skipped: rounded qty=0", symbol)
+        log_decision(symbol, "qty_insufficient")
         return False
-    margin_attempts = 0
-    while (
-        order_id is None
-        and err == "insufficient_balance"
-        and qty > min_qty
-        and margin_attempts < 2
-    ):
-        margin_attempts += 1
-        qty = max(min_qty, qty / 2)
-        qty = float(exchange.amount_to_precision(symbol, qty))
-        log(
-            logging.WARNING,
-            "order",
-            symbol,
-            f"retrying with qty={qty} after insufficient balance",
-        )
-        order_id, err = safe_create_order(exchange, symbol, "market", side, qty, None, params)
-        if err in SOFT_ORDER_ERRORS:
-            log(logging.INFO, "order", symbol, f"skipped: {err}")
-            log_decision(symbol, err)
-            return False
-    attempts = 0
-    while (
-        order_id is None
-        and err
-        and any(code in err for code in ("-2027", "-4005", "-2019"))
-        and qty > min_qty
-        and attempts < 3
-    ):
-        max_pos_qty = get_max_position_qty(symbol, lev, price)
-        new_qty = qty * 0.9
-        if max_pos_qty:
-            new_qty = min(new_qty, max_pos_qty)
-        qty = max(min_qty, new_qty)
-        qty = float(exchange.amount_to_precision(symbol, qty))
-        if "-2019" in err:
-            reason = "margin"
-        else:
-            reason = "limit"
-        logging.info(f"trade | {symbol} | Reducing qty to {qty} due to {reason} error")
-        order_id, err = safe_create_order(exchange, symbol, "market", side, qty, None, params)
-        if err in SOFT_ORDER_ERRORS:
-            log(logging.INFO, "order", symbol, f"skipped: {err}")
-            log_decision(symbol, err)
-            return False
-        attempts += 1
-    if order_id is None:
-        # Try opening the smallest allowed position if there's enough balance
-        if err == "insufficient_balance":
-            log_decision(symbol, "insufficient_balance")
-            return False
-        if balance >= MIN_NOTIONAL and err and any(code in err for code in ("-2019", "-4164")):
-            min_trade_qty = max(min_qty, MIN_NOTIONAL / price)
-            min_trade_qty = float(exchange.amount_to_precision(symbol, min_trade_qty))
-            logging.info(f"trade | {symbol} | Retrying with minimal qty {min_trade_qty} due to insufficient funds")
-            order_id, err = safe_create_order(exchange, symbol, "market", side, min_trade_qty, None, params)
-            if err in SOFT_ORDER_ERRORS:
-                log(logging.INFO, "order", symbol, f"skipped: {err}")
-                log_decision(symbol, err)
-                return False
 
-        if order_id is None:
-            if err in SOFT_ORDER_ERRORS:
-                log(logging.INFO, "order", symbol, f"skipped: {err}")
-                log_decision(symbol, err)
-                return False
-            log_once(logging, "error", f"trade | {symbol} | ❌ Order failed: {err}")
-            log_decision(symbol, "order_failed")
-            return False
+    if has_pending_entry(ADAPTER.x, symbol, side, category):
+        logging.info("entry | %s | skip: pending entry exists", symbol)
+        return False
 
-    try:
-        place_protected_exit(
-            symbol,
-            "STOP_MARKET",
-            "sell" if signal == "long" else "buy",
-            qty,
-            sl_price,
-            close_all=True,
-            reference_price=price,
+    logging.info(
+        colorize(
+            f"trade | {symbol} | Opening {side.upper()} position | qty={qty} | price={price}",
+            "open",
         )
-    except Exception as e:
-        log_once(logging, "error", f"Failed to set SL for {symbol}: {e}")
-        sl_price = None
+    )
+    order_id, filled_qty = enter_ensure_filled(
+        ADAPTER.x,
+        symbol,
+        side,
+        qty,
+        category=category,
+        prefer_limit=True,
+        slip_pct=0.001,
+        wait_fill_sec=2.0,
+        cancel_if_unfilled=True,
+    )
+    if not order_id or filled_qty <= 0:
+        log_decision(symbol, "order_failed")
+        return False
+
+    entry_price = price
     try:
-        qty_remain = qty
-        if partial_tp and partial_tp_mult:
-            qty1 = float(exchange.amount_to_precision(symbol, qty * partial_tp))
-            if qty1 > 0:
-                tp1 = price + atr_val * partial_tp_mult if signal == "long" else price - atr_val * partial_tp_mult
-                tp1 = float(exchange.price_to_precision(symbol, tp1))
-                place_protected_exit(
-                    symbol,
-                    "TAKE_PROFIT_MARKET",
-                    "sell" if signal == "long" else "buy",
-                    qty1,
-                    tp1,
-                    reduce_only=True,
-                    close_all=False,
-                    reference_price=price,
-                )
-                qty_remain -= qty1
-        place_protected_exit(
-            symbol,
-            "TAKE_PROFIT_MARKET",
-            "sell" if signal == "long" else "buy",
-            qty_remain,
-            tp_price,
-            reference_price=price,
+        order_info = ADAPTER.x.fetch_order(
+            order_id,
+            symbol_norm,
+            params={"category": category},
         )
-        if sl_price is not None:
-            logging.info(f"trade | {symbol} | SL set @ {sl_price:.5f} | TP set @ {tp_price:.5f}")
-    except Exception as e:
-        log_once(logging, "error", f"Failed to set TP for {symbol}: {e}")
+    except Exception:
+        order_info = None
+    if isinstance(order_info, dict):
+        for key in ("average", "avgPrice", "price"):
+            try:
+                candidate = float(order_info.get(key) or 0.0)
+            except Exception:
+                candidate = 0.0
+            if candidate > 0:
+                entry_price = candidate
+                break
+
+    pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
+    if pos_qty <= 0 and filled_qty > 0:
+        pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=2.0)
+    if pos_qty <= 0:
+        logging.warning(
+            "entry | %s | filled=%.8f but no position detected yet; exits postponed",
+            symbol,
+            filled_qty,
+        )
+        return False
+
+    want_long = signal == "long"
+    try:
+        sl_pct_eff = abs((sl_price / entry_price) - 1) if entry_price else SL_PCT
+    except Exception:
+        sl_pct_eff = SL_PCT
+    if not sl_pct_eff or not math.isfinite(sl_pct_eff):
+        sl_pct_eff = SL_PCT
+    try:
+        tp_pct_eff = abs((tp_price / entry_price) - 1) if entry_price else TP_PCT
+    except Exception:
+        tp_pct_eff = TP_PCT
+    if not tp_pct_eff or not math.isfinite(tp_pct_eff):
+        tp_pct_eff = TP_PCT
+
+    sl_order_id, sl_err = place_conditional_exit(
+        ADAPTER.x,
+        symbol,
+        "buy" if want_long else "sell",
+        entry_price,
+        sl_pct_eff,
+        is_tp=False,
+    )
+    if sl_err:
+        log_once(logging, "warning", f"Failed to set SL for {symbol}: {sl_err}")
+
+    tp_order_id, tp_err = place_conditional_exit(
+        ADAPTER.x,
+        symbol,
+        "buy" if want_long else "sell",
+        entry_price,
+        tp_pct_eff,
+        is_tp=True,
+    )
+    if tp_err:
+        log_once(logging, "warning", f"Failed to set TP for {symbol}: {tp_err}")
+
+    qty = float(pos_qty)
 
     current_bar_index = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     ctx = {
         "symbol": symbol,
         "side": signal.upper(),
-        "entry_price": float(price),
+        "entry_price": float(entry_price),
         "entry_time": now_iso,
         "qty": float(qty),
         "open_bar_index": current_bar_index,
@@ -3263,35 +3248,17 @@ def attempt_direct_market_entry(
         log_decision(symbol, "qty_insufficient")
         return False
 
-    params = {"newOrderRespType": "RESULT"}
-    order_id, err = safe_create_order(exchange, symbol, "market", side, qty, None, params)
-    margin_attempts = 0
-    while (
-        order_id is None
-        and err == "insufficient_balance"
-        and qty > min_qty
-        and margin_attempts < 2
-    ):
-        margin_attempts += 1
-        qty = max(min_qty, qty / 2)
-        qty = float(exchange.amount_to_precision(symbol, qty))
-        log(
-            logging.WARNING,
-            "order",
-            symbol,
-            f"fallback retry with qty={qty} after insufficient balance",
-        )
-        order_id, err = safe_create_order(exchange, symbol, "market", side, qty, None, params)
-    if order_id is None or err:
-        reason = err or "order_failed"
-        if err in SOFT_ORDER_ERRORS:
-            log_decision(symbol, reason)
-        else:
-            if err == "insufficient_balance":
-                log_decision(symbol, "insufficient_balance")
-                return False
-            logging.error("fallback trade | %s | order failed: %s", symbol, reason)
-            log_decision(symbol, "order_failed")
+
+    category = detect_market_category(ADAPTER.x, symbol) or "linear"
+    category = str(category or "linear")
+    symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
+    qty = _round_qty(ADAPTER.x, symbol_norm, qty)
+    if qty <= 0:
+        log_decision(symbol, "qty_insufficient")
+        return False
+
+    if has_pending_entry(ADAPTER.x, symbol, side, category):
+        logging.info("entry | %s | skip: pending entry exists", symbol)
         return False
 
     precision = market.get("precision") or {}
@@ -3329,55 +3296,88 @@ def attempt_direct_market_entry(
     except Exception:
         tp_price = float(tp_price_raw)
 
-    opp_side = "sell" if direction == "long" else "buy"
-    try:
-        place_protected_exit(
-            symbol,
-            "STOP_MARKET",
-            opp_side,
-            qty,
-            sl_price,
-            close_all=True,
-            reference_price=last_price,
-        )
-    except Exception as exc:
-        log_once(logging, "error", f"fallback trade | {symbol} | Failed to set SL: {exc}")
-        sl_price = None
+    order_id, filled_qty = enter_ensure_filled(
+        ADAPTER.x,
+        symbol,
+        side,
+        qty,
+        category=category,
+        prefer_limit=True,
+        slip_pct=0.001,
+        wait_fill_sec=2.0,
+        cancel_if_unfilled=True,
+    )
+    if not order_id or filled_qty <= 0:
+        log_decision(symbol, "order_failed")
+        return False
 
+    entry_price = last_price
     try:
-        qty_remain = qty
-        partial_tp = mode_params.get("partial_tp")
-        partial_tp_mult = mode_params.get("partial_tp_mult")
-        if partial_tp and partial_tp_mult:
-            qty1 = float(exchange.amount_to_precision(symbol, qty * partial_tp))
-            if qty1 > 0:
-                tp1 = (
-                    last_price + atr_val * partial_tp_mult
-                    if direction == "long"
-                    else last_price - atr_val * partial_tp_mult
-                )
-                tp1 = float(exchange.price_to_precision(symbol, tp1))
-                place_protected_exit(
-                    symbol,
-                    "TAKE_PROFIT_MARKET",
-                    opp_side,
-                    qty1,
-                    tp1,
-                    reduce_only=True,
-                    close_all=False,
-                    reference_price=last_price,
-                )
-                qty_remain -= qty1
-        place_protected_exit(
-            symbol,
-            "TAKE_PROFIT_MARKET",
-            opp_side,
-            qty_remain,
-            tp_price,
-            reference_price=last_price,
+        order_info = ADAPTER.x.fetch_order(
+            order_id,
+            symbol_norm,
+            params={"category": category},
         )
-    except Exception as exc:
-        log_once(logging, "error", f"fallback trade | {symbol} | Failed to set TP: {exc}")
+    except Exception:
+        order_info = None
+    if isinstance(order_info, dict):
+        for key in ("average", "avgPrice", "price"):
+            try:
+                candidate = float(order_info.get(key) or 0.0)
+            except Exception:
+                candidate = 0.0
+            if candidate > 0:
+                entry_price = candidate
+                break
+
+    pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
+    if pos_qty <= 0 and filled_qty > 0:
+        pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=2.0)
+    if pos_qty <= 0:
+        logging.warning(
+            "entry | %s | filled=%.8f but no position detected yet; exits postponed",
+            symbol,
+            filled_qty,
+        )
+        return False
+
+    want_long = direction == "long"
+    try:
+        sl_pct_eff = abs((sl_price / entry_price) - 1) if entry_price else SL_PCT
+    except Exception:
+        sl_pct_eff = SL_PCT
+    if not sl_pct_eff or not math.isfinite(sl_pct_eff):
+        sl_pct_eff = SL_PCT
+    try:
+        tp_pct_eff = abs((tp_price / entry_price) - 1) if entry_price else TP_PCT
+    except Exception:
+        tp_pct_eff = TP_PCT
+    if not tp_pct_eff or not math.isfinite(tp_pct_eff):
+        tp_pct_eff = TP_PCT
+
+    sl_order_id, sl_err = place_conditional_exit(
+        ADAPTER.x,
+        symbol,
+        "buy" if want_long else "sell",
+        entry_price,
+        sl_pct_eff,
+        is_tp=False,
+    )
+    if sl_err:
+        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set SL: {sl_err}")
+
+    tp_order_id, tp_err = place_conditional_exit(
+        ADAPTER.x,
+        symbol,
+        "buy" if want_long else "sell",
+        entry_price,
+        tp_pct_eff,
+        is_tp=True,
+    )
+    if tp_err:
+        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set TP: {tp_err}")
+
+    qty = float(pos_qty)
 
     now = datetime.now(timezone.utc)
     ctx_copy = {k: v for k, v in ctx.items() if v is not None}
@@ -3385,7 +3385,7 @@ def attempt_direct_market_entry(
         {
             "symbol": symbol,
             "side": direction.upper(),
-            "entry_price": float(last_price),
+            "entry_price": float(entry_price),
             "entry_time": now.isoformat().replace("+00:00", "Z"),
             "qty": float(qty),
             "open_bar_index": int(now.timestamp() // (5 * 60)),
@@ -3406,7 +3406,7 @@ def attempt_direct_market_entry(
 
     logging.info(
         colorize(
-            f"trade | {symbol} | fallback market entry {direction.upper()} qty={qty:.6f} price={last_price:.6f}",
+            f"trade | {symbol} | fallback market entry {direction.upper()} qty={qty:.6f} price={entry_price:.6f}",
             "open",
         )
     )
