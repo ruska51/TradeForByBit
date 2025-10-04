@@ -127,6 +127,7 @@ from logging_utils import (
     _is_bybit_exchange,
     detect_market_category,
     _normalize_bybit_symbol,
+    _price_qty_to_precision,
 )
 from retrain_utils import retrain_global_model
 from fallback import fallback_signal
@@ -2714,6 +2715,48 @@ def fetch_positions_soft(symbol: str) -> list[dict]:
         return []
 
 
+def _max_affordable_amount(
+    exchange,
+    symbol,
+    side,
+    leverage: int,
+    price: float,
+    min_notional: float = 10.0,
+) -> float:
+    """Return maximum position size affordable with current free balance."""
+
+    try:
+        bal = safe_fetch_balance(exchange, {"type": "future"})
+    except Exception:
+        return 0.0
+
+    free_raw = 0.0
+    if isinstance(bal, dict):
+        account = bal.get("USDT")
+        if isinstance(account, dict):
+            free_raw = float(account.get("free", 0.0) or 0.0)
+        if free_raw <= 0:
+            free_raw = float(bal.get("free", 0.0) or 0.0)
+    try:
+        free = float(free_raw)
+    except Exception:
+        free = 0.0
+    if free <= 0:
+        return 0.0
+
+    max_notional = free * float(leverage) * 0.95
+    if max_notional < min_notional:
+        return 0.0
+
+    safe_price = max(float(price or 0.0), 1e-12)
+    max_amount = max_notional / safe_price
+    _, max_amount = _price_qty_to_precision(exchange, symbol, price=None, amount=max_amount)
+    try:
+        return float(max_amount)
+    except Exception:
+        return 0.0
+
+
 def _adjust_qty_for_margin(
     exchange,
     symbol: str,
@@ -2878,6 +2921,30 @@ def run_trade(
     if qty * price > max_notional:
         qty = max_notional / price
     qty = float(exchange.amount_to_precision(symbol, qty))
+
+    try:
+        leverage_int = int(float(lev))
+    except Exception:
+        leverage_int = int(LEVERAGE)
+    leverage_int = max(leverage_int, 1)
+    affordable_qty = _max_affordable_amount(
+        exchange,
+        symbol,
+        side,
+        leverage_int,
+        price,
+        MIN_NOTIONAL,
+    )
+    if affordable_qty <= 0:
+        logging.warning("order | %s | skipped: insufficient balance for entry", symbol)
+        log_decision(symbol, "insufficient_balance")
+        return False
+    qty = min(qty, affordable_qty)
+    qty = float(exchange.amount_to_precision(symbol, qty))
+    if qty <= 0:
+        logging.warning("order | %s | skipped: insufficient balance for entry", symbol)
+        log_decision(symbol, "insufficient_balance")
+        return False
 
     adjusted_qty, margin_reason = _adjust_qty_for_margin(
         exchange,
