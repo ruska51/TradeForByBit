@@ -124,6 +124,47 @@ def _price_qty_to_precision(ex, symbol, price=None, amount=None):
     return price, amount
 
 
+def _min_step_qty(ex, symbol: str) -> tuple[float, float]:
+    """Return market ``(min_qty, step_qty)``; ``0.0`` when unavailable."""
+
+    try:
+        market = ex.market(symbol)
+    except Exception:
+        market = None
+
+    info = (market or {}).get("info") or {}
+    lot = (info.get("lotSizeFilter") or {}) if isinstance(info, dict) else {}
+
+    try:
+        min_qty = float(lot.get("minOrderQty") or lot.get("minQty") or 0)
+    except Exception:
+        min_qty = 0.0
+    try:
+        step = float(lot.get("qtyStep") or 0)
+    except Exception:
+        step = 0.0
+
+    if step <= 0:
+        precision = (market or {}).get("precision") or {}
+        try:
+            step = float(precision.get("amount") or 0)
+        except Exception:
+            step = 0.0
+
+    return (max(min_qty, 0.0), max(step, 0.0))
+
+
+def _round_qty(ex, symbol: str, qty: float) -> float:
+    """Return *qty* rounded to precision and raised to ``min_qty`` when needed."""
+
+    _, adjusted = _price_qty_to_precision(ex, symbol, price=None, amount=qty)
+    min_qty, _step = _min_step_qty(ex, symbol)
+    if min_qty and (adjusted or 0) < min_qty:
+        adjusted = min_qty
+    _, adjusted = _price_qty_to_precision(ex, symbol, price=None, amount=adjusted)
+    return float(adjusted or 0.0)
+
+
 def _clean_params(d: dict | None) -> dict | None:
     """Return a copy of *d* without ``None`` or blank-string values."""
 
@@ -2250,11 +2291,17 @@ def place_conditional_exit(
 ):
     """Place a Bybit conditional exit order (stop or take-profit)."""
 
-    base_params = {"category": "linear", "reduceOnly": True, "closeOnTrigger": True}
-    base_params, category = _with_bybit_order_params(exchange, symbol, base_params)
-    category = category or str((base_params or {}).get("category") or "linear").lower()
+    params = {
+        "category": "linear",
+        "reduceOnly": True,
+        "closeOnTrigger": True,
+        "tpSlMode": "Full",
+        "positionIdx": 0,
+    }
+    params, category = _with_bybit_order_params(exchange, symbol, params)
+    category = (category or (params or {}).get("category") or "linear")
+    category = str(category or "linear").lower()
     symbol_normalized = _normalize_bybit_symbol(exchange, symbol, category)
-    base_params = _clean_params(base_params)
 
     try:
         ticker = exchange.fetch_ticker(symbol_normalized)
@@ -2269,7 +2316,7 @@ def place_conditional_exit(
                 continue
             try:
                 value = float(raw)
-            except (TypeError, ValueError):
+            except Exception:
                 continue
             if math.isfinite(value) and value > 0:
                 last = value
@@ -2278,17 +2325,17 @@ def place_conditional_exit(
     if last is None:
         try:
             last = float(base_price)
-        except (TypeError, ValueError):
+        except Exception:
             last = 0.0
 
     try:
         base_value = float(base_price)
-    except (TypeError, ValueError):
+    except Exception:
         base_value = last
 
     try:
         pct_value = abs(float(pct))
-    except (TypeError, ValueError):
+    except Exception:
         pct_value = 0.0
 
     trigger_price, direction, side_to_send = _bybit_trigger_for_exit(
@@ -2298,105 +2345,98 @@ def place_conditional_exit(
         pct_value,
         is_tp=is_tp,
     )
-    trigger_price, _ = _price_qty_to_precision(exchange, symbol_normalized, price=trigger_price, amount=None)
+    trigger_price, _ = _price_qty_to_precision(
+        exchange, symbol_normalized, price=trigger_price, amount=None
+    )
+
+    pos_qty = _get_position_size(exchange, symbol_normalized, category or "linear")
+    if pos_qty <= 0:
+        for _ in range(2):
+            time.sleep(0.15)
+            pos_qty = _get_position_size(exchange, symbol_normalized, category or "linear")
+            if pos_qty > 0:
+                break
+    if pos_qty <= 0:
+        return None, f"exit skipped: no position size for {symbol_normalized}"
+
+    amount_to_send = _round_qty(exchange, symbol_normalized, pos_qty)
+    if amount_to_send <= 0:
+        return None, f"exit skipped: rounded qty=0 for {symbol_normalized}"
 
     try:
         open_orders = exchange.fetch_open_orders(
             symbol_normalized,
             params={"category": category, "orderFilter": "StopOrder"},
         )
-        if isinstance(open_orders, list) and len(open_orders) > 3:
-            for o in open_orders[3:]:
+        if isinstance(open_orders, list) and len(open_orders) > 2:
+            for order in open_orders[2:]:
                 try:
-                    exchange.cancel_order(o.get("id"), symbol_normalized, {"category": category})
+                    exchange.cancel_order(order.get("id"), symbol_normalized, {"category": category})
                 except Exception:
-                    continue
+                    pass
     except Exception:
         pass
 
-    conditional = {
-        "category": category or "linear",
-        "orderType": "Market",
-        "triggerPrice": trigger_price,
-        "triggerDirection": direction,
-        "triggerBy": "LastPrice",
-        "reduceOnly": True,
-        "closeOnTrigger": True,
-        "tpSlMode": "Full",
-        "positionIdx": 0,
-    }
-    base_cond = _clean_params(conditional) or {}
-
-    pos_qty = _get_position_size(exchange, symbol, category or "linear")
-
-    def _submit(amount_value, params_dict):
-        sanitized = _clean_params(params_dict) or {}
-        call_params, call_category = _with_bybit_order_params(exchange, symbol, sanitized)
-        call_params = _clean_params(call_params)
-        call_symbol = _normalize_bybit_symbol(exchange, symbol, call_category)
-        return exchange.create_order(call_symbol, "market", side_to_send, amount_value, None, call_params)
-
-    def _prepare_submission(qty_value: float) -> tuple[float | None, dict]:
-        params_local = dict(base_cond)
-        amount_local: float | None = None
-        if qty_value and qty_value > 0:
-            try:
-                amount_local = float(exchange.amount_to_precision(symbol_normalized, qty_value))
-            except Exception:
-                try:
-                    amount_local = float(qty_value)
-                except Exception:
-                    amount_local = None
-            if amount_local is not None and amount_local <= 0:
-                amount_local = None
-        if amount_local is None:
-            params_local["closePosition"] = True
-        else:
-            params_local.pop("closePosition", None)
-        return amount_local, params_local
-
-    amount_value, cond_params = _prepare_submission(pos_qty)
-
-    order = None
-    last_exc: Exception | None = None
+    cond = _clean_params(
+        {
+            "category": category or "linear",
+            "orderType": "Market",
+            "triggerPrice": float(trigger_price or 0.0),
+            "triggerDirection": direction,
+            "triggerBy": "LastPrice",
+            "reduceOnly": True,
+            "closeOnTrigger": True,
+            "tpSlMode": "Full",
+            "positionIdx": 0,
+        }
+    )
 
     try:
-        order = _submit(amount_value, cond_params)
+        order = exchange.create_order(
+            symbol_normalized,
+            "market",
+            side_to_send,
+            amount_to_send,
+            None,
+            cond,
+        )
     except Exception as exc:
-        last_exc = exc
         msg = str(getattr(exc, "args", [""])[0])
-        if isinstance(msg, str) and "qty is required" in msg.lower():
-            pos_qty = max(pos_qty, _get_position_size(exchange, symbol, category or "linear"))
-            amount_value, cond_params = _prepare_submission(pos_qty)
+        if isinstance(msg, str) and (
+            "Rising" in msg
+            or "Falling" in msg
+            or "should lower" in msg
+            or "should higher" in msg
+        ):
+            adjust = 0.002
             try:
-                order = _submit(amount_value, cond_params)
-                last_exc = None
-            except Exception as retry_exc:
-                last_exc = retry_exc
-
-    if order is None:
-        err = last_exc
-        adjust = 0.002
-        try:
+                last2 = float((exchange.fetch_ticker(symbol_normalized) or {}).get("last") or last)
+            except Exception:
+                last2 = last
             if direction == "ascending":
-                retry_price = max(trigger_price, last * (1 + adjust))
+                adj_price = max(trigger_price, last2 * (1 + adjust))
             else:
-                retry_price = min(trigger_price, last * (1 - adjust))
-            retry_price, _ = _price_qty_to_precision(
-                exchange,
-                symbol_normalized,
-                price=retry_price,
-                amount=None,
-            )
-            retry_params = dict(base_cond)
-            retry_params["triggerPrice"] = retry_price
-            if amount_value is None:
-                retry_params["closePosition"] = True
-            else:
-                retry_params.pop("closePosition", None)
-            order = _submit(amount_value, retry_params)
-        except Exception as final_exc:
-            return None, str(final_exc or err or "order_failed")
+                adj_price = min(trigger_price, last2 * (1 - adjust))
+            try:
+                adj_price = float(exchange.price_to_precision(symbol_normalized, adj_price))
+            except Exception:
+                adj_price = float(adj_price)
+            if cond is None:
+                cond = {}
+            cond["triggerPrice"] = adj_price
+            try:
+                order = exchange.create_order(
+                    symbol_normalized,
+                    "market",
+                    side_to_send,
+                    amount_to_send,
+                    None,
+                    cond,
+                )
+            except Exception as final_exc:
+                return None, str(final_exc or exc)
+        else:
+            return None, str(exc)
 
     if isinstance(order, dict):
         order_id = order.get("id") or order.get("orderId")

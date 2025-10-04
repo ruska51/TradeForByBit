@@ -1193,6 +1193,7 @@ def load_optuna_study(path: str = OPTUNA_STUDY_FILE) -> optuna.study.Study | Non
 # === Inactivity tracking ===
 symbol_activity: Dict[str, datetime] = {}
 open_trade_ctx: Dict[str, Dict[str, Any]] = {}
+_last_exit_qty: Dict[str, float] = {}
 exit_orders_fetch_guard: Dict[str, Dict[str, bool]] = {}
 fallback_cooldown: Dict[str, int] = {}
 tf_skip_counters: Dict[str, int] = defaultdict(int)
@@ -3822,9 +3823,10 @@ def place_protected_exit(
             is_tp=False,
         )
         if err:
-            message = f"order | {symbol} | stop order rejected: {err}"
-            log_once(logging, "error", message)
-            record_error(symbol, f"failed to set {order_type}")
+            if not str(err).lower().startswith("exit skipped"):
+                message = f"order | {symbol} | stop order rejected: {err}"
+                log_once(logging, "error", message)
+                record_error(symbol, f"failed to set {order_type}")
             return None
         logging.info("order | %s | %s placed", symbol, order_type)
         return order_id
@@ -3854,8 +3856,9 @@ def place_protected_exit(
     )
 
     if err:
-        log_once(logging, "error", f"order | {symbol} | take-profit rejected: {err}")
-        record_error(symbol, f"failed to set {order_type}")
+        if not str(err).lower().startswith("exit skipped"):
+            log_once(logging, "error", f"order | {symbol} | take-profit rejected: {err}")
+            record_error(symbol, f"failed to set {order_type}")
         return None
 
     logging.info("order | %s | %s placed qty=%s price=%s", symbol, order_type, qty, tp_price)
@@ -4004,6 +4007,35 @@ def ensure_exit_orders(
     if not need_sl and not need_tp:
         return
 
+    cat = detect_market_category(exchange_obj, symbol) or "linear"
+    norm_symbol = _normalize_bybit_symbol(exchange_obj, symbol, cat)
+    pos_qty = logging_utils._get_position_size(exchange_obj, norm_symbol, cat)
+
+    if pos_qty <= 0:
+        for _ in range(3):
+            time.sleep(0.2)
+            pos_qty = logging_utils._get_position_size(exchange_obj, norm_symbol, cat)
+            if pos_qty > 0:
+                break
+
+    if pos_qty <= 0:
+        _last_exit_qty.pop(symbol, None)
+        log_once(
+            logging,
+            "warning",
+            f"exit_guard | {symbol} | postpone exits: no position yet",
+        )
+        return
+
+    last_q = _last_exit_qty.get(symbol)
+    if last_q and abs(last_q - pos_qty) < 1e-12:
+        logging.info(
+            "exit_guard | %s | exits up-to-date (qty=%s), skip re-place",
+            symbol,
+            pos_qty,
+        )
+        return
+
     ctx = open_trade_ctx.get(symbol, {})
     try:
         entry_price = float(ctx.get("entry_price") or 0.0)
@@ -4042,7 +4074,12 @@ def ensure_exit_orders(
             placed_any = True
             ctx["sl_price"] = float(sl_price)
         elif err:
-            logging.warning("exit_guard | %s | stop order rejected: %s", symbol, err)
+            if not str(err).lower().startswith("exit skipped"):
+                log_once(
+                    logging,
+                    "warning",
+                    f"exit_guard | {symbol} | stop order rejected: {err}",
+                )
 
     if need_tp and tp_price is not None:
         tp_pct = _pct(tp_price, default=0.04)
@@ -4058,11 +4095,17 @@ def ensure_exit_orders(
             placed_any = True
             ctx["tp_price"] = float(tp_price)
         elif err:
-            logging.warning("exit_guard | %s | take-profit rejected: %s", symbol, err)
+            if not str(err).lower().startswith("exit skipped"):
+                log_once(
+                    logging,
+                    "warning",
+                    f"exit_guard | {symbol} | take-profit rejected: {err}",
+                )
 
     if placed_any:
         ctx["qty"] = float(qty_value)
         open_trade_ctx[symbol] = ctx
+        _last_exit_qty[symbol] = pos_qty
         msg_parts: list[str] = []
         if ctx.get("sl_price") is not None:
             msg_parts.append(f"sl={float(ctx['sl_price']):.6f}")
