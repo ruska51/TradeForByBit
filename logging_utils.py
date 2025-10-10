@@ -217,10 +217,14 @@ def enter_ensure_filled(
     prefer_limit: bool = True,
     slip_pct: float = 0.001,
     wait_fill_sec: float = 2.0,
-):
-    """Place an entry order and force-fill any remaining quantity with market."""
+) -> tuple[str | None, float]:
+    """Place an aggressive entry and complete any remainder with a market order."""
 
     norm = _normalize_bybit_symbol(ex, symbol, category)
+    qty_precise = _round_qty(ex, norm, qty)
+    if qty_precise <= 0:
+        return None, 0.0
+
     try:
         ticker = ex.fetch_ticker(norm)
     except Exception:
@@ -249,53 +253,65 @@ def enter_ensure_filled(
     if last <= 0:
         last = 1.0
 
-    price = last * (1 + slip_pct if str(side).lower() == "buy" else 1 - slip_pct)
-    price, qty_precise = _price_qty_to_precision(ex, norm, price=price, amount=qty)
-    qty_precise = _round_qty(ex, norm, qty_precise or qty)
+    limit_price = _aggressive_limit_price(side, last, pct=slip_pct)
+    limit_price, _ = _price_qty_to_precision(ex, norm, price=limit_price, amount=None)
 
-    params = _clean_params({
-        "category": category,
-        "reduceOnly": False,
-        "timeInForce": "IOC",
-    })
-    order_type = "limit" if prefer_limit else "market"
-    price_arg = price if order_type == "limit" else None
+    base_params = {"category": category, "reduceOnly": False}
+    order = None
+    order_id: str | None = None
+    filled_total = 0.0
 
-    order = ex.create_order(norm, order_type, side, qty_precise, price_arg, params)
-    order_id = order.get("id")
+    if prefer_limit and limit_price:
+        params = _clean_params({**base_params, "timeInForce": "IOC"})
+        order = ex.create_order(norm, "limit", side, qty_precise, limit_price, params)
+        if isinstance(order, dict):
+            order_id = order.get("id") or order.get("orderId")
+            filled_total = _filled_amount(order)
+    else:
+        params = _clean_params(base_params)
+        order = ex.create_order(norm, "market", side, qty_precise, None, params)
+        if isinstance(order, dict):
+            order_id = order.get("id") or order.get("orderId")
+            filled_total = _filled_amount(order) or qty_precise
+        return order_id, float(filled_total or 0.0)
 
-    filled = float(order.get("filled") or 0)
     start = time.time()
-    while time.time() - start < wait_fill_sec and filled < (qty_precise or 0):
+    while time.time() - start < wait_fill_sec and filled_total < qty_precise:
         time.sleep(0.15)
-        try:
-            state = ex.fetch_order(order_id, norm, params={"category": category})
-        except Exception:
-            break
+        state = _fetch_order_safe(ex, norm, order_id, category) if order_id else None
         if isinstance(state, dict):
-            try:
-                filled = float(state.get("filled") or filled)
-            except Exception:
-                filled = filled
+            filled_total = max(filled_total, _filled_amount(state))
+            status = str(state.get("status") or state.get("info", {}).get("orderStatus") or "").lower()
+            if status in {"canceled", "cancelled", "closed", "filled"}:
+                break
 
-    remainder = max((qty_precise or 0.0) - filled, 0.0)
+    remainder = max(qty_precise - filled_total, 0.0)
     _, remainder = _price_qty_to_precision(ex, norm, price=None, amount=remainder)
     remainder = _round_qty(ex, norm, remainder or 0.0)
+
     if remainder > 0:
-        try:
-            ex.cancel_order(order_id, norm, {"category": category})
-        except Exception:
-            pass
-        ex.create_order(
+        if order_id:
+            try:
+                ex.cancel_order(order_id, norm, {"category": category})
+            except Exception:
+                pass
+        market_resp = ex.create_order(
             norm,
             "market",
             side,
             remainder,
             None,
-            {"category": category, "reduceOnly": False},
+            _clean_params(base_params),
         )
+        if isinstance(market_resp, dict):
+            filled_total += _filled_amount(market_resp)
 
-    return order_id
+    if order_id and filled_total <= 0:
+        state = _fetch_order_safe(ex, norm, order_id, category)
+        if isinstance(state, dict):
+            filled_total = max(filled_total, _filled_amount(state))
+
+    return order_id, float(filled_total)
 
 
 def _bybit_trigger_for_exit(
@@ -906,8 +922,7 @@ def has_open_position(exchange, symbol: str, category: str = "linear") -> tuple[
 
         qty_signed += qty_value
 
-    _, qty_abs = _price_qty_to_precision(exchange, norm_symbol, price=None, amount=abs(qty_signed))
-    qty_abs = float(qty_abs or 0.0)
+    qty_abs = _round_qty(exchange, norm_symbol, abs(qty_signed))
     if qty_signed < 0:
         qty_signed = -qty_abs
     else:
@@ -1528,18 +1543,7 @@ def log_decision(symbol: str, reason: str, *, decision: str = "skip", path: str 
             writer.writerow(["timestamp", "symbol", "signal", "reason"])
         writer.writerow([datetime.now(timezone.utc).isoformat(), symbol, decision, reason])
     msg = f"Skipped: {reason}" if decision == "skip" else reason
-    # Emit via both unified log helper and standard logging so that tests using
-    # ``caplog`` reliably capture the message even when custom handlers are
-    # installed during ``setup_logging``.
-    log(logging.INFO, decision, symbol, msg)
-    logging.getLogger().log(logging.INFO, msg)
-    for h in logging.getLogger().handlers:
-        stream = getattr(h, "stream", None)
-        if getattr(stream, "write", None) and hasattr(stream, "getvalue"):
-            try:
-                stream.write(msg + "\n")
-            except Exception:
-                pass
+    logging.getLogger().info("decision | %s | %s | %s", decision, symbol, msg)
     _info_status[symbol]["last_reason"] = reason
     emit_summary(symbol, reason)
 
@@ -2506,7 +2510,7 @@ def place_conditional_exit(
 
     _, pos_qty = has_open_position(exchange, symbol, category)
     if pos_qty <= 0:
-        raise RuntimeError(f"exit skipped: no position yet for {symbol}")
+        raise RuntimeError("exit skipped: no position yet")
 
     amount = _round_qty(exchange, norm, pos_qty)
     if amount <= 0:
