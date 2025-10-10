@@ -98,13 +98,10 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
         if normalized not in {"linear", "inverse", "option"}:
             normalized = "linear"
         category_hint = normalized or "linear"
-        params["category"] = category_hint
+        params["category"] = category_hint or "linear"
         params["buyLeverage"] = L
         params["sellLeverage"] = L
-        if category_hint in {"linear", "inverse"}:
-            params.setdefault("positionIdx", 0)
-        else:
-            params.pop("positionIdx", None)
+        params["positionIdx"] = 0
         try:
             norm_symbol = _normalize_bybit_symbol(exchange, symbol, category_hint)
         except Exception:
@@ -152,8 +149,9 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     if category_hint is None and is_bybit:
         category_hint = params.get("category") if params else None
 
-    if is_bybit and not category_hint:
-        params["category"] = "linear"
+    if is_bybit:
+        params.setdefault("category", category_hint or "linear")
+        params.setdefault("positionIdx", 0)
 
     try:
         if params:
@@ -184,9 +182,15 @@ def validate_api(exchange) -> None:
         sys.exit("API credentials missing or invalid; please update settings.")
 
     try:
-        exchange.fetch_balance({"category": "linear"})
+        exchange.fetch_balance({"type": "future"})
     except Exception as exc:
-        message = str(exc).lower()
+        raw_message = str(exc)
+        message = raw_message.lower()
+        code = getattr(exc, "code", None)
+        is_bybit = str(getattr(exchange, "id", "")).lower() == "bybit"
+        if is_bybit and (code == 10003 or "10003" in raw_message):
+            logging.error("adapter | Bybit rejected credentials with code 10003: %s", exc)
+            sys.exit("Bybit API key rejected (code 10003); please update credentials.")
         if "api key" in message and "invalid" in message:
             logging.error("adapter | API key is invalid: %s", exc)
             sys.exit("API key is invalid; please check credentials.")

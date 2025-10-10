@@ -1202,7 +1202,7 @@ _last_exit_qty: Dict[str, float] = {}
 exit_orders_fetch_guard: Dict[str, Dict[str, bool]] = {}
 fallback_cooldown: Dict[str, int] = {}
 tf_skip_counters: Dict[str, int] = defaultdict(int)
-_entry_guard: Dict[str, int] = {}
+_entry_guard: Dict[str, Dict[str, Any]] = {}
 TF_SKIP_THRESHOLD = 3
 
 
@@ -2913,27 +2913,24 @@ def run_trade(
     category = detect_market_category(exchange, symbol) or "linear"
     category = str(category or "linear")
     want_side = "buy" if signal == "long" else "sell"
-    qty_signed, qty_abs = has_open_position(exchange, symbol, category)
-    if qty_abs > 0:
-        if (want_side == "buy" and qty_signed > 0) or (want_side == "sell" and qty_signed < 0):
-            logging.info(
-                "entry | %s | skip: position already open (qty=%.4f)",
-                symbol,
-                qty_signed,
-            )
-        else:
-            logging.info(
-                "entry | %s | skip: opposite position exists (qty=%.4f)",
-                symbol,
-                qty_signed,
-            )
+    qty_signed, _ = has_open_position(exchange, symbol, category)
+    if abs(qty_signed) > 0:
+        logging.info(
+            "entry | %s | skip: position already open (qty=%.4f)",
+            symbol,
+            qty_signed,
+        )
+        log_decision(symbol, "position already open")
         return False
     if has_pending_entry(exchange, symbol, want_side, category):
-        logging.info("entry | %s | skip: pending %s order exists", symbol, want_side)
+        logging.info("entry | %s | skip: pending entry exists (%s)", symbol, want_side)
+        log_decision(symbol, "pending entry exists")
         return False
-    bar_id = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
-    if _entry_guard.get(symbol) == bar_id:
-        logging.info("entry | %s | skip: already handled this bar", symbol)
+    bar_id = int(time.time() // (5 * 60))
+    guard_state = _entry_guard.get(symbol) or {}
+    if guard_state.get("bar") == bar_id and guard_state.get("side") == want_side:
+        logging.info("entry | %s | skip: already entered this bar", symbol)
+        log_decision(symbol, "already entered this bar")
         return False
 
     lev = LEVERAGE if leverage is None else leverage
@@ -3054,7 +3051,7 @@ def run_trade(
         )
     )
     try:
-        order_id = enter_ensure_filled(
+        order_id, filled_qty = enter_ensure_filled(
             ADAPTER.x,
             symbol,
             want_side,
@@ -3068,10 +3065,10 @@ def run_trade(
         logging.warning("entry | %s | ensure_filled failed: %s", symbol, exc)
         log_decision(symbol, "order_failed")
         return False
-    if not order_id:
+    if not order_id or (filled_qty or 0.0) <= 0:
         log_decision(symbol, "order_failed")
         return False
-    _entry_guard[symbol] = bar_id
+    _entry_guard[symbol] = {"bar": bar_id, "side": want_side}
 
     entry_price = price
     try:
@@ -3097,7 +3094,7 @@ def run_trade(
         log_once(
             logging,
             "warning",
-            f"entry | {symbol} | filled order but position still absent; exits postponed",
+            f"entry | {symbol} | filled order but no position detected yet; exits postponed",
             window=60.0,
         )
         return False
@@ -3262,27 +3259,24 @@ def attempt_direct_market_entry(
 
     category = detect_market_category(ADAPTER.x, symbol) or "linear"
     category = str(category or "linear")
-    qty_signed, qty_abs = has_open_position(ADAPTER.x, symbol, category)
-    if qty_abs > 0:
-        if (side == "buy" and qty_signed > 0) or (side == "sell" and qty_signed < 0):
-            logging.info(
-                "entry | %s | skip: position already open (qty=%.4f)",
-                symbol,
-                qty_signed,
-            )
-        else:
-            logging.info(
-                "entry | %s | skip: opposite position exists (qty=%.4f)",
-                symbol,
-                qty_signed,
-            )
+    qty_signed, _ = has_open_position(ADAPTER.x, symbol, category)
+    if abs(qty_signed) > 0:
+        logging.info(
+            "entry | %s | skip: position already open (qty=%.4f)",
+            symbol,
+            qty_signed,
+        )
+        log_decision(symbol, "position already open")
         return False
     if has_pending_entry(ADAPTER.x, symbol, side, category):
-        logging.info("entry | %s | skip: pending %s order exists", symbol, side)
+        logging.info("entry | %s | skip: pending entry exists (%s)", symbol, side)
+        log_decision(symbol, "pending entry exists")
         return False
-    bar_id = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
-    if _entry_guard.get(symbol) == bar_id:
-        logging.info("entry | %s | skip: already handled this bar", symbol)
+    bar_id = int(time.time() // (5 * 60))
+    guard_state = _entry_guard.get(symbol) or {}
+    if guard_state.get("bar") == bar_id and guard_state.get("side") == side:
+        logging.info("entry | %s | skip: already entered this bar", symbol)
+        log_decision(symbol, "already entered this bar")
         return False
 
     balance = 0.0
@@ -3395,7 +3389,7 @@ def attempt_direct_market_entry(
         tp_price = float(tp_price_raw)
 
     try:
-        order_id = enter_ensure_filled(
+        order_id, filled_qty = enter_ensure_filled(
             ADAPTER.x,
             symbol,
             side,
@@ -3409,10 +3403,10 @@ def attempt_direct_market_entry(
         logging.warning("fallback trade | %s | ensure_filled failed: %s", symbol, exc)
         log_decision(symbol, "order_failed")
         return False
-    if not order_id:
+    if not order_id or (filled_qty or 0.0) <= 0:
         log_decision(symbol, "order_failed")
         return False
-    _entry_guard[symbol] = bar_id
+    _entry_guard[symbol] = {"bar": bar_id, "side": side}
 
     entry_price = last_price
     try:
@@ -3438,7 +3432,7 @@ def attempt_direct_market_entry(
         log_once(
             logging,
             "warning",
-            f"entry | {symbol} | filled order but position still absent; exits postponed",
+            f"entry | {symbol} | filled order but no position detected yet; exits postponed",
             window=60.0,
         )
         return False
