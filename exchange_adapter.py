@@ -7,6 +7,7 @@ import os
 import time
 import importlib
 import csv
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Callable
 
@@ -165,6 +166,34 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
         return None
 
 
+def validate_api(exchange) -> None:
+    """Validate API credentials and exit when Bybit rejects them."""
+
+    if exchange is None:
+        return
+
+    api_key = getattr(exchange, "apiKey", None)
+    secret = getattr(exchange, "secret", None)
+    if not api_key or not secret:
+        return
+
+    try:
+        exchange.check_required_credentials()
+    except Exception as exc:
+        logging.error("adapter | API credentials missing or invalid: %s", exc)
+        sys.exit("API credentials missing or invalid; please update settings.")
+
+    try:
+        exchange.fetch_balance({"category": "linear"})
+    except Exception as exc:
+        message = str(exc).lower()
+        if "api key" in message and "invalid" in message:
+            logging.error("adapter | API key is invalid: %s", exc)
+            sys.exit("API key is invalid; please check credentials.")
+        if "authentication" in message or "auth" in message:
+            logging.error("adapter | authentication failed during API validation: %s", exc)
+            sys.exit("API authentication failed; please verify credentials.")
+        logging.warning("adapter | API validation warning: %s", exc)
 def safe_fetch_closed_orders(exchange, symbol: str | None = None, limit: int = 50, params: dict | None = None):
     """Return closed orders without raising on failures."""
 
@@ -486,6 +515,7 @@ class ExchangeAdapter:
                 self.backend = "ccxt"
                 self.ccxt_id = name
                 self.markets_loaded_at = time.time()
+                validate_api(self.x)
                 logging.info("adapter | switched backend to ccxt:%s", name)
                 logging.info(
                     "adapter | backend=%s sandbox=%s futures=%s ccxt=%s markets=%s",

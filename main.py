@@ -120,6 +120,7 @@ from logging_utils import (
     enter_ensure_filled,
     wait_position_after_entry,
     has_pending_entry,
+    has_open_position,
     SOFT_ORDER_ERRORS,
     flush_symbol_logs,
     flush_cycle_logs,
@@ -1201,6 +1202,7 @@ _last_exit_qty: Dict[str, float] = {}
 exit_orders_fetch_guard: Dict[str, Dict[str, bool]] = {}
 fallback_cooldown: Dict[str, int] = {}
 tf_skip_counters: Dict[str, int] = defaultdict(int)
+_entry_guard: Dict[str, int] = {}
 TF_SKIP_THRESHOLD = 3
 
 
@@ -2803,6 +2805,52 @@ def _adjust_qty_for_margin(
     return None, "insufficient_balance"
 
 
+def _compute_entry_qty(
+    symbol: str,
+    side: str,
+    price: float,
+    leverage: int | float,
+    balance: float,
+    available_margin: float,
+    risk_factor: float,
+) -> float:
+    """Return order size limited by configured risk and available margin."""
+
+    if price <= 0:
+        return 0.0
+
+    qty = risk_management.compute_order_qty(
+        ADAPTER,
+        symbol,
+        side,
+        balance,
+        RISK_PER_TRADE * risk_factor,
+        price=price,
+    )
+    if qty is None or qty <= 0:
+        return 0.0
+
+    try:
+        lev_int = int(float(leverage))
+    except Exception:
+        lev_int = 1
+    lev_int = max(lev_int, 1)
+
+    effective_margin = available_margin if available_margin and available_margin > 0 else balance
+    if effective_margin <= 0:
+        return 0.0
+
+    qty_balance = (effective_margin * lev_int) / price
+    max_notional = balance * MAX_POSITION_PCT if balance > 0 else 0.0
+    if max_notional > 0:
+        qty_balance = min(qty_balance, max_notional / price)
+
+    if qty_balance > 0:
+        qty = min(qty, qty_balance)
+
+    return max(float(qty), 0.0)
+
+
 def run_trade(
     symbol: str,
     signal: str,
@@ -2862,6 +2910,32 @@ def run_trade(
         log(logging.ERROR, "trade", symbol, "unable to determine valid price; skipping order")
         log_decision(symbol, "price_unavailable")
         return False
+    category = detect_market_category(exchange, symbol) or "linear"
+    category = str(category or "linear")
+    want_side = "buy" if signal == "long" else "sell"
+    qty_signed, qty_abs = has_open_position(exchange, symbol, category)
+    if qty_abs > 0:
+        if (want_side == "buy" and qty_signed > 0) or (want_side == "sell" and qty_signed < 0):
+            logging.info(
+                "entry | %s | skip: position already open (qty=%.4f)",
+                symbol,
+                qty_signed,
+            )
+        else:
+            logging.info(
+                "entry | %s | skip: opposite position exists (qty=%.4f)",
+                symbol,
+                qty_signed,
+            )
+        return False
+    if has_pending_entry(exchange, symbol, want_side, category):
+        logging.info("entry | %s | skip: pending %s order exists", symbol, want_side)
+        return False
+    bar_id = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
+    if _entry_guard.get(symbol) == bar_id:
+        logging.info("entry | %s | skip: already handled this bar", symbol)
+        return False
+
     lev = LEVERAGE if leverage is None else leverage
     atr_val = safe_atr(df_trend["atr"] if "atr" in df_trend.columns else None, key=symbol) or 0.0
     if entry_ctx is None:
@@ -2871,7 +2945,6 @@ def run_trade(
     frees = balance_info.get("free") if isinstance(balance_info, dict) else None
     balance = float((totals or {}).get("USDT", 0.0))
     available_margin = float((frees or totals or {}).get("USDT", 0.0))
-    max_notional = balance * MAX_POSITION_PCT
     market = exchange.market(symbol)
     precision = market.get("precision", {}).get("amount", 0)
     precision_step = 1 / (10**precision) if precision else 1.0
@@ -2896,7 +2969,6 @@ def run_trade(
     sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
     tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
 
-    side = "buy" if signal == "long" else "sell"
     sizing_price = price
     if ticker is not None:
         for key in ("last", "close", "ask", "bid"):
@@ -2911,21 +2983,20 @@ def run_trade(
                 sizing_price = candidate
                 break
 
-    qty = risk_management.compute_order_qty(
-        ADAPTER,
+    symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
+    qty_target = _compute_entry_qty(
         symbol,
-        side,
+        want_side,
+        sizing_price,
+        lev,
         balance,
-        RISK_PER_TRADE * risk_factor,
-        price=sizing_price,
+        available_margin,
+        risk_factor,
     )
-    if qty is None:
-        log(logging.INFO, "trade", symbol, "qty too small; skipping order")
-        log_decision(symbol, "qty_below_min")
+    if qty_target <= 0:
+        logging.info("entry | %s | skip: qty_target too small", symbol)
+        log_decision(symbol, "qty_insufficient")
         return False
-    if qty * price > max_notional:
-        qty = max_notional / price
-    qty = float(exchange.amount_to_precision(symbol, qty))
 
     try:
         leverage_int = int(float(lev))
@@ -2935,7 +3006,7 @@ def run_trade(
     affordable_qty = _max_affordable_amount(
         exchange,
         symbol,
-        side,
+        want_side,
         leverage_int,
         price,
         MIN_NOTIONAL,
@@ -2944,17 +3015,18 @@ def run_trade(
         logging.warning("order | %s | skipped: insufficient balance for entry", symbol)
         log_decision(symbol, "insufficient_balance")
         return False
-    qty = min(qty, affordable_qty)
-    qty = float(exchange.amount_to_precision(symbol, qty))
-    if qty <= 0:
-        logging.warning("order | %s | skipped: insufficient balance for entry", symbol)
-        log_decision(symbol, "insufficient_balance")
+    qty_target = min(qty_target, affordable_qty)
+
+    qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
+    if qty_target <= 0:
+        logging.info("entry | %s | skip: qty_target too small after rounding", symbol)
+        log_decision(symbol, "qty_insufficient")
         return False
 
     adjusted_qty, margin_reason = _adjust_qty_for_margin(
         exchange,
         symbol,
-        qty,
+        qty_target,
         price,
         lev,
         available_margin,
@@ -2963,46 +3035,43 @@ def run_trade(
     if adjusted_qty is None:
         log_decision(symbol, margin_reason or "insufficient_balance")
         return False
-    qty = adjusted_qty
+    qty_target = adjusted_qty
 
-    # Respect maximum position size for current leverage if available
     max_pos_qty = get_max_position_qty(symbol, lev, price)
     if max_pos_qty:
-        qty = min(qty, max_pos_qty)
+        qty_target = min(qty_target, max_pos_qty)
 
-    category = detect_market_category(ADAPTER.x, symbol) or "linear"
-    category = str(category or "linear")
-    symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
-    qty = _round_qty(ADAPTER.x, symbol_norm, qty)
-    if qty <= 0:
-        logging.warning("order | %s | skipped: rounded qty=0", symbol)
+    qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
+    if qty_target <= 0:
+        logging.info("entry | %s | skip: qty_target too small", symbol)
         log_decision(symbol, "qty_insufficient")
-        return False
-
-    if has_pending_entry(ADAPTER.x, symbol, side, category):
-        logging.info("entry | %s | skip: pending entry exists", symbol)
         return False
 
     logging.info(
         colorize(
-            f"trade | {symbol} | Opening {side.upper()} position | qty={qty} | price={price}",
+            f"trade | {symbol} | Opening {want_side.upper()} position | qty={qty_target} | price={price}",
             "open",
         )
     )
-    order_id, filled_qty = enter_ensure_filled(
-        ADAPTER.x,
-        symbol,
-        side,
-        qty,
-        category=category,
-        prefer_limit=True,
-        slip_pct=0.001,
-        wait_fill_sec=2.0,
-        cancel_if_unfilled=True,
-    )
-    if not order_id or filled_qty <= 0:
+    try:
+        order_id = enter_ensure_filled(
+            ADAPTER.x,
+            symbol,
+            want_side,
+            qty_target,
+            category=category,
+            prefer_limit=True,
+            slip_pct=0.001,
+            wait_fill_sec=2.0,
+        )
+    except Exception as exc:
+        logging.warning("entry | %s | ensure_filled failed: %s", symbol, exc)
         log_decision(symbol, "order_failed")
         return False
+    if not order_id:
+        log_decision(symbol, "order_failed")
+        return False
+    _entry_guard[symbol] = bar_id
 
     entry_price = price
     try:
@@ -3024,13 +3093,12 @@ def run_trade(
                 break
 
     pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
-    if pos_qty <= 0 and filled_qty > 0:
-        pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=2.0)
     if pos_qty <= 0:
-        logging.warning(
-            "entry | %s | filled=%.8f but no position detected yet; exits postponed",
-            symbol,
-            filled_qty,
+        log_once(
+            logging,
+            "warning",
+            f"entry | {symbol} | filled order but position still absent; exits postponed",
+            window=60.0,
         )
         return False
 
@@ -3048,25 +3116,31 @@ def run_trade(
     if not tp_pct_eff or not math.isfinite(tp_pct_eff):
         tp_pct_eff = TP_PCT
 
-    sl_order_id, sl_err = place_conditional_exit(
-        ADAPTER.x,
-        symbol,
-        "buy" if want_long else "sell",
-        entry_price,
-        sl_pct_eff,
-        is_tp=False,
-    )
+    try:
+        sl_order_id, sl_err = place_conditional_exit(
+            ADAPTER.x,
+            symbol,
+            "buy" if want_long else "sell",
+            entry_price,
+            sl_pct_eff,
+            is_tp=False,
+        )
+    except RuntimeError as exc:
+        sl_order_id, sl_err = None, str(exc)
     if sl_err:
         log_once(logging, "warning", f"Failed to set SL for {symbol}: {sl_err}")
 
-    tp_order_id, tp_err = place_conditional_exit(
-        ADAPTER.x,
-        symbol,
-        "buy" if want_long else "sell",
-        entry_price,
-        tp_pct_eff,
-        is_tp=True,
-    )
+    try:
+        tp_order_id, tp_err = place_conditional_exit(
+            ADAPTER.x,
+            symbol,
+            "buy" if want_long else "sell",
+            entry_price,
+            tp_pct_eff,
+            is_tp=True,
+        )
+    except RuntimeError as exc:
+        tp_order_id, tp_err = None, str(exc)
     if tp_err:
         log_once(logging, "warning", f"Failed to set TP for {symbol}: {tp_err}")
 
@@ -3186,6 +3260,31 @@ def attempt_direct_market_entry(
         log_decision(symbol, "price_unavailable")
         return False
 
+    category = detect_market_category(ADAPTER.x, symbol) or "linear"
+    category = str(category or "linear")
+    qty_signed, qty_abs = has_open_position(ADAPTER.x, symbol, category)
+    if qty_abs > 0:
+        if (side == "buy" and qty_signed > 0) or (side == "sell" and qty_signed < 0):
+            logging.info(
+                "entry | %s | skip: position already open (qty=%.4f)",
+                symbol,
+                qty_signed,
+            )
+        else:
+            logging.info(
+                "entry | %s | skip: opposite position exists (qty=%.4f)",
+                symbol,
+                qty_signed,
+            )
+        return False
+    if has_pending_entry(ADAPTER.x, symbol, side, category):
+        logging.info("entry | %s | skip: pending %s order exists", symbol, side)
+        return False
+    bar_id = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
+    if _entry_guard.get(symbol) == bar_id:
+        logging.info("entry | %s | skip: already handled this bar", symbol)
+        return False
+
     balance = 0.0
     available_margin = 0.0
     try:
@@ -3205,31 +3304,42 @@ def attempt_direct_market_entry(
         ((market.get("limits") or {}).get("amount") or {}).get("min", 0.0) or 0.0
     )
 
-    qty = risk_management.compute_order_qty(
-        ADAPTER,
+    symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
+    qty_target = _compute_entry_qty(
         symbol,
         side,
+        last_price,
+        leverage,
         balance,
-        RISK_PER_TRADE * risk_factor,
-        price=last_price,
+        available_margin,
+        risk_factor,
     )
-    if qty is None or qty <= 0:
+    if qty_target <= 0:
         log_decision(symbol, "qty_insufficient")
         return False
 
-    max_notional = balance * MAX_POSITION_PCT
-    if max_notional and last_price:
-        qty = min(qty, max_notional / last_price)
+    affordable_qty = _max_affordable_amount(
+        exchange,
+        symbol,
+        side,
+        max(int(leverage or 1), 1),
+        last_price,
+        MIN_NOTIONAL,
+    )
+    if affordable_qty <= 0:
+        log_decision(symbol, "insufficient_balance")
+        return False
+    qty_target = min(qty_target, affordable_qty)
 
-    try:
-        qty = float(exchange.amount_to_precision(symbol, qty))
-    except Exception:
-        qty = float(qty)
+    qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
+    if qty_target <= 0:
+        log_decision(symbol, "qty_insufficient")
+        return False
 
     adjusted_qty, margin_reason = _adjust_qty_for_margin(
         exchange,
         symbol,
-        qty,
+        qty_target,
         last_price,
         leverage,
         available_margin,
@@ -3238,27 +3348,15 @@ def attempt_direct_market_entry(
     if adjusted_qty is None or adjusted_qty <= 0:
         log_decision(symbol, margin_reason or "insufficient_balance")
         return False
-    qty = adjusted_qty
+    qty_target = adjusted_qty
 
     max_pos_qty = get_max_position_qty(symbol, leverage, last_price)
     if max_pos_qty:
-        qty = min(qty, max_pos_qty)
+        qty_target = min(qty_target, max_pos_qty)
 
-    if qty <= 0:
+    qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
+    if qty_target <= 0:
         log_decision(symbol, "qty_insufficient")
-        return False
-
-
-    category = detect_market_category(ADAPTER.x, symbol) or "linear"
-    category = str(category or "linear")
-    symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
-    qty = _round_qty(ADAPTER.x, symbol_norm, qty)
-    if qty <= 0:
-        log_decision(symbol, "qty_insufficient")
-        return False
-
-    if has_pending_entry(ADAPTER.x, symbol, side, category):
-        logging.info("entry | %s | skip: pending entry exists", symbol)
         return False
 
     precision = market.get("precision") or {}
@@ -3296,20 +3394,25 @@ def attempt_direct_market_entry(
     except Exception:
         tp_price = float(tp_price_raw)
 
-    order_id, filled_qty = enter_ensure_filled(
-        ADAPTER.x,
-        symbol,
-        side,
-        qty,
-        category=category,
-        prefer_limit=True,
-        slip_pct=0.001,
-        wait_fill_sec=2.0,
-        cancel_if_unfilled=True,
-    )
-    if not order_id or filled_qty <= 0:
+    try:
+        order_id = enter_ensure_filled(
+            ADAPTER.x,
+            symbol,
+            side,
+            qty_target,
+            category=category,
+            prefer_limit=True,
+            slip_pct=0.001,
+            wait_fill_sec=2.0,
+        )
+    except Exception as exc:
+        logging.warning("fallback trade | %s | ensure_filled failed: %s", symbol, exc)
         log_decision(symbol, "order_failed")
         return False
+    if not order_id:
+        log_decision(symbol, "order_failed")
+        return False
+    _entry_guard[symbol] = bar_id
 
     entry_price = last_price
     try:
@@ -3331,13 +3434,12 @@ def attempt_direct_market_entry(
                 break
 
     pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
-    if pos_qty <= 0 and filled_qty > 0:
-        pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=2.0)
     if pos_qty <= 0:
-        logging.warning(
-            "entry | %s | filled=%.8f but no position detected yet; exits postponed",
-            symbol,
-            filled_qty,
+        log_once(
+            logging,
+            "warning",
+            f"entry | {symbol} | filled order but position still absent; exits postponed",
+            window=60.0,
         )
         return False
 
@@ -3355,25 +3457,31 @@ def attempt_direct_market_entry(
     if not tp_pct_eff or not math.isfinite(tp_pct_eff):
         tp_pct_eff = TP_PCT
 
-    sl_order_id, sl_err = place_conditional_exit(
-        ADAPTER.x,
-        symbol,
-        "buy" if want_long else "sell",
-        entry_price,
-        sl_pct_eff,
-        is_tp=False,
-    )
+    try:
+        sl_order_id, sl_err = place_conditional_exit(
+            ADAPTER.x,
+            symbol,
+            "buy" if want_long else "sell",
+            entry_price,
+            sl_pct_eff,
+            is_tp=False,
+        )
+    except RuntimeError as exc:
+        sl_order_id, sl_err = None, str(exc)
     if sl_err:
         log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set SL: {sl_err}")
 
-    tp_order_id, tp_err = place_conditional_exit(
-        ADAPTER.x,
-        symbol,
-        "buy" if want_long else "sell",
-        entry_price,
-        tp_pct_eff,
-        is_tp=True,
-    )
+    try:
+        tp_order_id, tp_err = place_conditional_exit(
+            ADAPTER.x,
+            symbol,
+            "buy" if want_long else "sell",
+            entry_price,
+            tp_pct_eff,
+            is_tp=True,
+        )
+    except RuntimeError as exc:
+        tp_order_id, tp_err = None, str(exc)
     if tp_err:
         log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set TP: {tp_err}")
 
@@ -4024,6 +4132,7 @@ def ensure_exit_orders(
             logging,
             "warning",
             f"exit_guard | {symbol} | postpone exits: no position yet",
+            window=60.0,
         )
         return
 
