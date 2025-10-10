@@ -3114,7 +3114,7 @@ def run_trade(
         tp_pct_eff = TP_PCT
 
     try:
-        sl_order_id, sl_err = place_conditional_exit(
+        _, err = place_conditional_exit(
             ADAPTER.x,
             symbol,
             "buy" if want_long else "sell",
@@ -3122,13 +3122,15 @@ def run_trade(
             sl_pct_eff,
             is_tp=False,
         )
+        if err:
+            log_once(logging, "warning", f"Failed to set SL for {symbol}: {err}")
     except RuntimeError as exc:
-        sl_order_id, sl_err = None, str(exc)
-    if sl_err:
-        log_once(logging, "warning", f"Failed to set SL for {symbol}: {sl_err}")
+        log_once(logging, "warning", f"Failed to set SL for {symbol}: {exc}")
+    except Exception as exc:
+        log_once(logging, "warning", f"Failed to set SL for {symbol}: {exc}")
 
     try:
-        tp_order_id, tp_err = place_conditional_exit(
+        _, err = place_conditional_exit(
             ADAPTER.x,
             symbol,
             "buy" if want_long else "sell",
@@ -3136,10 +3138,12 @@ def run_trade(
             tp_pct_eff,
             is_tp=True,
         )
+        if err:
+            log_once(logging, "warning", f"Failed to set TP for {symbol}: {err}")
     except RuntimeError as exc:
-        tp_order_id, tp_err = None, str(exc)
-    if tp_err:
-        log_once(logging, "warning", f"Failed to set TP for {symbol}: {tp_err}")
+        log_once(logging, "warning", f"Failed to set TP for {symbol}: {exc}")
+    except Exception as exc:
+        log_once(logging, "warning", f"Failed to set TP for {symbol}: {exc}")
 
     qty = float(pos_qty)
 
@@ -3452,7 +3456,7 @@ def attempt_direct_market_entry(
         tp_pct_eff = TP_PCT
 
     try:
-        sl_order_id, sl_err = place_conditional_exit(
+        _, err = place_conditional_exit(
             ADAPTER.x,
             symbol,
             "buy" if want_long else "sell",
@@ -3460,13 +3464,15 @@ def attempt_direct_market_entry(
             sl_pct_eff,
             is_tp=False,
         )
+        if err:
+            log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set SL: {err}")
     except RuntimeError as exc:
-        sl_order_id, sl_err = None, str(exc)
-    if sl_err:
-        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set SL: {sl_err}")
+        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
+    except Exception as exc:
+        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
 
     try:
-        tp_order_id, tp_err = place_conditional_exit(
+        _, err = place_conditional_exit(
             ADAPTER.x,
             symbol,
             "buy" if want_long else "sell",
@@ -3474,10 +3480,12 @@ def attempt_direct_market_entry(
             tp_pct_eff,
             is_tp=True,
         )
+        if err:
+            log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set TP: {err}")
     except RuntimeError as exc:
-        tp_order_id, tp_err = None, str(exc)
-    if tp_err:
-        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set TP: {tp_err}")
+        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
+    except Exception as exc:
+        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
 
     qty = float(pos_qty)
 
@@ -3916,14 +3924,26 @@ def place_protected_exit(
         except (TypeError, ValueError):
             base_value = stop_prec
         sl_pct = _pct(stop_prec, 0.02)
-        order_id, err = place_conditional_exit(
-            exchange,
-            symbol,
-            position_side,
-            base_value or stop_prec,
-            sl_pct,
-            is_tp=False,
-        )
+        try:
+            order_id, err = place_conditional_exit(
+                exchange,
+                symbol,
+                position_side,
+                base_value or stop_prec,
+                sl_pct,
+                is_tp=False,
+            )
+        except RuntimeError as exc:
+            if not str(exc).lower().startswith("exit skipped"):
+                message = f"order | {symbol} | stop order rejected: {exc}"
+                log_once(logging, "error", message)
+                record_error(symbol, f"failed to set {order_type}")
+            return None
+        except Exception as exc:
+            message = f"order | {symbol} | stop order rejected: {exc}"
+            log_once(logging, "error", message)
+            record_error(symbol, f"failed to set {order_type}")
+            return None
         if err:
             if not str(err).lower().startswith("exit skipped"):
                 message = f"order | {symbol} | stop order rejected: {err}"
@@ -3948,15 +3968,24 @@ def place_protected_exit(
         base_tp = tp_price
     tp_pct = _pct(tp_price, 0.04)
 
-    order_id, err = place_conditional_exit(
-        exchange,
-        symbol,
-        position_side,
-        base_tp or tp_price,
-        tp_pct,
-        is_tp=True,
-    )
-
+    try:
+        order_id, err = place_conditional_exit(
+            exchange,
+            symbol,
+            position_side,
+            base_tp or tp_price,
+            tp_pct,
+            is_tp=True,
+        )
+    except RuntimeError as exc:
+        if not str(exc).lower().startswith("exit skipped"):
+            log_once(logging, "error", f"order | {symbol} | take-profit rejected: {exc}")
+            record_error(symbol, f"failed to set {order_type}")
+        return None
+    except Exception as exc:
+        log_once(logging, "error", f"order | {symbol} | take-profit rejected: {exc}")
+        record_error(symbol, f"failed to set {order_type}")
+        return None
     if err:
         if not str(err).lower().startswith("exit skipped"):
             log_once(logging, "error", f"order | {symbol} | take-profit rejected: {err}")
@@ -4165,45 +4194,73 @@ def ensure_exit_orders(
 
     if need_sl and sl_price is not None:
         sl_pct = _pct(sl_price)
-        order_id, err = place_conditional_exit(
-            exchange_obj,
-            symbol,
-            side_open,
-            sl_base,
-            sl_pct,
-            is_tp=False,
-        )
-        if order_id and not err:
-            placed_any = True
-            ctx["sl_price"] = float(sl_price)
-        elif err:
-            if not str(err).lower().startswith("exit skipped"):
+        try:
+            order_id, err = place_conditional_exit(
+                exchange_obj,
+                symbol,
+                side_open,
+                sl_base,
+                sl_pct,
+                is_tp=False,
+            )
+        except RuntimeError as exc:
+            if not str(exc).lower().startswith("exit skipped"):
+                log_once(
+                    logging,
+                    "warning",
+                    f"exit_guard | {symbol} | stop order rejected: {exc}",
+                )
+        except Exception as exc:
+            log_once(
+                logging,
+                "warning",
+                f"exit_guard | {symbol} | stop order rejected: {exc}",
+            )
+        else:
+            if err and not str(err).lower().startswith("exit skipped"):
                 log_once(
                     logging,
                     "warning",
                     f"exit_guard | {symbol} | stop order rejected: {err}",
                 )
+            elif order_id:
+                placed_any = True
+                ctx["sl_price"] = float(sl_price)
 
     if need_tp and tp_price is not None:
         tp_pct = _pct(tp_price, default=0.04)
-        order_id, err = place_conditional_exit(
-            exchange_obj,
-            symbol,
-            side_open,
-            tp_base,
-            tp_pct,
-            is_tp=True,
-        )
-        if order_id and not err:
-            placed_any = True
-            ctx["tp_price"] = float(tp_price)
-        elif err:
-            if not str(err).lower().startswith("exit skipped"):
+        try:
+            order_id, err = place_conditional_exit(
+                exchange_obj,
+                symbol,
+                side_open,
+                tp_base,
+                tp_pct,
+                is_tp=True,
+            )
+        except RuntimeError as exc:
+            if not str(exc).lower().startswith("exit skipped"):
+                log_once(
+                    logging,
+                    "warning",
+                    f"exit_guard | {symbol} | take-profit rejected: {exc}",
+                )
+        except Exception as exc:
+            log_once(
+                logging,
+                "warning",
+                f"exit_guard | {symbol} | take-profit rejected: {exc}",
+            )
+        else:
+            if err and not str(err).lower().startswith("exit skipped"):
                 log_once(
                     logging,
                     "warning",
                     f"exit_guard | {symbol} | take-profit rejected: {err}",
                 )
+            elif order_id:
+                placed_any = True
+                ctx["tp_price"] = float(tp_price)
 
     if placed_any:
         ctx["qty"] = float(qty_value)
