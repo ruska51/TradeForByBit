@@ -180,33 +180,6 @@ def _clean_params(d: dict | None) -> dict | None:
     return out
 
 
-def _fetch_order_safe(ex, symbol, order_id, category="linear"):
-    try:
-        return ex.fetch_order(order_id, symbol, params={"category": category})
-    except Exception:
-        return None
-
-
-def _filled_amount(order) -> float:
-    if not order:
-        return 0.0
-    try:
-        f = float(order.get("filled") or 0)
-        return max(f, 0.0)
-    except Exception:
-        return 0.0
-
-
-def _remaining_amount(order, requested: float) -> float:
-    f = _filled_amount(order)
-    rem = max(requested - f, 0.0)
-    return rem
-
-
-def _aggressive_limit_price(side: str, last: float, pct: float = 0.001) -> float:
-    return last * (1 + pct) if side.lower() == "buy" else last * (1 - pct)
-
-
 def enter_ensure_filled(
     ex,
     symbol: str,
@@ -218,100 +191,76 @@ def enter_ensure_filled(
     slip_pct: float = 0.001,
     wait_fill_sec: float = 2.0,
 ) -> tuple[str | None, float]:
-    """Place an aggressive entry and complete any remainder with a market order."""
+    """Place an IOC limit (or market) entry and ensure it fills."""
 
     norm = _normalize_bybit_symbol(ex, symbol, category)
-    qty_precise = _round_qty(ex, norm, qty)
-    if qty_precise <= 0:
-        return None, 0.0
-
     try:
         ticker = ex.fetch_ticker(norm)
     except Exception:
         ticker = {}
 
-    last = 0.0
-    if isinstance(ticker, dict):
-        for key in ("last", "ask", "bid", "close"):
-            try:
-                candidate = float(ticker.get(key) or 0.0)
-            except Exception:
-                candidate = 0.0
-            if candidate > 0:
-                last = candidate
-                break
+    last = float(
+        (ticker or {}).get("last")
+        or (ticker or {}).get("ask")
+        or (ticker or {}).get("bid")
+        or (ticker or {}).get("close")
+        or 0.0
+    )
     if last <= 0 and isinstance(ticker, dict):
-        info = ticker.get("info") if isinstance(ticker.get("info"), dict) else {}
-        for key in ("lastPrice", "markPrice", "indexPrice", "price"):
-            try:
-                candidate = float(info.get(key) or 0.0)
-            except Exception:
-                candidate = 0.0
-            if candidate > 0:
-                last = candidate
-                break
+        info = ticker.get("info") or {}
+        try:
+            last = float(
+                info.get("lastPrice")
+                or info.get("markPrice")
+                or info.get("indexPrice")
+                or info.get("price")
+                or 0.0
+            )
+        except Exception:
+            last = 0.0
     if last <= 0:
         last = 1.0
 
-    limit_price = _aggressive_limit_price(side, last, pct=slip_pct)
-    limit_price, _ = _price_qty_to_precision(ex, norm, price=limit_price, amount=None)
+    price = last * (1 + slip_pct if side.lower() == "buy" else 1 - slip_pct)
+    price, qty = _price_qty_to_precision(ex, norm, price=price, amount=qty)
+    qty = _round_qty(ex, norm, float(qty or 0.0))
+    if qty <= 0:
+        return None, 0.0
 
-    base_params = {"category": category, "reduceOnly": False}
-    order = None
-    order_id: str | None = None
-    filled_total = 0.0
-
-    if prefer_limit and limit_price:
-        params = _clean_params({**base_params, "timeInForce": "IOC"})
-        order = ex.create_order(norm, "limit", side, qty_precise, limit_price, params)
-        if isinstance(order, dict):
-            order_id = order.get("id") or order.get("orderId")
-            filled_total = _filled_amount(order)
-    else:
-        params = _clean_params(base_params)
-        order = ex.create_order(norm, "market", side, qty_precise, None, params)
-        if isinstance(order, dict):
-            order_id = order.get("id") or order.get("orderId")
-            filled_total = _filled_amount(order) or qty_precise
-        return order_id, float(filled_total or 0.0)
-
-    start = time.time()
-    while time.time() - start < wait_fill_sec and filled_total < qty_precise:
+    params = {"category": category, "reduceOnly": False, "timeInForce": "IOC"}
+    order_type = "limit" if prefer_limit else "market"
+    price_arg = price if order_type == "limit" else None
+    order = ex.create_order(norm, order_type, side, qty, price_arg, params)
+    oid = order.get("id") if isinstance(order, dict) else None
+    filled = float(order.get("filled") or 0) if isinstance(order, dict) else 0.0
+    t0 = time.time()
+    while time.time() - t0 < wait_fill_sec and filled < qty:
         time.sleep(0.15)
-        state = _fetch_order_safe(ex, norm, order_id, category) if order_id else None
+        try:
+            state = ex.fetch_order(oid, norm, params={"category": category}) if oid else None
+        except Exception:
+            state = None
         if isinstance(state, dict):
-            filled_total = max(filled_total, _filled_amount(state))
+            try:
+                filled = float(state.get("filled") or filled)
+            except Exception:
+                pass
             status = str(state.get("status") or state.get("info", {}).get("orderStatus") or "").lower()
             if status in {"canceled", "cancelled", "closed", "filled"}:
                 break
 
-    remainder = max(qty_precise - filled_total, 0.0)
+    remainder = max(qty - filled, 0.0)
     _, remainder = _price_qty_to_precision(ex, norm, price=None, amount=remainder)
-    remainder = _round_qty(ex, norm, remainder or 0.0)
-
+    remainder = _round_qty(ex, norm, float(remainder or 0.0))
     if remainder > 0:
-        if order_id:
-            try:
-                ex.cancel_order(order_id, norm, {"category": category})
-            except Exception:
-                pass
-        market_resp = ex.create_order(
-            norm,
-            "market",
-            side,
-            remainder,
-            None,
-            _clean_params(base_params),
-        )
-        if isinstance(market_resp, dict):
-            filled_total += _filled_amount(market_resp)
-
-    if order_id and filled_total <= 0:
-        state = _fetch_order_safe(ex, norm, order_id, category)
-        if isinstance(state, dict):
-            filled_total = max(filled_total, _filled_amount(state))
-
-    return order_id, float(filled_total)
+        try:
+            if oid:
+                ex.cancel_order(oid, norm, {"category": category})
+        except Exception:
+            pass
+        ex.create_order(norm, "market", side, remainder, None, {"category": category, "reduceOnly": False})
+        filled = qty
+    return oid, float(filled)
 
 
 def _bybit_trigger_for_exit(
@@ -322,29 +271,26 @@ def _bybit_trigger_for_exit(
     *,
     is_tp: bool,
 ) -> tuple[float, str, str]:
-    """Return trigger price, direction and closing side for Bybit exits."""
-
-    min_off = 0.0015
-    side_norm = str(side_open or "").lower()
-    if side_norm == "buy":
+    min_off = 0.001  # 0.1 %
+    if side_open == 'buy':  # long
         if is_tp:
             trig = max(base_price * (1 + pct), last * (1 + min_off))
-            direction = "ascending"
-            side_to_send = "sell"
+            direction = 'ascending'
+            side_to_send = 'sell'
         else:
             trig = min(base_price * (1 - pct), last * (1 - min_off))
-            direction = "descending"
-            side_to_send = "sell"
-    else:
+            direction = 'descending'
+            side_to_send = 'sell'
+    else:  # short
         if is_tp:
             trig = min(base_price * (1 - pct), last * (1 - min_off))
-            direction = "descending"
-            side_to_send = "buy"
+            direction = 'descending'
+            side_to_send = 'buy'
         else:
             trig = max(base_price * (1 + pct), last * (1 + min_off))
-            direction = "ascending"
-            side_to_send = "buy"
-    return float(trig), direction, side_to_send
+            direction = 'ascending'
+            side_to_send = 'buy'
+    return trig, direction, side_to_send
 
 
 def normalize_bybit_category(value: str | None) -> str | None:
@@ -874,61 +820,43 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
     return symbol
 
 
-def has_open_position(exchange, symbol: str, category: str = "linear") -> tuple[float, float]:
-    """Return signed and absolute size of the open position for ``symbol``."""
+def has_open_position(ex, symbol: str, category: str = "linear") -> tuple[float, float]:
+    """Return the signed and absolute quantity of the open position."""
 
-    norm_symbol = _normalize_bybit_symbol(exchange, symbol, category)
-    base_norm = norm_symbol.replace(":USDT", "").replace(":USDC", "")
-
+    norm = _normalize_bybit_symbol(ex, symbol, category)
+    base_norm = norm.replace(":USDT", "").replace(":USDC", "")
     try:
-        pos_list = exchange.fetch_positions([norm_symbol], params={"category": category})
+        pos_list = ex.fetch_positions([norm], params={"category": category})
     except Exception:
         try:
-            pos_list = exchange.fetch_positions(params={"category": category})
+            pos_list = ex.fetch_positions(params={"category": category})
         except Exception:
             pos_list = []
-
     qty_signed = 0.0
-    for position in pos_list or []:
-        if not isinstance(position, dict):
+    for p in pos_list or []:
+        sym = str(p.get("symbol") or p.get("info", {}).get("symbol") or "")
+        sym_base = sym.replace(":USDT", "").replace(":USDC", "")
+        if sym != norm and sym_base != base_norm:
             continue
-        symbol_raw = str(
-            position.get("symbol")
-            or position.get("info", {}).get("symbol")
-            or ""
-        )
-        if not symbol_raw:
-            continue
-        symbol_base = symbol_raw.replace(":USDT", "").replace(":USDC", "")
-        if symbol_raw != norm_symbol and symbol_base != base_norm:
-            continue
-
-        qty = (
-            position.get("contracts")
-            or position.get("info", {}).get("size")
-            or position.get("info", {}).get("positionAmt")
+        q = (
+            p.get("contracts")
+            or p.get("info", {}).get("size")
+            or p.get("info", {}).get("positionAmt")
             or 0
         )
         try:
-            qty_value = float(qty)
+            q = float(q)
         except Exception:
-            qty_value = 0.0
-
-        side = (position.get("side") or position.get("info", {}).get("side") or "").lower()
-        if side in {"short", "sell"}:
-            qty_value = -abs(qty_value)
-        elif side in {"long", "buy"}:
-            qty_value = abs(qty_value)
-
-        qty_signed += qty_value
-
-    qty_abs = _round_qty(exchange, norm_symbol, abs(qty_signed))
-    if qty_signed < 0:
-        qty_signed = -qty_abs
-    else:
-        qty_signed = qty_abs if qty_signed > 0 else 0.0
-
-    return float(qty_signed), qty_abs
+            q = 0.0
+        side = (p.get("side") or p.get("info", {}).get("side") or "").lower()
+        if side in ("short", "sell"):
+            q = -abs(q)
+        elif side in ("long", "buy"):
+            q = abs(q)
+        qty_signed += q
+    _, qty_abs = _price_qty_to_precision(ex, norm, price=None, amount=abs(qty_signed))
+    qty_signed = qty_signed if qty_signed >= 0 else -qty_abs
+    return float(qty_signed), float(qty_abs)
 
 
 def _get_position_size(exchange, symbol: str, category: str = "linear") -> float:
@@ -2447,117 +2375,53 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
     return None, last_error or "order_failed"
 
 
-def place_conditional_exit(
-    exchange,
-    symbol: str,
-    side_open: str,
-    base_price: float,
-    pct: float,
-    *,
-    is_tp: bool,
-):
-    """Place a Bybit conditional exit order (stop or take-profit)."""
-
-    category = "linear"
-    norm = _normalize_bybit_symbol(exchange, symbol, category)
-
+def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, pct: float, *, is_tp: bool):
+    cat = "linear"
+    norm = _normalize_bybit_symbol(ex, symbol, cat)
     try:
-        ticker = exchange.fetch_ticker(norm)
+        ticker = ex.fetch_ticker(norm)
     except Exception:
         ticker = {}
-
-    last = None
-    if isinstance(ticker, dict):
-        for key in ("last", "bid", "ask", "close"):
-            value = ticker.get(key)
-            if value is None:
-                continue
-            try:
-                candidate = float(value)
-            except Exception:
-                continue
-            if candidate > 0:
-                last = candidate
-                break
-        if last is None and isinstance(ticker.get("info"), dict):
-            info = ticker["info"]
-            for key in ("lastPrice", "markPrice", "indexPrice", "price"):
-                value = info.get(key)
-                if value is None:
-                    continue
-                try:
-                    candidate = float(value)
-                except Exception:
-                    continue
-                if candidate > 0:
-                    last = candidate
-                    break
-
-    if last is None:
-        try:
-            last = float(base_price)
-        except Exception:
-            last = 0.0
-
-    trigger_price, direction, side_to_send = _bybit_trigger_for_exit(
-        side_open,
-        last,
-        float(base_price or last),
-        abs(float(pct or 0.0)),
-        is_tp=is_tp,
-    )
-    trigger_price, _ = _price_qty_to_precision(exchange, norm, price=trigger_price, amount=None)
-
-    _, pos_qty = has_open_position(exchange, symbol, category)
+    last = float((ticker or {}).get('last') or (ticker or {}).get('bid') or (ticker or {}).get('ask') or 0.0)
+    trig, direction, side_to_send = _bybit_trigger_for_exit(side_open, last, base_price, pct, is_tp=is_tp)
+    trig, _ = _price_qty_to_precision(ex, norm, price=trig, amount=None)
+    _, pos_qty = has_open_position(ex, norm, cat)
     if pos_qty <= 0:
-        raise RuntimeError("exit skipped: no position yet")
-
-    amount = _round_qty(exchange, norm, pos_qty)
-    if amount <= 0:
-        return None, f"exit skipped: rounded qty=0 for {symbol}"
-
+        raise RuntimeError(f"exit skipped: no position yet for {symbol}")
+    amount = _round_qty(ex, norm, pos_qty)
     try:
-        stops = exchange.fetch_open_orders(norm, params={"category": category, "orderFilter": "StopOrder"})
-        if isinstance(stops, list) and len(stops) > 2:
-            for extra in stops[2:]:
-                try:
-                    exchange.cancel_order(extra.get("id"), norm, {"category": category})
-                except Exception:
-                    pass
+        stops = ex.fetch_open_orders(norm, params={'category': cat, 'orderFilter': 'StopOrder'})
+        for o in stops[2:]:
+            ex.cancel_order(o['id'], norm, {'category': cat})
     except Exception:
         pass
-
-    params = _clean_params(
-        {
-            "category": category,
-            "orderType": "Market",
-            "triggerPrice": float(trigger_price or 0.0),
-            "triggerDirection": direction,
-            "triggerBy": "LastPrice",
-            "reduceOnly": True,
-            "closeOnTrigger": True,
-            "tpSlMode": "Full",
-            "positionIdx": 0,
-        }
-    )
-
+    params = {
+        'category': cat,
+        'orderType': 'Market',
+        'triggerPrice': float(trig),
+        'triggerDirection': direction,
+        'triggerBy': 'LastPrice',
+        'reduceOnly': True,
+        'closeOnTrigger': True,
+        'tpSlMode': 'Full',
+        'positionIdx': 0,
+    }
+    params = _clean_params(params)
     try:
-        order = exchange.create_order(norm, "market", side_to_send, amount, None, params)
+        resp = ex.create_order(norm, 'market', side_to_send, amount, None, params)
     except Exception as exc:
         return None, str(exc)
-
     order_id = None
-    if isinstance(order, dict):
-        order_id = order.get("id") or order.get("orderId")
-    if not order_id:
-        return None, "order_failed"
+    if isinstance(resp, dict):
+        order_id = resp.get('id') or resp.get('orderId')
     return order_id, None
 
 
-def wait_position_after_entry(ex, symbol: str, category="linear", timeout_sec=3.0):
+def wait_position_after_entry(ex, symbol: str, category: str = "linear", timeout_sec: float = 3.0) -> float:
+    norm = _normalize_bybit_symbol(ex, symbol, category)
     t0 = time.time()
     while time.time() - t0 < timeout_sec:
-        _, qabs = has_open_position(ex, symbol, category)
+        _, qabs = has_open_position(ex, norm, category)
         if qabs > 0:
             return qabs
         time.sleep(0.15)
@@ -2565,38 +2429,16 @@ def wait_position_after_entry(ex, symbol: str, category="linear", timeout_sec=3.
 
 
 def has_pending_entry(ex, symbol: str, side: str, category: str = "linear") -> bool:
-    symbol_norm = _normalize_bybit_symbol(ex, symbol, category)
+    norm = _normalize_bybit_symbol(ex, symbol, category)
     try:
-        open_orders = ex.fetch_open_orders(symbol_norm, params={"category": category})
+        opens = ex.fetch_open_orders(norm, params={"category": category})
     except Exception:
-        open_orders = []
-
-    side_norm = str(side or "").lower()
-    for order in open_orders or []:
-        if not isinstance(order, dict):
+        opens = []
+    side = side.lower()
+    for o in opens or []:
+        if str(o.get("reduceOnly")).lower() == "true":
             continue
-        reduce_only = str(order.get("reduceOnly")).lower() == "true"
-        if not reduce_only:
-            info = order.get("info") if isinstance(order.get("info"), dict) else {}
-            reduce_only = str(info.get("reduceOnly")).lower() == "true"
-        if reduce_only:
-            continue
-        current_side = (order.get("side") or "").lower()
-        if not current_side and isinstance(order.get("info"), dict):
-            current_side = str(order["info"].get("side") or "").lower()
-        if side_norm and current_side != side_norm:
-            continue
-        close_on_trigger = str(order.get("closeOnTrigger")).lower() == "true"
-        if not close_on_trigger and isinstance(order.get("info"), dict):
-            close_on_trigger = (
-                str(order["info"].get("closeOnTrigger")).lower() == "true"
-            )
-        if close_on_trigger:
-            continue
-        order_type = str(order.get("type") or "").lower()
-        if not order_type and isinstance(order.get("info"), dict):
-            order_type = str(order["info"].get("orderType") or "").lower()
-        if any(key in order_type for key in ("stop", "take", "tp", "conditional")):
+        if (o.get("side") or "").lower() != side:
             continue
         return True
     return False

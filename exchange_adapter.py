@@ -90,14 +90,19 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     norm_symbol = symbol
     category_hint: str | None = None
 
+    cat_for_call: str | None = None
+
     if is_bybit:
         detected_category = detect_market_category(exchange, symbol)
         normalized = normalize_bybit_category(detected_category) if detected_category else None
         if normalized == "spot":
             return LEVERAGE_SKIPPED
+        if normalized == "swap" or not normalized:
+            normalized = "linear"
         if normalized not in {"linear", "inverse", "option"}:
             normalized = "linear"
         category_hint = normalized or "linear"
+        cat_for_call = category_hint
         params["category"] = category_hint or "linear"
         params["buyLeverage"] = L
         params["sellLeverage"] = L
@@ -148,14 +153,24 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
 
     if category_hint is None and is_bybit:
         category_hint = params.get("category") if params else None
+    if cat_for_call is None:
+        cat_for_call = normalize_bybit_category(category_hint) if category_hint else None
+    if cat_for_call == "swap" or not cat_for_call:
+        cat_for_call = "linear"
 
     if is_bybit:
-        params.setdefault("category", category_hint or "linear")
-        params.setdefault("positionIdx", 0)
+        params_for_call: dict[str, Any] | None = {
+            "category": cat_for_call,
+            "buyLeverage": L,
+            "sellLeverage": L,
+            "positionIdx": 0,
+        }
+    else:
+        params_for_call = params or None
 
     try:
-        if params:
-            exchange.set_leverage(L, norm_symbol, params)
+        if params_for_call is not None:
+            exchange.set_leverage(L, norm_symbol, params_for_call)
         else:
             exchange.set_leverage(L, norm_symbol)
         return L
