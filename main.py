@@ -245,7 +245,6 @@ def append_csv(path: str, row: dict, fieldnames: list[str]) -> None:
 from exchange_adapter import (
     ExchangeAdapter,
     AdapterOHLCVUnavailable,
-    set_valid_leverage,
     safe_fetch_closed_orders,
 )
 from typing import Dict, Tuple
@@ -256,6 +255,8 @@ from logging_utils import (
     log_entry,  # не менять сигнатуру, возвращает trade_id
     log_exit_from_order,
     safe_fetch_balance,
+    safe_set_leverage,
+    detect_market_category,
 )
 from reporting import build_profit_report, build_equity_curve
 from risk_management import (
@@ -5501,7 +5502,18 @@ def run_bot():
         # === Дополнительная фильтрация по тренду и паттернам ===
         rsi_val = df_trend["rsi"].iloc[-1]
         if is_derivative_market:
-            set_valid_leverage(exchange, symbol, mode_lev)
+            leverage_category = detect_market_category(exchange, symbol)
+            normalized_leverage_category = (
+                str(leverage_category).lower() if leverage_category is not None else None
+            )
+            if normalized_leverage_category == "linear":
+                safe_set_leverage(exchange, symbol, mode_lev)
+            else:
+                logging.info(
+                    "leverage | %s | skip: market %s not linear",
+                    symbol,
+                    normalized_leverage_category or "unknown",
+                )
         else:
             logging.debug(
                 "leverage | %s | Skipping leverage setup for %s market",
@@ -5759,7 +5771,18 @@ def run_bot():
             trend_state = determine_trend(df_trend)
             fallback_leverage = LEVERAGE if is_derivative_market else 1
             if is_derivative_market:
-                set_valid_leverage(exchange, symbol, fallback_leverage)
+                leverage_category = detect_market_category(exchange, symbol)
+                normalized_leverage_category = (
+                    str(leverage_category).lower() if leverage_category is not None else None
+                )
+                if normalized_leverage_category == "linear":
+                    safe_set_leverage(exchange, symbol, fallback_leverage)
+                else:
+                    logging.info(
+                        "leverage | %s | skip: market %s not linear",
+                        symbol,
+                        normalized_leverage_category or "unknown",
+                    )
             else:
                 logging.debug(
                     "leverage | %s | Skipping leverage setup for %s market",
