@@ -15,7 +15,6 @@ from logging_utils import (
     log,
     normalize_bybit_category,
     detect_market_category,
-    _normalize_bybit_symbol,
 )
 
 
@@ -88,29 +87,46 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
 
     params: dict[str, Any] = {}
     norm_symbol = symbol
-    category_hint: str | None = None
 
-    cat_for_call: str | None = None
+    def _ccxt_symbol_for_leverage() -> str:
+        resolved = symbol
+        for source in (
+            getattr(exchange, "adapter", None),
+            exchange,
+        ):
+            converter = getattr(source, "_ccxt_symbol", None)
+            if callable(converter):
+                try:
+                    mapped = converter(symbol)
+                except Exception:
+                    mapped = None
+                if isinstance(mapped, str) and mapped:
+                    resolved = mapped
+                    break
+        if isinstance(resolved, str) and ":" in resolved:
+            resolved = resolved.split(":", 1)[0]
+        return resolved
 
     if is_bybit:
         detected_category = detect_market_category(exchange, symbol)
         normalized = normalize_bybit_category(detected_category) if detected_category else None
         if normalized == "spot":
             return LEVERAGE_SKIPPED
-        if normalized == "swap" or not normalized:
-            normalized = "linear"
-        if normalized not in {"linear", "inverse", "option"}:
-            normalized = "linear"
         category_hint = normalized or "linear"
-        cat_for_call = category_hint
-        params["category"] = category_hint or "linear"
-        params["buyLeverage"] = L
-        params["sellLeverage"] = L
-        params["positionIdx"] = 0
+        if category_hint in {"", "swap"}:
+            category_hint = "linear"
+        params = {
+            "category": category_hint,
+            "buyLeverage": L,
+            "sellLeverage": L,
+        }
+        norm_symbol = _ccxt_symbol_for_leverage()
         try:
-            norm_symbol = _normalize_bybit_symbol(exchange, symbol, category_hint)
-        except Exception:
-            norm_symbol = symbol
+            exchange.set_leverage(L, norm_symbol, params)
+            return L
+        except Exception as exc:
+            logging.info("leverage | %s | soft-skip: %s", symbol, exc)
+            return None
 
     market_meta: dict[str, Any] | None = None
     candidates: list[str] = []
@@ -151,22 +167,7 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
         if spot_hint and not derivative_hint:
             return LEVERAGE_SKIPPED
 
-    if category_hint is None and is_bybit:
-        category_hint = params.get("category") if params else None
-    if cat_for_call is None:
-        cat_for_call = normalize_bybit_category(category_hint) if category_hint else None
-    if cat_for_call == "swap" or not cat_for_call:
-        cat_for_call = "linear"
-
-    if is_bybit:
-        params_for_call: dict[str, Any] | None = {
-            "category": cat_for_call,
-            "buyLeverage": L,
-            "sellLeverage": L,
-            "positionIdx": 0,
-        }
-    else:
-        params_for_call = params or None
+    params_for_call = params or None
 
     try:
         if params_for_call is not None:

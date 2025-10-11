@@ -580,15 +580,27 @@ def detect_market_category(exchange, symbol: str) -> str | None:
     return category
 
 
-def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
+def _normalize_bybit_symbol(
+    exchange,
+    symbol: str,
+    category: str | None,
+    *,
+    for_leverage: bool = False,
+) -> str:
     """Return CCXT symbol matching the requested Bybit ``category``."""
 
     if not _is_bybit_exchange(exchange):
-        return symbol
+        return symbol.split(":", 1)[0] if for_leverage and ":" in symbol else symbol
 
     category_norm = str(category or "").lower()
     markets = getattr(exchange, "markets", {}) or {}
     markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
+
+    def _finalize(value: str | None) -> str:
+        result = value if isinstance(value, str) and value else symbol
+        if for_leverage and isinstance(result, str) and ":" in result:
+            return result.split(":", 1)[0]
+        return result
 
     def _derive_contract_symbol() -> str | None:
         if ":" in symbol:
@@ -610,7 +622,7 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
 
     derived_symbol = _derive_contract_symbol()
     if derived_symbol is not None:
-        return derived_symbol
+        return _finalize(derived_symbol)
 
     def _dict_prefers_linear(data: dict | None, *, _depth: int = 0) -> bool:
         if not isinstance(data, dict) or _depth > 2:
@@ -720,11 +732,11 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
     if not category_norm or category_norm == "spot":
         mapped = _mapped_symbol(current)
         if mapped and not prefers_linear:
-            return mapped
+            return _finalize(mapped)
         if symbol in markets:
             mapped = _mapped_symbol(markets.get(symbol))
             if mapped and not prefers_linear:
-                return mapped
+                return _finalize(mapped)
 
         base, quote = _extract_base_quote(current)
         if (not base or not quote) and "/" in symbol:
@@ -764,7 +776,7 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
                 if meta_category == "spot" or (
                     meta_category is None and meta.get("spot") is not False
                 ):
-                    return mapped_meta
+                    return _finalize(mapped_meta)
                 continue
             if meta_category in {None, "", "spot"} and preferred_spot is None:
                 preferred_spot = mapped_meta
@@ -774,14 +786,14 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
                 fallback_symbol = mapped_meta
 
         if category_norm == "spot":
-            return preferred_spot or symbol
+            return _finalize(preferred_spot)
         if prefers_linear and preferred_linear:
-            return preferred_linear
-        return preferred_spot or fallback_symbol or symbol
+            return _finalize(preferred_linear)
+        return _finalize(preferred_spot or fallback_symbol or symbol)
 
     mapped = _match_with_category(current)
     if mapped:
-        return mapped
+        return _finalize(mapped)
 
     base = quote = ""
     if isinstance(current, dict):
@@ -802,7 +814,7 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
                 continue
             mapped = _match_with_category(meta)
             if mapped:
-                return mapped
+                return _finalize(mapped)
 
     if "/" in symbol:
         base_raw, quote_raw = symbol.split("/", 1)
@@ -815,9 +827,9 @@ def _normalize_bybit_symbol(exchange, symbol: str, category: str | None) -> str:
             meta = markets.get(cand) or markets_by_id.get(cand)
             mapped = _match_with_category(meta)
             if mapped:
-                return mapped
+                return _finalize(mapped)
 
-    return symbol
+    return _finalize(symbol)
 
 
 def has_open_position(ex, symbol: str, category: str = "linear") -> tuple[float, float]:
