@@ -85,42 +85,38 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     exid = getattr(exchange, "id", "")
     is_bybit = str(exid).lower() == "bybit"
 
-    params: dict[str, Any] = {}
-    norm_symbol = symbol
-
-    def _ccxt_symbol_for_leverage() -> str:
-        resolved = symbol
+    def _short_ccxt_symbol(sym: str) -> str:
+        resolved = sym
         for source in (
             getattr(exchange, "adapter", None),
             exchange,
         ):
             converter = getattr(source, "_ccxt_symbol", None)
-            if callable(converter):
-                try:
-                    mapped = converter(symbol)
-                except Exception:
-                    mapped = None
-                if isinstance(mapped, str) and mapped:
-                    resolved = mapped
-                    break
+            if not callable(converter):
+                continue
+            try:
+                mapped = converter(sym)
+            except Exception:
+                mapped = None
+            if isinstance(mapped, str) and mapped:
+                resolved = mapped
+                break
         if isinstance(resolved, str) and ":" in resolved:
             resolved = resolved.split(":", 1)[0]
         return resolved
 
+    params: dict[str, Any] = {}
+    norm_symbol = _short_ccxt_symbol(symbol)
+
     if is_bybit:
-        detected_category = detect_market_category(exchange, symbol)
-        normalized = normalize_bybit_category(detected_category) if detected_category else None
+        detected = detect_market_category(exchange, symbol)
+        normalized = normalize_bybit_category(detected) if detected else None
         if normalized == "spot":
             return LEVERAGE_SKIPPED
-        category_hint = normalized or "linear"
-        if category_hint in {"", "swap"}:
-            category_hint = "linear"
-        params = {
-            "category": category_hint,
-            "buyLeverage": L,
-            "sellLeverage": L,
-        }
-        norm_symbol = _ccxt_symbol_for_leverage()
+        cat = normalized or "linear"
+        if cat in ("swap", "", None):
+            cat = "linear"
+        params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
         try:
             exchange.set_leverage(L, norm_symbol, params)
             return L
@@ -310,18 +306,18 @@ class ExchangeAdapter:
 
         ex = getattr(self, "x", None)
         if not symbol or not ex:
-            return symbol
+            return self._finalize_ccxt_symbol(symbol)
 
         markets = getattr(ex, "markets", {}) or {}
         if symbol in markets:
-            return symbol
+            return self._finalize_ccxt_symbol(symbol)
 
         try:
             market = ex.market(symbol)
             if isinstance(market, dict):
                 mapped = market.get("symbol")
                 if isinstance(mapped, str) and mapped in markets:
-                    return mapped
+                    return self._finalize_ccxt_symbol(mapped)
         except Exception:
             pass
 
@@ -329,7 +325,7 @@ class ExchangeAdapter:
             base, quote = symbol.split("/", 1)
             candidate = f"{base}/{quote}:{quote}"
             if candidate in markets:
-                return candidate
+                return self._finalize_ccxt_symbol(candidate)
 
         markets_by_id = getattr(ex, "markets_by_id", {}) or {}
         lookup = symbol.replace("/", "")
@@ -337,16 +333,31 @@ class ExchangeAdapter:
         if isinstance(market, dict):
             mapped = market.get("symbol") or market.get("info", {}).get("symbol")
             if isinstance(mapped, str):
-                return mapped
+                return self._finalize_ccxt_symbol(mapped)
         elif isinstance(market, str):
-            return market
+            return self._finalize_ccxt_symbol(market)
 
         if symbol.endswith(":USDT"):
             trimmed = symbol.split(":", 1)[0]
             if trimmed in markets:
-                return trimmed
+                return self._finalize_ccxt_symbol(trimmed)
 
-        return symbol
+        return self._finalize_ccxt_symbol(symbol)
+
+    def _finalize_ccxt_symbol(self, candidate: str) -> str:
+        """Return *candidate* without Bybit settle suffixes."""
+
+        resolved = candidate or ""
+        if ":" in resolved:
+            resolved = resolved.split(":", 1)[0]
+        if "/" not in resolved and len(resolved) > 4:
+            try:
+                converted = to_ccxt(resolved)
+            except Exception:
+                converted = None
+            if isinstance(converted, str) and converted:
+                resolved = converted
+        return resolved or candidate
 
     # ------------------------------------------------------------------
     def _detect_bybit_category(self, symbol: str) -> str | None:
