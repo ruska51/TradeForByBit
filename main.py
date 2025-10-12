@@ -5503,16 +5503,13 @@ def run_bot():
         rsi_val = df_trend["rsi"].iloc[-1]
         if is_derivative_market:
             leverage_category = detect_market_category(exchange, symbol)
-            normalized_leverage_category = (
-                str(leverage_category).lower() if leverage_category is not None else None
-            )
-            if normalized_leverage_category == "linear":
+            if str(leverage_category).lower() == "linear":
                 safe_set_leverage(exchange, symbol, mode_lev)
             else:
                 logging.info(
                     "leverage | %s | skip: market %s not linear",
                     symbol,
-                    normalized_leverage_category or "unknown",
+                    leverage_category or "unknown",
                 )
         else:
             logging.debug(
@@ -5772,16 +5769,13 @@ def run_bot():
             fallback_leverage = LEVERAGE if is_derivative_market else 1
             if is_derivative_market:
                 leverage_category = detect_market_category(exchange, symbol)
-                normalized_leverage_category = (
-                    str(leverage_category).lower() if leverage_category is not None else None
-                )
-                if normalized_leverage_category == "linear":
+                if str(leverage_category).lower() == "linear":
                     safe_set_leverage(exchange, symbol, fallback_leverage)
                 else:
                     logging.info(
                         "leverage | %s | skip: market %s not linear",
                         symbol,
-                        normalized_leverage_category or "unknown",
+                        leverage_category or "unknown",
                     )
             else:
                 logging.debug(

@@ -110,13 +110,12 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
 
     if is_bybit:
         detected = detect_market_category(exchange, symbol)
-        normalized = normalize_bybit_category(detected) if detected else None
-        if normalized == "spot":
+        category = str(detected).lower() if detected else ""
+        if category == "spot":
             return LEVERAGE_SKIPPED
-        cat = normalized or "linear"
-        if cat in ("swap", "", None):
-            cat = "linear"
-        params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
+        if category in ("swap", ""):
+            category = "linear"
+        params = {"category": category or "linear", "buyLeverage": L, "sellLeverage": L}
         try:
             exchange.set_leverage(L, norm_symbol, params)
             return L
