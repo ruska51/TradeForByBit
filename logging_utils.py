@@ -973,13 +973,15 @@ def _with_bybit_order_params(
         resolved_category = "linear"
         merged["category"] = resolved_category
 
-    if resolved_category in {"linear", "inverse"}:
-        # ``positionIdx`` defaults to 0 (one-way mode) which matches the bot
-        # assumptions but some unified accounts require the field to be set
-        # explicitly for conditional orders.
+    conditional_hint = any(
+        merged.get(key) is not None for key in ("triggerPrice", "triggerDirection")
+    )
+
+    if resolved_category in {"linear", "inverse"} and not conditional_hint:
         merged.setdefault("positionIdx", merged.get("positionIdx", 0))
     else:
-        # Avoid including derivatives-only parameters for spot / options.
+        # Avoid including derivatives-only parameters for spot / options or
+        # conditional orders that do not require explicit position indices.
         merged.pop("positionIdx", None)
 
     if derivative_hint and merged.get("tpSlMode") in (None, ""):
@@ -2235,7 +2237,11 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
         if cat not in ("linear", "inverse", "option", "spot"):
             cat = "linear"
         params_dict["category"] = cat
-        if cat in ("linear", "inverse"):
+        conditional_hint = bool(
+            params_dict.get("triggerPrice") is not None
+            or params_dict.get("triggerDirection") is not None
+        )
+        if cat in ("linear", "inverse") and not conditional_hint:
             params_dict.setdefault("positionIdx", 0)
         else:
             params_dict.pop("positionIdx", None)
@@ -2411,8 +2417,14 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
     except Exception:
         ticker = {}
     last = float((ticker or {}).get('last') or (ticker or {}).get('bid') or (ticker or {}).get('ask') or 0.0)
-    trig, direction, side_to_send = _bybit_trigger_for_exit(side_open, last, base_price, pct, is_tp=is_tp)
+    trig, direction, side_to_send = _bybit_trigger_for_exit(
+        side_open, last, base_price, pct, is_tp=is_tp
+    )
     trig, _ = _price_qty_to_precision(ex, norm, price=trig, amount=None)
+    try:
+        trig = float(trig)
+    except Exception:
+        trig = float(base_price or last)
     _, pos_qty = has_open_position(ex, norm, cat)
     if pos_qty <= 0:
         raise RuntimeError(f"exit skipped: no position yet for {symbol}")
@@ -2432,7 +2444,6 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
         'reduceOnly': True,
         'closeOnTrigger': True,
         'tpSlMode': 'Full',
-        'positionIdx': 0,
     }
     params = _clean_params(params)
     try:
@@ -2488,7 +2499,8 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
         if attempt < attempts - 1:
             time.sleep(2)
             continue
-        log(logging.WARNING, "leverage", symbol, f"Failed to set leverage {leverage} (soft)")
+        message = f"leverage | {symbol} | Failed to set leverage {leverage} (soft)"
+        log_once(logging, "warning", message, window=60.0)
         tag = "leverage_failed_soft"
         if tag not in _order_status[symbol]:
             _order_status[symbol].append(tag)
