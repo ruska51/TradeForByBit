@@ -271,23 +271,36 @@ def _bybit_trigger_for_exit(
     *,
     is_tp: bool,
 ) -> tuple[float, str, str]:
-    min_off = 0.001  # 0.1 %
-    if side_open == 'buy':  # long
+    min_off = 0.001  # 0.1 % safety buffer required by Bybit
+    try:
+        last_val = float(last)
+    except Exception:
+        last_val = 0.0
+    try:
+        base_val = float(base_price)
+    except Exception:
+        base_val = 0.0
+    if base_val <= 0:
+        base_val = last_val if last_val > 0 else 0.0
+    if last_val <= 0:
+        last_val = base_val
+
+    if str(side_open).lower() == 'buy':  # long
         if is_tp:
-            trig = max(base_price * (1 + pct), last * (1 + min_off))
+            trig = max(base_val * (1 + pct), last_val * (1 + min_off))
             direction = 'ascending'
             side_to_send = 'sell'
         else:
-            trig = min(base_price * (1 - pct), last * (1 - min_off))
+            trig = min(base_val * (1 - pct), last_val * (1 - min_off))
             direction = 'descending'
             side_to_send = 'sell'
     else:  # short
         if is_tp:
-            trig = min(base_price * (1 - pct), last * (1 - min_off))
+            trig = min(base_val * (1 - pct), last_val * (1 - min_off))
             direction = 'descending'
             side_to_send = 'buy'
         else:
-            trig = max(base_price * (1 + pct), last * (1 + min_off))
+            trig = max(base_val * (1 + pct), last_val * (1 + min_off))
             direction = 'ascending'
             side_to_send = 'buy'
     return trig, direction, side_to_send
@@ -2388,7 +2401,10 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
 
 
 def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, pct: float, *, is_tp: bool):
-    cat = "linear"
+    detected_cat = detect_market_category(ex, symbol)
+    cat = str(detected_cat).lower() if detected_cat else ""
+    if cat in ("", "swap"):
+        cat = "linear"
     norm = _normalize_bybit_symbol(ex, symbol, cat)
     try:
         ticker = ex.fetch_ticker(norm)
