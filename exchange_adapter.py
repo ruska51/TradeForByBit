@@ -106,18 +106,19 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
         return resolved
 
     params: dict[str, Any] = {}
-    norm_symbol = _short_ccxt_symbol(symbol)
+    short_symbol = _short_ccxt_symbol(symbol)
 
     if is_bybit:
         detected = detect_market_category(exchange, symbol)
-        category = str(detected).lower() if detected else ""
-        if category == "spot":
+        cat = detected or "linear"
+        cat = str(cat).lower() if cat else ""
+        if cat == "spot":
             return LEVERAGE_SKIPPED
-        if category in ("swap", ""):
-            category = "linear"
-        params = {"category": category or "linear", "buyLeverage": L, "sellLeverage": L}
+        if not cat or cat == "swap":
+            cat = "linear"
+        params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
         try:
-            exchange.set_leverage(L, norm_symbol, params)
+            exchange.set_leverage(L, short_symbol, params)
             return L
         except Exception as exc:
             logging.info("leverage | %s | soft-skip: %s", symbol, exc)
@@ -125,7 +126,7 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
 
     market_meta: dict[str, Any] | None = None
     candidates: list[str] = []
-    for candidate in (norm_symbol, symbol):
+    for candidate in (short_symbol, symbol):
         if isinstance(candidate, str) and candidate and candidate not in candidates:
             candidates.append(candidate)
     for candidate in candidates:
@@ -166,9 +167,9 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
 
     try:
         if params_for_call is not None:
-            exchange.set_leverage(L, norm_symbol, params_for_call)
+            exchange.set_leverage(L, short_symbol, params_for_call)
         else:
-            exchange.set_leverage(L, norm_symbol)
+            exchange.set_leverage(L, short_symbol)
         return L
     except Exception as exc:
         logging.info("exchange_adapter | leverage | %s | soft-skip: %s", symbol, exc)
