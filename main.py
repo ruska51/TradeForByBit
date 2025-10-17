@@ -2912,7 +2912,9 @@ def run_trade(
         log_decision(symbol, "price_unavailable")
         return False
     category = detect_market_category(exchange, symbol) or "linear"
-    category = str(category or "linear")
+    category = str(category or "").lower()
+    if category in ("", "swap"):
+        category = "linear"
     want_side = "buy" if signal == "long" else "sell"
     qty_signed, _ = has_open_position(exchange, symbol, category)
     if abs(qty_signed) > 0:
@@ -3263,7 +3265,9 @@ def attempt_direct_market_entry(
         return False
 
     category = detect_market_category(ADAPTER.x, symbol) or "linear"
-    category = str(category or "linear")
+    category = str(category or "").lower()
+    if category in ("", "swap"):
+        category = "linear"
     qty_signed, _ = has_open_position(ADAPTER.x, symbol, category)
     if abs(qty_signed) > 0:
         logging.info(
@@ -4140,13 +4144,15 @@ def ensure_exit_orders(
         return
 
     cat = detect_market_category(exchange_obj, symbol) or "linear"
-    norm_symbol = _normalize_bybit_symbol(exchange_obj, symbol, cat)
-    pos_qty = logging_utils._get_position_size(exchange_obj, norm_symbol, cat)
+    cat = str(cat or "").lower()
+    if cat in ("", "swap"):
+        cat = "linear"
+    _, pos_qty = logging_utils.has_open_position(exchange_obj, symbol, cat)
 
     if pos_qty <= 0:
         for _ in range(3):
             time.sleep(0.2)
-            pos_qty = logging_utils._get_position_size(exchange_obj, norm_symbol, cat)
+            _, pos_qty = logging_utils.has_open_position(exchange_obj, symbol, cat)
             if pos_qty > 0:
                 break
 
