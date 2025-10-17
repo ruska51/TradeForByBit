@@ -849,7 +849,7 @@ def has_open_position(ex, symbol: str, category: str = "linear") -> tuple[float,
     """Return the signed and absolute quantity of the open position."""
 
     norm = _normalize_bybit_symbol(ex, symbol, category)
-    base_norm = norm.replace(":USDT", "").replace(":USDC", "")
+    base_norm = norm.split(":", 1)[0]
     try:
         pos_list = ex.fetch_positions([norm], params={"category": category})
     except Exception:
@@ -860,7 +860,7 @@ def has_open_position(ex, symbol: str, category: str = "linear") -> tuple[float,
     qty_signed = 0.0
     for p in pos_list or []:
         sym = str(p.get("symbol") or p.get("info", {}).get("symbol") or "")
-        sym_base = sym.replace(":USDT", "").replace(":USDC", "")
+        sym_base = sym.split(":", 1)[0]
         if sym != norm and sym_base != base_norm:
             continue
         q = (
@@ -2425,7 +2425,7 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
         trig = float(trig)
     except Exception:
         trig = float(base_price or last)
-    _, pos_qty = has_open_position(ex, norm, cat)
+    _, pos_qty = has_open_position(ex, symbol, cat)
     if pos_qty <= 0:
         raise RuntimeError(f"exit skipped: no position yet for {symbol}")
     amount = _round_qty(ex, norm, pos_qty)
@@ -2460,7 +2460,7 @@ def wait_position_after_entry(ex, symbol: str, category: str = "linear", timeout
     norm = _normalize_bybit_symbol(ex, symbol, category)
     t0 = time.time()
     while time.time() - t0 < timeout_sec:
-        _, qabs = has_open_position(ex, norm, category)
+        _, qabs = has_open_position(ex, symbol, category)
         if qabs > 0:
             return qabs
         time.sleep(0.15)
