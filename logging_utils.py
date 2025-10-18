@@ -1436,12 +1436,22 @@ def setup_logger(
     logger.handlers = handlers
 
 
+_LAST_GENERIC_LOGS: dict[str, float] = {}
+_REPEAT_LOG_WINDOW = 5.0
+
+
 def log(level: int, context: str, *parts) -> None:
-    """Log using unified ``context | part1 | part2`` formatting."""
+    """Log using unified ``context | part1 | part2`` formatting with dedupe."""
 
     import logging
 
-    logging.log(level, " | ".join([str(context)] + [str(p) for p in parts]))
+    text = " | ".join([str(context)] + [str(p) for p in parts])
+    now = time.time()
+    last = _LAST_GENERIC_LOGS.get(text, 0.0)
+    if now - last < _REPEAT_LOG_WINDOW:
+        return
+    _LAST_GENERIC_LOGS[text] = now
+    logging.log(level, text)
 
 
 def log_prediction_error(context: str, symbol: str, expected: int, got: int | None) -> None:
@@ -1497,8 +1507,8 @@ def log_decision(symbol: str, reason: str, *, decision: str = "skip", path: str 
         if write_header:
             writer.writerow(["timestamp", "symbol", "signal", "reason"])
         writer.writerow([datetime.now(timezone.utc).isoformat(), symbol, decision, reason])
-    msg = f"Skipped: {reason}" if decision == "skip" else reason
-    logging.getLogger().info("decision | %s | %s | %s", decision, symbol, msg)
+    msg = f"decision | {decision} | {symbol} | {'Skipped: ' + reason if decision == 'skip' else reason}"
+    log_once(logging, "info", msg, window=_REPEAT_LOG_WINDOW)
     _info_status[symbol]["last_reason"] = reason
     emit_summary(symbol, reason)
 
@@ -2430,11 +2440,19 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
         raise RuntimeError(f"exit skipped: no position yet for {symbol}")
     amount = _round_qty(ex, norm, pos_qty)
     try:
-        stops = ex.fetch_open_orders(norm, params={'category': cat, 'orderFilter': 'StopOrder'})
-        for o in stops[2:]:
-            ex.cancel_order(o['id'], norm, {'category': cat})
+        stops = ex.fetch_open_orders(
+            norm, params={"category": cat, "orderFilter": "StopOrder"}
+        )
     except Exception:
-        pass
+        stops = []
+    for stop in stops or []:
+        order_id = stop.get("id") or stop.get("orderId")
+        if not order_id:
+            continue
+        try:
+            ex.cancel_order(order_id, norm, {"category": cat})
+        except Exception:
+            continue
     params = {
         'category': cat,
         'orderType': 'Market',
