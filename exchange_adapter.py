@@ -348,7 +348,7 @@ class ExchangeAdapter:
         """Return *candidate* without Bybit settle suffixes."""
 
         resolved = candidate or ""
-        if ":" in resolved:
+        if ":" in resolved and "/" not in resolved:
             resolved = resolved.split(":", 1)[0]
         if "/" not in resolved and len(resolved) > 4:
             try:

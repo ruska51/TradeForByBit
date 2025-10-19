@@ -10,6 +10,7 @@ from collections import defaultdict
 from threading import Lock
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Callable
 
 from memory_utils import memory_manager
 
@@ -270,6 +271,7 @@ def _bybit_trigger_for_exit(
     pct: float,
     *,
     is_tp: bool,
+    precision: Callable[[float], float | str] | None = None,
 ) -> tuple[float, str, str]:
     min_off = 0.001  # 0.1 % safety buffer required by Bybit
     try:
@@ -303,6 +305,11 @@ def _bybit_trigger_for_exit(
             trig = max(base_val * (1 + pct), last_val * (1 + min_off))
             direction = 'ascending'
             side_to_send = 'buy'
+    if callable(precision):
+        try:
+            trig = float(precision(trig))
+        except Exception:
+            pass
     return trig, direction, side_to_send
 
 
@@ -1447,9 +1454,10 @@ def log(level: int, context: str, *parts) -> None:
 
     text = " | ".join([str(context)] + [str(p) for p in parts])
     now = time.time()
-    last = _LAST_GENERIC_LOGS.get(text, 0.0)
-    if now - last < _REPEAT_LOG_WINDOW:
-        return
+    if level >= logging.WARNING:
+        last = _LAST_GENERIC_LOGS.get(text, 0.0)
+        if now - last < _REPEAT_LOG_WINDOW:
+            return
     _LAST_GENERIC_LOGS[text] = now
     logging.log(level, text)
 
@@ -2422,22 +2430,33 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
     if cat in ("", "swap"):
         cat = "linear"
     norm = _normalize_bybit_symbol(ex, symbol, cat)
+    precision_cb: Callable[[float], float | str] | None = None
+    if hasattr(ex, "price_to_precision"):
+        def _precision_cb(value: float, *, _symbol: str = norm, _ex=ex):
+            return _ex.price_to_precision(_symbol, value)
+
+        precision_cb = _precision_cb
+    _, pos_qty = has_open_position(ex, symbol, cat)
+    if pos_qty <= 0:
+        return None, f"exit skipped: no position yet for {symbol}"
     try:
         ticker = ex.fetch_ticker(norm)
     except Exception:
         ticker = {}
-    last = float((ticker or {}).get('last') or (ticker or {}).get('bid') or (ticker or {}).get('ask') or 0.0)
+    last = float((ticker or {}).get("last") or (ticker or {}).get("bid") or (ticker or {}).get("ask") or 0.0)
     trig, direction, side_to_send = _bybit_trigger_for_exit(
-        side_open, last, base_price, pct, is_tp=is_tp
+        side_open,
+        last,
+        base_price,
+        pct,
+        is_tp=is_tp,
+        precision=precision_cb,
     )
     trig, _ = _price_qty_to_precision(ex, norm, price=trig, amount=None)
     try:
         trig = float(trig)
     except Exception:
         trig = float(base_price or last)
-    _, pos_qty = has_open_position(ex, symbol, cat)
-    if pos_qty <= 0:
-        raise RuntimeError(f"exit skipped: no position yet for {symbol}")
     amount = _round_qty(ex, norm, pos_qty)
     try:
         stops = ex.fetch_open_orders(
@@ -2445,32 +2464,56 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
         )
     except Exception:
         stops = []
+    stop_orders: list[tuple[dict, float, str]] = []
     for stop in stops or []:
         order_id = stop.get("id") or stop.get("orderId")
         if not order_id:
             continue
-        try:
-            ex.cancel_order(order_id, norm, {"category": cat})
-        except Exception:
-            continue
+        info = stop.get("info") if isinstance(stop.get("info"), dict) else {}
+        ts_candidates = [
+            stop.get("timestamp"),
+            stop.get("lastUpdateTimestamp"),
+            stop.get("updateTime"),
+            stop.get("createdTime"),
+            stop.get("createTime"),
+            (info or {}).get("updatedTime"),
+            (info or {}).get("createdTime"),
+        ]
+        ts_val = 0.0
+        for cand in ts_candidates:
+            if cand is None:
+                continue
+            try:
+                ts_val = float(cand) / (1000 if float(cand) > 1e12 else 1)
+                break
+            except Exception:
+                continue
+        stop_orders.append((stop, ts_val, str(order_id)))
+    if len(stop_orders) > 2:
+        stop_orders.sort(key=lambda item: item[1], reverse=True)
+        for _stop, _ts, order_id in stop_orders[2:]:
+            try:
+                ex.cancel_order(order_id, norm, {"category": cat})
+            except Exception:
+                continue
     params = {
-        'category': cat,
-        'orderType': 'Market',
-        'triggerPrice': float(trig),
-        'triggerDirection': direction,
-        'triggerBy': 'LastPrice',
-        'reduceOnly': True,
-        'closeOnTrigger': True,
-        'tpSlMode': 'Full',
+        "category": "linear",
+        "orderType": "Market",
+        "triggerPrice": float(trig),
+        "triggerDirection": direction,
+        "triggerBy": "LastPrice",
+        "reduceOnly": True,
+        "closeOnTrigger": True,
+        "tpSlMode": "Full",
     }
     params = _clean_params(params)
     try:
-        resp = ex.create_order(norm, 'market', side_to_send, amount, None, params)
+        resp = ex.create_order(norm, "market", side_to_send, amount, None, params)
     except Exception as exc:
         return None, str(exc)
     order_id = None
     if isinstance(resp, dict):
-        order_id = resp.get('id') or resp.get('orderId')
+        order_id = resp.get("id") or resp.get("orderId")
     return order_id, None
 
 
@@ -2518,7 +2561,7 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
             time.sleep(2)
             continue
         message = f"leverage | {symbol} | Failed to set leverage {leverage} (soft)"
-        log_once(logging, "warning", message, window=60.0)
+        log_once(logging, "warning", message, window=5.0)
         tag = "leverage_failed_soft"
         if tag not in _order_status[symbol]:
             _order_status[symbol].append(tag)
