@@ -4162,7 +4162,7 @@ def ensure_exit_orders(
             logging,
             "warning",
             f"exit_guard | {symbol} | postpone exits: no position yet",
-            window=60.0,
+            window=5.0,
         )
         return
 
