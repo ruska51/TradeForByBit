@@ -21,6 +21,16 @@ from logging_utils import (
 LEVERAGE_SKIPPED = object()
 
 
+def _ccxt_symbol(symbol: str) -> str:
+    """Return a shortened CCXT symbol without settlement suffixes."""
+
+    if not isinstance(symbol, str):
+        return symbol
+    if ":" in symbol:
+        return symbol.split(":", 1)[0]
+    return symbol
+
+
 # ``ccxt`` is imported lazily so tests can monkeypatch the module before the
 # adapter attempts to use it.  The variable is populated on first use.
 _ccxt = None
@@ -82,11 +92,12 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     if L <= 0:
         L = 1
 
-    exid = getattr(exchange, "id", "")
-    is_bybit = str(exid).lower() == "bybit"
+    exid = str(getattr(exchange, "id", "") or "").lower()
+    is_bybit = exid == "bybit"
 
-    def _short_ccxt_symbol(sym: str) -> str:
-        resolved = sym
+    def _resolve_short_symbol(sym: str) -> str:
+        if not isinstance(sym, str):
+            return sym
         for source in (
             getattr(exchange, "adapter", None),
             exchange,
@@ -99,23 +110,20 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
             except Exception:
                 mapped = None
             if isinstance(mapped, str) and mapped:
-                resolved = mapped
+                sym = mapped
                 break
-        if isinstance(resolved, str) and ":" in resolved:
-            resolved = resolved.split(":", 1)[0]
-        return resolved
+        return _ccxt_symbol(sym)
 
     params: dict[str, Any] = {}
-    short_symbol = _short_ccxt_symbol(symbol)
+    short_symbol = _resolve_short_symbol(symbol)
 
     if is_bybit:
         detected = detect_market_category(exchange, symbol)
-        cat = detected or "linear"
-        cat = str(cat).lower() if cat else ""
-        if cat == "spot":
-            return LEVERAGE_SKIPPED
+        cat = str(detected or "").lower()
         if not cat or cat == "swap":
             cat = "linear"
+        if cat == "spot":
+            return LEVERAGE_SKIPPED
         params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
         try:
             exchange.set_leverage(L, short_symbol, params)
@@ -291,6 +299,11 @@ class ExchangeAdapter:
             if normalized_symbol:
                 category = self._detect_bybit_category(normalized_symbol)
                 if category:
+                    category = category.lower()
+                    if category in {"", "swap"}:
+                        category = "linear"
+                    if category == "spot" and self.futures:
+                        category = "linear"
                     base.setdefault("category", category)
             elif self.futures:
                 base.setdefault("category", "linear")
