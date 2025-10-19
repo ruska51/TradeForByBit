@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover - ccxt may be stubbed in tests
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
-_LAST_LOGGED_MESSAGE: dict[str, float | str | None] = {"text": None, "ts": 0.0}
+_LAST_LOGGED_MESSAGE: dict[str, float] = {}
 
 
 def log_once(logger, level: str, text: str, window: float = 5.0) -> None:
@@ -31,12 +31,16 @@ def log_once(logger, level: str, text: str, window: float = 5.0) -> None:
         now = time.time()
     except Exception:
         now = 0.0
-    last_text = _LAST_LOGGED_MESSAGE.get("text")
-    last_ts = float(_LAST_LOGGED_MESSAGE.get("ts") or 0.0)
-    if last_text == text and now - last_ts < window:
+    last_ts = float(_LAST_LOGGED_MESSAGE.get(text, 0.0) or 0.0)
+    if now - last_ts < window:
         return
-    _LAST_LOGGED_MESSAGE["text"] = text
-    _LAST_LOGGED_MESSAGE["ts"] = now
+    _LAST_LOGGED_MESSAGE[text] = now
+    # prune occasionally to avoid unbounded growth
+    if len(_LAST_LOGGED_MESSAGE) > 256:
+        stale_cutoff = now - (window * 4)
+        for msg in list(_LAST_LOGGED_MESSAGE.keys()):
+            if msg != text and _LAST_LOGGED_MESSAGE[msg] < stale_cutoff:
+                _LAST_LOGGED_MESSAGE.pop(msg, None)
     getattr(logger, level)(text)
 
 # ``colorama`` is an optional dependency used only for colored console output.
@@ -194,7 +198,12 @@ def enter_ensure_filled(
 ) -> tuple[str | None, float]:
     """Place an IOC limit (or market) entry and ensure it fills."""
 
-    norm = _normalize_bybit_symbol(ex, symbol, category)
+    cat = str(category or "").lower()
+    if not cat or cat == "swap":
+        cat = "linear"
+    if cat == "spot":
+        cat = "linear"
+    norm = _normalize_bybit_symbol(ex, symbol, cat)
     try:
         ticker = ex.fetch_ticker(norm)
     except Exception:
@@ -228,7 +237,7 @@ def enter_ensure_filled(
     if qty <= 0:
         return None, 0.0
 
-    params = {"category": category, "reduceOnly": False, "timeInForce": "IOC"}
+    params = {"category": cat, "reduceOnly": False, "timeInForce": "IOC"}
     order_type = "limit" if prefer_limit else "market"
     price_arg = price if order_type == "limit" else None
     order = ex.create_order(norm, order_type, side, qty, price_arg, params)
@@ -238,7 +247,7 @@ def enter_ensure_filled(
     while time.time() - t0 < wait_fill_sec and filled < qty:
         time.sleep(0.15)
         try:
-            state = ex.fetch_order(oid, norm, params={"category": category}) if oid else None
+            state = ex.fetch_order(oid, norm, params={"category": cat}) if oid else None
         except Exception:
             state = None
         if isinstance(state, dict):
@@ -256,11 +265,18 @@ def enter_ensure_filled(
     if remainder > 0:
         try:
             if oid:
-                ex.cancel_order(oid, norm, {"category": category})
+                ex.cancel_order(oid, norm, {"category": cat})
         except Exception:
             pass
-        ex.create_order(norm, "market", side, remainder, None, {"category": category, "reduceOnly": False})
-        filled = qty
+        ex.create_order(
+            norm,
+            "market",
+            side,
+            remainder,
+            None,
+            {"category": cat, "reduceOnly": False},
+        )
+        filled += remainder
     return oid, float(filled)
 
 
@@ -855,13 +871,18 @@ def _normalize_bybit_symbol(
 def has_open_position(ex, symbol: str, category: str = "linear") -> tuple[float, float]:
     """Return the signed and absolute quantity of the open position."""
 
-    norm = _normalize_bybit_symbol(ex, symbol, category)
+    cat = str(category or "").lower()
+    if not cat or cat == "swap":
+        cat = "linear"
+    if cat == "spot":
+        cat = "linear"
+    norm = _normalize_bybit_symbol(ex, symbol, cat)
     base_norm = norm.split(":", 1)[0]
     try:
-        pos_list = ex.fetch_positions([norm], params={"category": category})
+        pos_list = ex.fetch_positions([norm], params={"category": cat})
     except Exception:
         try:
-            pos_list = ex.fetch_positions(params={"category": category})
+            pos_list = ex.fetch_positions(params={"category": cat})
         except Exception:
             pos_list = []
     qty_signed = 0.0
@@ -2497,7 +2518,7 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
             except Exception:
                 continue
     params = {
-        "category": "linear",
+        "category": cat,
         "orderType": "Market",
         "triggerPrice": float(trig),
         "triggerDirection": direction,
@@ -2518,10 +2539,15 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
 
 
 def wait_position_after_entry(ex, symbol: str, category: str = "linear", timeout_sec: float = 3.0) -> float:
-    norm = _normalize_bybit_symbol(ex, symbol, category)
+    cat = str(category or "").lower()
+    if not cat or cat == "swap":
+        cat = "linear"
+    if cat == "spot":
+        cat = "linear"
+    norm = _normalize_bybit_symbol(ex, symbol, cat)
     t0 = time.time()
     while time.time() - t0 < timeout_sec:
-        _, qabs = has_open_position(ex, symbol, category)
+        _, qabs = has_open_position(ex, symbol, cat)
         if qabs > 0:
             return qabs
         time.sleep(0.15)
@@ -2529,9 +2555,14 @@ def wait_position_after_entry(ex, symbol: str, category: str = "linear", timeout
 
 
 def has_pending_entry(ex, symbol: str, side: str, category: str = "linear") -> bool:
-    norm = _normalize_bybit_symbol(ex, symbol, category)
+    cat = str(category or "").lower()
+    if not cat or cat == "swap":
+        cat = "linear"
+    if cat == "spot":
+        cat = "linear"
+    norm = _normalize_bybit_symbol(ex, symbol, cat)
     try:
-        opens = ex.fetch_open_orders(norm, params={"category": category})
+        opens = ex.fetch_open_orders(norm, params={"category": cat})
     except Exception:
         opens = []
     side = side.lower()

@@ -2706,8 +2706,15 @@ def best_entry_moment(
 def fetch_positions_soft(symbol: str) -> list[dict]:
     """Fetch positions while gracefully handling missing category support."""
 
+    cat = detect_market_category(exchange, symbol) or "linear"
+    cat = str(cat or "").lower()
+    if not cat or cat == "swap":
+        cat = "linear"
+    if cat == "spot":
+        cat = "linear"
+    norm = _normalize_bybit_symbol(exchange, symbol, cat)
     try:
-        return exchange.fetch_positions([symbol], {"category": "linear"})
+        return exchange.fetch_positions([norm], {"category": cat})
     except Exception as exc:
         log(
             logging.WARNING,
@@ -2716,7 +2723,7 @@ def fetch_positions_soft(symbol: str) -> list[dict]:
             f"fallback to generic fetch_positions: {exc}",
         )
     try:
-        return exchange.fetch_positions([symbol])
+        return exchange.fetch_positions([norm])
     except Exception as exc:
         record_error(symbol, f"positions fetch failed: {exc}")
         logging.error(f"Failed to fetch positions for {symbol}: {exc}")
@@ -2915,6 +2922,14 @@ def run_trade(
     category = str(category or "").lower()
     if category in ("", "swap"):
         category = "linear"
+    if category not in {"linear", "inverse"}:
+        logging.info(
+            "entry | %s | skip: unsupported market category %s",
+            symbol,
+            category or "unknown",
+        )
+        log_decision(symbol, "no_futures_contract")
+        return False
     want_side = "buy" if signal == "long" else "sell"
     qty_signed, _ = has_open_position(exchange, symbol, category)
     if abs(qty_signed) > 0:
@@ -3268,6 +3283,14 @@ def attempt_direct_market_entry(
     category = str(category or "").lower()
     if category in ("", "swap"):
         category = "linear"
+    if category not in {"linear", "inverse"}:
+        logging.info(
+            "entry | %s | skip: unsupported market category %s",
+            symbol,
+            category or "unknown",
+        )
+        log_decision(symbol, "no_futures_contract")
+        return False
     qty_signed, _ = has_open_position(ADAPTER.x, symbol, category)
     if abs(qty_signed) > 0:
         logging.info(
