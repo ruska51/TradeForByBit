@@ -2487,7 +2487,13 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
         precision_cb = _precision_cb
     _, pos_qty = has_open_position(ex, symbol, cat)
     if pos_qty <= 0:
-        raise RuntimeError(f"exit skipped: no position yet for {symbol}")
+        log_once(
+            logging,
+            "info",
+            f"exit | {symbol} | postpone exits: position not detected",
+            window=5.0,
+        )
+        return None, "position_unavailable"
     try:
         ticker = ex.fetch_ticker(norm)
     except Exception:

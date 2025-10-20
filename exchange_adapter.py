@@ -116,20 +116,20 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
 
     cat = detect_market_category(exchange, symbol) or "linear"
     cat = str(cat or "").lower()
-    if not cat or cat == "swap":
+    if cat in {"", "swap"}:
         cat = "linear"
+    if cat == "spot":
+        return LEVERAGE_SKIPPED
 
-    short_symbol = _resolve_short_symbol(symbol)
     params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
+    short_symbol = _resolve_short_symbol(symbol)
 
     if is_bybit:
-        if cat == "spot":
-            return LEVERAGE_SKIPPED
         try:
             exchange.set_leverage(L, short_symbol, params)
             return L
         except Exception as e:  # pragma: no cover - network interaction
-            logging.info(f"leverage | {symbol} | soft-skip: {e}")
+            logging.info("leverage | %s | soft-skip: %s", symbol, e)
             return None
 
     if cat == "spot":
@@ -730,15 +730,40 @@ class ExchangeAdapter:
             include_position_idx=False, symbol=ccxt_symbol or symbol
         ) or None
         is_futures = bool(getattr(self, "futures", getattr(self, "is_futures", False)))
+        detected_cat: str | None = None
         if is_futures:
-            cat = str((request_params or {}).get("category") or "").lower()
-            if cat in {"", "swap"}:
-                cat = "linear"
-            if cat == "spot":
-                cat = "linear"
-            if cat:
-                request_params = dict(request_params or {})
-                request_params["category"] = cat
+            base_exchange = getattr(self, "x", None) or getattr(self, "exchange", None)
+            detected_cat = detect_market_category(base_exchange, symbol) if base_exchange else None
+        raw_cat = str(
+            (detected_cat or (request_params or {}).get("category") or "").lower()
+        )
+        if raw_cat in {"", "swap"}:
+            raw_cat = "linear"
+        if raw_cat == "spot" and is_futures:
+            raw_cat = "linear"
+        if raw_cat not in {"linear", "inverse", "spot"} and is_futures:
+            market_meta = None
+            try:
+                market_meta = markets.get(ccxt_symbol) if isinstance(markets, dict) else None
+                if market_meta is None and symbol in (markets or {}):
+                    market_meta = markets.get(symbol)
+            except Exception:
+                market_meta = None
+            if isinstance(market_meta, dict):
+                if market_meta.get("inverse"):
+                    raw_cat = "inverse"
+                elif market_meta.get("linear") or market_meta.get("swap"):
+                    raw_cat = "linear"
+        if raw_cat == "spot" and not is_futures:
+            raw_cat = "spot"
+        if raw_cat not in {"linear", "inverse"} and is_futures:
+            raw_cat = "linear"
+        if raw_cat in {"linear", "inverse"}:
+            request_params = dict(request_params or {})
+            request_params["category"] = raw_cat
+        elif request_params:
+            request_params = dict(request_params)
+            request_params.pop("category", None)
 
         try:
             data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
@@ -1025,7 +1050,9 @@ class ExchangeAdapter:
                 if not sym:
                     continue
                 mapped = self._ccxt_symbol(sym)
-                normalized_symbols.append(mapped)
+                if isinstance(mapped, str) and mapped:
+                    mapped = mapped.split(":", 1)[0]
+                normalized_symbols.append(mapped or sym)
                 if first_symbol is None:
                     first_symbol = sym
 

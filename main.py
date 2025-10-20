@@ -588,7 +588,11 @@ def fetch_multi_ohlcv(
                     logging.warning("data | %s | %s fetch failed: %s", symbol, tf, exc)
                 time.sleep(0.1 * (attempt + 1))
         if not ohlcv:
-            logging.warning("data | %s | %s returned no candles", symbol, tf)
+            log_once(
+                logging,
+                "warning",
+                f"data | {symbol} | {tf} returned no candles",
+            )
             continue
         df = pd.DataFrame(
             ohlcv,
@@ -600,9 +604,9 @@ def fetch_multi_ohlcv(
     if not dfs:
         message = f"data | {symbol} | no OHLCV for required timeframes; skipping"
         if warn:
-            logging.warning(message)
+            log_once(logging, "warning", message)
         else:
-            logging.info(message)
+            log_once(logging, "info", message)
         log_decision(symbol, "ohlcv_unavailable")
         return None
 
@@ -625,9 +629,9 @@ def fetch_multi_ohlcv(
             ",".join(missing),
         )
         if warn:
-            logging.warning(msg)
+            log_once(logging, "warning", msg)
         else:
-            logging.info(msg)
+            log_once(logging, "info", msg)
         result.attrs["reduced"] = True
 
     required_timeframes: list[str] = []
@@ -637,6 +641,10 @@ def fetch_multi_ohlcv(
         required_timeframes.append(timeframes[0])
     expected_cols = [f"close_{tf}" for tf in required_timeframes]
     missing_cols = [col for col in expected_cols if col not in result.columns]
+    if result is None or result.empty:
+        log_once(logging, "warning", f"data | {symbol} | empty OHLCV result")
+        log_decision(symbol, "ohlcv_empty")
+        return None
     if missing_cols:
         level = "warning" if warn else "info"
         log_once(
@@ -644,6 +652,7 @@ def fetch_multi_ohlcv(
             level,
             f"data | {symbol} | missing columns: {', '.join(missing_cols)}",
         )
+        log_decision(symbol, "ohlcv_missing_columns")
         return None
 
     return result
