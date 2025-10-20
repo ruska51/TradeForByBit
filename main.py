@@ -558,7 +558,12 @@ def run_trade_analysis(csv_file: str = "trades_log.csv", n_trials: int = 50, ran
 
 # --- OHLCV Fetching -------------------------------------------------
 
-def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn: bool = True) -> pd.DataFrame:
+def fetch_multi_ohlcv(
+    symbol: str,
+    timeframes: list[str],
+    limit: int = 300,
+    warn: bool = True,
+) -> pd.DataFrame | None:
     """Synchronously fetch OHLCV data via :class:`ExchangeAdapter`.
 
     On ``AdapterOHLCVUnavailable`` a skip is logged and an empty ``DataFrame``
@@ -593,16 +598,13 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
         df = df.rename(columns=lambda c: f"{c}_{tf}")
         dfs[tf] = df
     if not dfs:
+        message = f"data | {symbol} | no OHLCV for required timeframes; skipping"
         if warn:
-            logging.warning(
-                "data | %s | no OHLCV for required timeframes; skipping", symbol
-            )
+            logging.warning(message)
         else:
-            logging.info(
-                "data | %s | no OHLCV for required timeframes; skipping", symbol
-            )
+            logging.info(message)
         log_decision(symbol, "ohlcv_unavailable")
-        return pd.DataFrame()
+        return None
 
     ordered = [tf for tf in timeframes if tf in dfs]
     base_tf = ordered[0]
@@ -627,6 +629,23 @@ def fetch_multi_ohlcv(symbol: str, timeframes: list[str], limit: int = 300, warn
         else:
             logging.info(msg)
         result.attrs["reduced"] = True
+
+    required_timeframes: list[str] = []
+    if "15m" in timeframes:
+        required_timeframes.append("15m")
+    elif timeframes:
+        required_timeframes.append(timeframes[0])
+    expected_cols = [f"close_{tf}" for tf in required_timeframes]
+    missing_cols = [col for col in expected_cols if col not in result.columns]
+    if missing_cols:
+        level = "warning" if warn else "info"
+        log_once(
+            logging,
+            level,
+            f"data | {symbol} | missing columns: {', '.join(missing_cols)}",
+        )
+        return None
+
     return result
 
 
@@ -642,7 +661,7 @@ def _health_check(symbols: list[str]) -> None:
     for sym in symbols:
         try:
             df = fetch_multi_ohlcv(sym, timeframes, limit=5, warn=False)
-            if df.empty or "close_15m" not in df.columns:
+            if df is None or df.empty or "close_15m" not in df.columns:
                 issues.append(f"data:{sym}")
         except Exception as e:  # pragma: no cover - defensive
             issues.append(f"data:{sym}:{e}")
@@ -1897,7 +1916,7 @@ def prepare_profit_dataset(symbol: str, profit_csv: str = "profit_report.csv") -
         default=0,
     )
     ohlcv = fetch_multi_ohlcv(symbol, timeframes, limit=5000, warn=False)
-    if ohlcv.empty:
+    if ohlcv is None or ohlcv.empty:
         return pd.DataFrame()
     rows: list[pd.Series] = []
     for _, row in trades.iterrows():
@@ -1932,7 +1951,7 @@ def train_optuna_model(symbol: str, n_trials: int = 20):
         limit_val = 5000
         for _ in range(5):
             df = fetch_multi_ohlcv(symbol, timeframes, limit=limit_val, warn=False)
-            if df.empty:
+            if df is None or df.empty:
                 logging.error(f"model | {symbol} | Missing required timeframe data")
                 return None
             for lag in range(1, 7):
@@ -2226,7 +2245,11 @@ def backtest(symbol, tf="15m", horizon: int | None = None):
         raise RuntimeError(msg)
     limit_val = 300
     df = fetch_multi_ohlcv(symbol, timeframes, limit=limit_val)
-    reduced = bool(df.attrs.get("reduced"))
+    if df is None:
+        log_candle_status(symbol, tf, None)
+        logging.warning("backtest | %s | data unavailable", symbol)
+        return {"mode": "unavailable"}
+    reduced = bool(df.attrs.get("reduced", False))
     log_candle_status(symbol, tf, len(df))
     if df.empty:
         logging.warning("backtest | %s | data unavailable", symbol)
@@ -4650,6 +4673,8 @@ def run_bot():
         try:
             preview = fetch_multi_ohlcv(symbol, timeframes, limit=200, warn=False)
         except Exception:
+            preview = None
+        if preview is None:
             logging.warning(
                 "data | %s | no OHLCV for required timeframes; skipping", symbol
             )
@@ -5058,11 +5083,8 @@ def run_bot():
         try:
             multi_df = fetch_multi_ohlcv(symbol, timeframes, limit=300, warn=False)
         except Exception:
-            logging.warning(
-                "data | %s | no OHLCV for required timeframes; skipping", symbol
-            )
-            multi_df = pd.DataFrame()
-        if multi_df.empty:
+            multi_df = None
+        if multi_df is None or multi_df.empty:
             logging.info("data | %s | insufficient multi-timeframe data", symbol)
             log_decision(symbol, "no_data")
             continue
@@ -5751,7 +5773,7 @@ def run_bot():
                 log_decision(symbol, "open_trades_limit")
                 continue
             multi_df = fetch_multi_ohlcv(symbol, timeframes, limit=300, warn=False)
-            if multi_df.empty:
+            if multi_df is None or multi_df.empty:
                 continue
             df_trend = fetch_ohlcv(symbol, "1h", limit=250)
             if df_trend is None or df_trend.empty:
