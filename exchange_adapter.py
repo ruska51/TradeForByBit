@@ -726,44 +726,44 @@ class ExchangeAdapter:
                 raise AdapterOHLCVUnavailable(f"markets empty for {symbol}")
 
         log_params = {"symbol": symbol, "timeframe": timeframe, "limit": limit}
-        request_params = self._default_params(
+        base_params = self._default_params(
             include_position_idx=False, symbol=ccxt_symbol or symbol
-        ) or None
+        ) or {}
+        request_params: dict[str, Any] | None
         is_futures = bool(getattr(self, "futures", getattr(self, "is_futures", False)))
-        detected_cat: str | None = None
-        if is_futures:
-            base_exchange = getattr(self, "x", None) or getattr(self, "exchange", None)
-            detected_cat = detect_market_category(base_exchange, symbol) if base_exchange else None
-        raw_cat = str(
-            (detected_cat or (request_params or {}).get("category") or "").lower()
+        base_exchange = getattr(self, "x", None) or getattr(self, "exchange", None)
+        detected_cat = (
+            detect_market_category(base_exchange, symbol) if base_exchange else None
         )
-        if raw_cat in {"", "swap"}:
-            raw_cat = "linear"
-        if raw_cat == "spot" and is_futures:
-            raw_cat = "linear"
-        if raw_cat not in {"linear", "inverse", "spot"} and is_futures:
+        cat = str(detected_cat or "").lower()
+        if cat in {"", "swap", None}:
+            cat = "linear"
+        if cat == "spot" and is_futures:
+            cat = "linear"
+        if cat not in {"linear", "inverse", "spot"}:
             market_meta = None
             try:
                 market_meta = markets.get(ccxt_symbol) if isinstance(markets, dict) else None
-                if market_meta is None and symbol in (markets or {}):
+                if market_meta is None and isinstance(markets, dict):
                     market_meta = markets.get(symbol)
             except Exception:
                 market_meta = None
             if isinstance(market_meta, dict):
-                if market_meta.get("inverse"):
-                    raw_cat = "inverse"
-                elif market_meta.get("linear") or market_meta.get("swap"):
-                    raw_cat = "linear"
-        if raw_cat == "spot" and not is_futures:
-            raw_cat = "spot"
-        if raw_cat not in {"linear", "inverse"} and is_futures:
-            raw_cat = "linear"
-        if raw_cat in {"linear", "inverse"}:
-            request_params = dict(request_params or {})
-            request_params["category"] = raw_cat
-        elif request_params:
-            request_params = dict(request_params)
-            request_params.pop("category", None)
+                try:
+                    if market_meta.get("inverse"):
+                        cat = "inverse"
+                    elif market_meta.get("linear") or market_meta.get("swap"):
+                        cat = "linear"
+                except Exception:
+                    pass
+        params_copy = dict(base_params)
+        if cat == "spot" and not is_futures:
+            params_copy.pop("category", None)
+        elif cat in {"linear", "inverse"}:
+            params_copy["category"] = cat
+        else:
+            params_copy["category"] = "linear"
+        request_params = params_copy or None
 
         try:
             data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
@@ -1109,7 +1109,15 @@ class ExchangeAdapter:
                 str(first_symbol or symbol_arg or "ALL"),
                 f"adapter | fetch_positions failed symbol={first_symbol or 'ALL'} error={last_error}",
             )
-        return []
+            return []
+
+        key_symbol = str(first_symbol or symbol_arg or "ALL")
+        self._warn(
+            "positions_empty",
+            key_symbol,
+            f"adapter | fetch_positions empty result symbol={key_symbol}",
+        )
+        return None
 
     # ------------------------------------------------------------------
     def fetch_open_orders(self, symbol: str | None = None) -> tuple[int, list]:

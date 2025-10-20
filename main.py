@@ -589,7 +589,6 @@ def fetch_multi_ohlcv(
                 time.sleep(0.1 * (attempt + 1))
         if not ohlcv:
             log_once(
-                logging,
                 "warning",
                 f"data | {symbol} | {tf} returned no candles",
             )
@@ -604,9 +603,9 @@ def fetch_multi_ohlcv(
     if not dfs:
         message = f"data | {symbol} | no OHLCV for required timeframes; skipping"
         if warn:
-            log_once(logging, "warning", message)
+            log_once("warning", message)
         else:
-            log_once(logging, "info", message)
+            log_once("info", message)
         log_decision(symbol, "ohlcv_unavailable")
         return None
 
@@ -629,9 +628,9 @@ def fetch_multi_ohlcv(
             ",".join(missing),
         )
         if warn:
-            log_once(logging, "warning", msg)
+            log_once("warning", msg)
         else:
-            log_once(logging, "info", msg)
+            log_once("info", msg)
         result.attrs["reduced"] = True
 
     required_timeframes: list[str] = []
@@ -642,13 +641,12 @@ def fetch_multi_ohlcv(
     expected_cols = [f"close_{tf}" for tf in required_timeframes]
     missing_cols = [col for col in expected_cols if col not in result.columns]
     if result is None or result.empty:
-        log_once(logging, "warning", f"data | {symbol} | empty OHLCV result")
+        log_once("warning", f"data | {symbol} | empty OHLCV result")
         log_decision(symbol, "ohlcv_empty")
         return None
     if missing_cols:
         level = "warning" if warn else "info"
         log_once(
-            logging,
             level,
             f"data | {symbol} | missing columns: {', '.join(missing_cols)}",
         )
@@ -3107,8 +3105,6 @@ def run_trade(
             want_side,
             qty_target,
             category=category,
-            slip_pct=0.001,
-            wait_fill_sec=2.0,
         )
     except Exception as exc:
         logging.warning("entry | %s | ensure_filled failed: %s", symbol, exc)
@@ -3141,10 +3137,9 @@ def run_trade(
     pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
     if pos_qty <= 0:
         log_once(
-            logging,
             "warning",
             f"entry | {symbol} | filled order but no position detected yet; exits postponed",
-            window=60.0,
+            window_sec=60.0,
         )
         log_decision(symbol, "position_unavailable")
         return False
@@ -3173,11 +3168,11 @@ def run_trade(
             is_tp=False,
         )
         if err:
-            log_once(logging, "warning", f"Failed to set SL for {symbol}: {err}")
+            log_once("warning", f"Failed to set SL for {symbol}: {err}")
     except RuntimeError as exc:
-        log_once(logging, "warning", f"Failed to set SL for {symbol}: {exc}")
+        log_once("warning", f"Failed to set SL for {symbol}: {exc}")
     except Exception as exc:
-        log_once(logging, "warning", f"Failed to set SL for {symbol}: {exc}")
+        log_once("warning", f"Failed to set SL for {symbol}: {exc}")
 
     try:
         _, err = place_conditional_exit(
@@ -3189,11 +3184,11 @@ def run_trade(
             is_tp=True,
         )
         if err:
-            log_once(logging, "warning", f"Failed to set TP for {symbol}: {err}")
+            log_once("warning", f"Failed to set TP for {symbol}: {err}")
     except RuntimeError as exc:
-        log_once(logging, "warning", f"Failed to set TP for {symbol}: {exc}")
+        log_once("warning", f"Failed to set TP for {symbol}: {exc}")
     except Exception as exc:
-        log_once(logging, "warning", f"Failed to set TP for {symbol}: {exc}")
+        log_once("warning", f"Failed to set TP for {symbol}: {exc}")
 
     qty = float(pos_qty)
 
@@ -3459,8 +3454,6 @@ def attempt_direct_market_entry(
             side,
             qty_target,
             category=category,
-            slip_pct=0.001,
-            wait_fill_sec=2.0,
         )
     except Exception as exc:
         logging.warning("fallback trade | %s | ensure_filled failed: %s", symbol, exc)
@@ -3493,10 +3486,9 @@ def attempt_direct_market_entry(
     pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
     if pos_qty <= 0:
         log_once(
-            logging,
             "warning",
             f"entry | {symbol} | filled order but no position detected yet; exits postponed",
-            window=60.0,
+            window_sec=60.0,
         )
         log_decision(symbol, "position_unavailable")
         return False
@@ -3525,11 +3517,11 @@ def attempt_direct_market_entry(
             is_tp=False,
         )
         if err:
-            log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set SL: {err}")
+            log_once("warning", f"fallback trade | {symbol} | Failed to set SL: {err}")
     except RuntimeError as exc:
-        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
+        log_once("warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
     except Exception as exc:
-        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
+        log_once("warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
 
     try:
         _, err = place_conditional_exit(
@@ -3541,11 +3533,11 @@ def attempt_direct_market_entry(
             is_tp=True,
         )
         if err:
-            log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set TP: {err}")
+            log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {err}")
     except RuntimeError as exc:
-        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
+        log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
     except Exception as exc:
-        log_once(logging, "warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
+        log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
 
     qty = float(pos_qty)
 
@@ -3996,18 +3988,18 @@ def place_protected_exit(
         except RuntimeError as exc:
             if not str(exc).lower().startswith("exit skipped"):
                 message = f"order | {symbol} | stop order rejected: {exc}"
-                log_once(logging, "error", message)
+                log_once("error", message)
                 record_error(symbol, f"failed to set {order_type}")
             return None
         except Exception as exc:
             message = f"order | {symbol} | stop order rejected: {exc}"
-            log_once(logging, "error", message)
+            log_once("error", message)
             record_error(symbol, f"failed to set {order_type}")
             return None
         if err:
             if not str(err).lower().startswith("exit skipped"):
                 message = f"order | {symbol} | stop order rejected: {err}"
-                log_once(logging, "error", message)
+                log_once("error", message)
                 record_error(symbol, f"failed to set {order_type}")
             return None
         logging.info("order | %s | %s placed", symbol, order_type)
@@ -4039,16 +4031,16 @@ def place_protected_exit(
         )
     except RuntimeError as exc:
         if not str(exc).lower().startswith("exit skipped"):
-            log_once(logging, "error", f"order | {symbol} | take-profit rejected: {exc}")
+            log_once("error", f"order | {symbol} | take-profit rejected: {exc}")
             record_error(symbol, f"failed to set {order_type}")
         return None
     except Exception as exc:
-        log_once(logging, "error", f"order | {symbol} | take-profit rejected: {exc}")
+        log_once("error", f"order | {symbol} | take-profit rejected: {exc}")
         record_error(symbol, f"failed to set {order_type}")
         return None
     if err:
         if not str(err).lower().startswith("exit skipped"):
-            log_once(logging, "error", f"order | {symbol} | take-profit rejected: {err}")
+            log_once("error", f"order | {symbol} | take-profit rejected: {err}")
             record_error(symbol, f"failed to set {order_type}")
         return None
 
@@ -4214,10 +4206,9 @@ def ensure_exit_orders(
     if pos_qty <= 0:
         _last_exit_qty.pop(symbol, None)
         log_once(
-            logging,
             "warning",
             f"exit_guard | {symbol} | postpone exits: no position yet",
-            window=5.0,
+            window_sec=5.0,
         )
         return
 
@@ -4266,22 +4257,22 @@ def ensure_exit_orders(
                 is_tp=False,
             )
         except RuntimeError as exc:
-            if not str(exc).lower().startswith("exit skipped"):
+            err_lower = str(exc).lower()
+            if err_lower.startswith("exit skipped") or "нет позиции" in err_lower:
+                pass
+            else:
                 log_once(
-                    logging,
                     "warning",
                     f"exit_guard | {symbol} | stop order rejected: {exc}",
                 )
         except Exception as exc:
             log_once(
-                logging,
                 "warning",
                 f"exit_guard | {symbol} | stop order rejected: {exc}",
             )
         else:
             if err and not str(err).lower().startswith("exit skipped"):
                 log_once(
-                    logging,
                     "warning",
                     f"exit_guard | {symbol} | stop order rejected: {err}",
                 )
@@ -4301,22 +4292,22 @@ def ensure_exit_orders(
                 is_tp=True,
             )
         except RuntimeError as exc:
-            if not str(exc).lower().startswith("exit skipped"):
+            err_lower = str(exc).lower()
+            if err_lower.startswith("exit skipped") or "нет позиции" in err_lower:
+                pass
+            else:
                 log_once(
-                    logging,
                     "warning",
                     f"exit_guard | {symbol} | take-profit rejected: {exc}",
                 )
         except Exception as exc:
             log_once(
-                logging,
                 "warning",
                 f"exit_guard | {symbol} | take-profit rejected: {exc}",
             )
         else:
             if err and not str(err).lower().startswith("exit skipped"):
                 log_once(
-                    logging,
                     "warning",
                     f"exit_guard | {symbol} | take-profit rejected: {err}",
                 )

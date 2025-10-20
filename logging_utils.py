@@ -24,24 +24,33 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 _LAST_LOGGED_MESSAGE: dict[str, float] = {}
 
 
-def log_once(logger, level: str, text: str, window: float = 5.0) -> None:
-    """Emit *text* via *logger* at *level* unless repeated within *window* seconds."""
+def log_once(
+    level: str,
+    message: str,
+    *,
+    window_sec: float = 5.0,
+    logger=None,
+) -> None:
+    """Emit ``message`` once per ``window_sec`` for the requested log ``level``."""
+
+    if logger is None:
+        logger = logging
 
     try:
         now = time.time()
     except Exception:
         now = 0.0
-    last_ts = float(_LAST_LOGGED_MESSAGE.get(text, 0.0) or 0.0)
-    if now - last_ts < window:
+    last_ts = float(_LAST_LOGGED_MESSAGE.get(message, 0.0) or 0.0)
+    if now - last_ts < window_sec:
         return
-    _LAST_LOGGED_MESSAGE[text] = now
+    _LAST_LOGGED_MESSAGE[message] = now
     # prune occasionally to avoid unbounded growth
     if len(_LAST_LOGGED_MESSAGE) > 256:
-        stale_cutoff = now - (window * 4)
+        stale_cutoff = now - (window_sec * 4)
         for msg in list(_LAST_LOGGED_MESSAGE.keys()):
-            if msg != text and _LAST_LOGGED_MESSAGE[msg] < stale_cutoff:
+            if msg != message and _LAST_LOGGED_MESSAGE[msg] < stale_cutoff:
                 _LAST_LOGGED_MESSAGE.pop(msg, None)
-    getattr(logger, level)(text)
+    getattr(logger, level)(message)
 
 # ``colorama`` is an optional dependency used only for colored console output.
 # In minimal environments (such as some CI systems) it may be absent.  Import it
@@ -192,10 +201,8 @@ def enter_ensure_filled(
     qty: float,
     *,
     category: str = "linear",
-    slip_pct: float = 0.001,
-    wait_fill_sec: float = 2.0,
 ) -> tuple[str | None, float]:
-    """Place an IOC limit entry and complete the fill with a market order."""
+    """Place an IOC limit entry, then complete any remainder with a market order."""
 
     cat = str(category or "").lower()
     if not cat or cat == "swap":
@@ -231,7 +238,12 @@ def enter_ensure_filled(
     if last <= 0:
         last = 1.0
 
-    price_raw = last * (1 + slip_pct if str(side).lower() == "buy" else 1 - slip_pct)
+    side_lower = str(side).lower()
+    if side_lower == "buy":
+        price_raw = last * 1.001
+    else:
+        price_raw = last * 0.999
+
     price_prec, qty_prec = _price_qty_to_precision(ex, norm, price=price_raw, amount=qty)
     qty_prec = _round_qty(ex, norm, float(qty_prec or 0.0))
     if qty_prec <= 0:
@@ -242,8 +254,8 @@ def enter_ensure_filled(
     oid = limit_resp.get("id") if isinstance(limit_resp, dict) else None
     filled = float(limit_resp.get("filled") or 0) if isinstance(limit_resp, dict) else 0.0
 
-    t0 = time.time()
-    while time.time() - t0 < wait_fill_sec and filled < qty_prec and oid:
+    deadline = time.time() + 2.0
+    while time.time() < deadline and filled < qty_prec and oid:
         time.sleep(0.2)
         try:
             state = ex.fetch_order(oid, norm, params={"category": cat})
@@ -1565,7 +1577,7 @@ def log_decision(symbol: str, reason: str, *, decision: str = "skip", path: str 
         writer.writerow([datetime.now(timezone.utc).isoformat(), symbol, decision, reason])
     message = "Skipped: " + reason if decision == "skip" else reason
     text = " | ".join(["decision", decision, symbol, message])
-    log_once(logging, "info", text)
+    log_once("info", text)
     _info_status[symbol]["last_reason"] = reason
     emit_summary(symbol, reason)
 
@@ -2436,7 +2448,6 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                 if ALLOW_MARKET_FALLBACK and (band_error or param_error):
                     market_retry_allowed = True
                     log_once(
-                        logging,
                         "warning",
                         f"order | {display_symbol} | limit rejected ({err_str}); retrying as MARKET",
                     )
@@ -2487,13 +2498,7 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
         precision_cb = _precision_cb
     _, pos_qty = has_open_position(ex, symbol, cat)
     if pos_qty <= 0:
-        log_once(
-            logging,
-            "info",
-            f"exit | {symbol} | postpone exits: position not detected",
-            window=5.0,
-        )
-        return None, "position_unavailable"
+        raise RuntimeError("нет позиции")
     try:
         ticker = ex.fetch_ticker(norm)
     except Exception:
@@ -2572,7 +2577,12 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
     return order_id, None
 
 
-def wait_position_after_entry(ex, symbol: str, category: str = "linear", timeout_sec: float = 3.0) -> float:
+def wait_position_after_entry(
+    ex,
+    symbol: str,
+    category: str = "linear",
+    timeout_sec: float = 3.0,
+) -> float:
     cat = str(category or "").lower()
     if not cat or cat == "swap":
         cat = "linear"
@@ -2584,7 +2594,7 @@ def wait_position_after_entry(ex, symbol: str, category: str = "linear", timeout
         _, qabs = has_open_position(ex, symbol, cat)
         if qabs > 0:
             return qabs
-        time.sleep(0.15)
+        time.sleep(0.3)
     return 0.0
 
 
@@ -2611,7 +2621,11 @@ def has_pending_entry(ex, symbol: str, side: str, category: str = "linear") -> b
     for order in orders:
         if not isinstance(order, dict):
             continue
-        if str(order.get("reduceOnly")).lower() == "true":
+        reduce_flag = order.get("reduceOnly")
+        if isinstance(reduce_flag, str):
+            if reduce_flag.strip().lower() in {"true", "1", "yes"}:
+                continue
+        elif reduce_flag:
             continue
         order_side = str(order.get("side") or order.get("info", {}).get("side") or "").lower()
         if order_side != side_lower:
@@ -2640,7 +2654,7 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
             time.sleep(2)
             continue
         message = f"leverage | {symbol} | Failed to set leverage {leverage} (soft)"
-        log_once(logging, "warning", message, window=5.0)
+        log_once("warning", message, window_sec=5.0)
         tag = "leverage_failed_soft"
         if tag not in _order_status[symbol]:
             _order_status[symbol].append(tag)
