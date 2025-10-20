@@ -82,20 +82,20 @@ def to_sdk(symbol: str) -> str:
 
 
 def set_valid_leverage(exchange, symbol: str, leverage: int | float):
+    """Set leverage for derivatives while skipping spot markets when required."""
+
     try:
-        L = int(leverage)
+        L = max(1, int(leverage))
     except Exception:
         try:
-            L = int(float(leverage))
+            L = max(1, int(float(leverage)))
         except Exception:
             L = 1
-    if L <= 0:
-        L = 1
 
     exid = str(getattr(exchange, "id", "") or "").lower()
     is_bybit = exid == "bybit"
 
-    def _resolve_short_symbol(sym: str) -> str:
+    def _resolve_short_symbol(sym: str):
         if not isinstance(sym, str):
             return sym
         for source in (
@@ -114,23 +114,26 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
                 break
         return _ccxt_symbol(sym)
 
-    params: dict[str, Any] = {}
+    cat = detect_market_category(exchange, symbol) or "linear"
+    cat = str(cat or "").lower()
+    if not cat or cat == "swap":
+        cat = "linear"
+
     short_symbol = _resolve_short_symbol(symbol)
+    params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
 
     if is_bybit:
-        detected = detect_market_category(exchange, symbol)
-        cat = str(detected or "").lower() or "linear"
-        if not cat or cat == "swap":
-            cat = "linear"
         if cat == "spot":
             return LEVERAGE_SKIPPED
-        params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
         try:
             exchange.set_leverage(L, short_symbol, params)
             return L
-        except Exception as exc:
-            logging.info("leverage | %s | soft-skip: %s", symbol, exc)
+        except Exception as e:  # pragma: no cover - network interaction
+            logging.info(f"leverage | {symbol} | soft-skip: {e}")
             return None
+
+    if cat == "spot":
+        return LEVERAGE_SKIPPED
 
     market_meta: dict[str, Any] | None = None
     candidates: list[str] = []
@@ -171,13 +174,8 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
         if spot_hint and not derivative_hint:
             return LEVERAGE_SKIPPED
 
-    params_for_call = params or None
-
     try:
-        if params_for_call is not None:
-            exchange.set_leverage(L, short_symbol, params_for_call)
-        else:
-            exchange.set_leverage(L, short_symbol)
+        exchange.set_leverage(L, short_symbol)
         return L
     except Exception as exc:
         logging.info("exchange_adapter | leverage | %s | soft-skip: %s", symbol, exc)
