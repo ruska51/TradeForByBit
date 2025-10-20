@@ -360,6 +360,7 @@ class ExchangeAdapter:
         self.markets_loaded_at: float = 0.0
         self._ohlcv_cache: dict[tuple[str, str, int], tuple[float, list[list]]]
         self._ohlcv_cache = {}
+        self._log_once_cache: dict[tuple[str, str], float] = {}
 
         self._detect_backend()
 
@@ -831,52 +832,21 @@ class ExchangeAdapter:
                 raise AdapterOHLCVUnavailable(f"markets empty for {symbol}")
 
         log_params = {"symbol": symbol, "timeframe": timeframe, "limit": limit}
-        base_params = self._default_params(
-            include_position_idx=False, symbol=ccxt_symbol or symbol
-        ) or {}
-        request_params: dict[str, Any] | None
-        is_futures = bool(getattr(self, "futures", getattr(self, "is_futures", False)))
-        base_exchange = getattr(self, "x", None) or getattr(self, "exchange", None)
-        detected_cat = (
-            detect_market_category(base_exchange, symbol) if base_exchange else None
-        )
-        cat = str(detected_cat or "").lower()
-        if cat in {"", "swap", None}:
+        exchange = getattr(self, "x", None) or getattr(self, "exchange", None)
+        detected_cat = detect_market_category(exchange, symbol) if exchange else None
+        cat = str(detected_cat or "linear").lower()
+        if cat == "swap":
             cat = "linear"
-        if cat == "spot" and is_futures:
+        if cat not in {"linear", "inverse"}:
             cat = "linear"
-        if cat not in {"linear", "inverse", "spot"}:
-            market_meta = None
-            try:
-                market_meta = markets.get(ccxt_symbol) if isinstance(markets, dict) else None
-                if market_meta is None and isinstance(markets, dict):
-                    market_meta = markets.get(symbol)
-            except Exception:
-                market_meta = None
-            if isinstance(market_meta, dict):
-                try:
-                    if market_meta.get("inverse"):
-                        cat = "inverse"
-                    elif market_meta.get("linear") or market_meta.get("swap"):
-                        cat = "linear"
-                except Exception:
-                    pass
-        params_copy = dict(base_params)
-        if cat == "spot" and not is_futures:
-            params_copy.pop("category", None)
-        elif cat in {"linear", "inverse"}:
-            params_copy["category"] = cat
-        else:
-            params_copy["category"] = "linear"
-        request_params = params_copy or None
+        request_params: dict[str, Any] | None = {"category": cat}
 
         try:
             data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
             if not data:
-                self._warn(
-                    "ohlcv_empty",
-                    f"{symbol}:{timeframe}",
-                    f"adapter | fetch_ohlcv empty result symbol={symbol} tf={timeframe}",
+                self.log_once(
+                    "warning",
+                    f"fetch_ohlcv empty: {symbol} {timeframe} cat={cat}",
                 )
                 return None
             url = getattr(self.x, "last_request_url", "unknown")
@@ -910,10 +880,9 @@ class ExchangeAdapter:
             try:
                 data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
                 if not data:
-                    self._warn(
-                        "ohlcv_empty",
-                        f"{symbol}:{timeframe}",
-                        f"adapter | fetch_ohlcv empty result symbol={symbol} tf={timeframe}",
+                    self.log_once(
+                        "warning",
+                        f"fetch_ohlcv empty: {symbol} {timeframe} cat={cat}",
                     )
                     return None
                 url = getattr(self.x, "last_request_url", "unknown")
@@ -927,6 +896,12 @@ class ExchangeAdapter:
                 self._store_ohlcv_cache(cache_key, data)
                 return data
             except Exception as exc:  # pragma: no cover - logging only
+                if self._is_empty_result_exception(exc):
+                    self.log_once(
+                        "warning",
+                        f"fetch_ohlcv failed: {symbol} {timeframe} cat={cat} ({exc})",
+                    )
+                    return None
                 return self._handle_fetch_failure(
                     symbol,
                     timeframe,
@@ -937,6 +912,12 @@ class ExchangeAdapter:
                     request_symbol=ccxt_symbol,
                 )
         except Exception as exc:  # pragma: no cover - logging only
+            if self._is_empty_result_exception(exc):
+                self.log_once(
+                    "warning",
+                    f"fetch_ohlcv failed: {symbol} {timeframe} cat={cat} ({exc})",
+                )
+                return None
             if self._is_rate_limited(exc):
                 time.sleep(2)
                 try:
@@ -944,6 +925,12 @@ class ExchangeAdapter:
                         ccxt_symbol, timeframe, limit, request_params
                     )
                 except Exception as retry_exc:  # pragma: no cover - logging only
+                    if self._is_empty_result_exception(retry_exc):
+                        self.log_once(
+                            "warning",
+                            f"fetch_ohlcv failed: {symbol} {timeframe} cat={cat} ({retry_exc})",
+                        )
+                        return None
                     return self._handle_fetch_failure(
                         symbol,
                         timeframe,
@@ -954,10 +941,9 @@ class ExchangeAdapter:
                         request_symbol=ccxt_symbol,
                     )
                 if not data:
-                    self._warn(
-                        "ohlcv_empty",
-                        f"{symbol}:{timeframe}",
-                        f"adapter | fetch_ohlcv empty result symbol={symbol} tf={timeframe}",
+                    self.log_once(
+                        "warning",
+                        f"fetch_ohlcv empty: {symbol} {timeframe} cat={cat}",
                     )
                     return None
                 url = getattr(self.x, "last_request_url", "unknown")
@@ -1005,6 +991,17 @@ class ExchangeAdapter:
             or "-1003" in msg
             or status_code == 429
         )
+
+    @staticmethod
+    def _is_empty_result_exception(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        if "empty result" in msg:
+            return True
+        if "unknown" in msg and "status" in msg:
+            return True
+        if "unknown status" in msg:
+            return True
+        return False
 
     def _fetch_ohlcv_from_csv(self, symbol: str, timeframe: str, limit: int) -> list[list]:
         path = self._csv_path(symbol, timeframe)
@@ -1386,6 +1383,23 @@ class ExchangeAdapter:
 
     def _warn(self, topic: str, key: str, message: str) -> None:
         self._warn_once((topic, key), message)
+
+    def log_once(self, level: str, message: str, *, interval: float = 60.0) -> None:
+        cache = getattr(self, "_log_once_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_log_once_cache", cache)
+        now = time.time()
+        key = (level, message)
+        last = cache.get(key, 0.0)
+        if now - last < interval:
+            return
+        cache[key] = now
+        logger = getattr(logging, level, None)
+        if callable(logger):
+            logger(message)
+        else:
+            logging.log(getattr(logging, level.upper(), logging.INFO), message)
 
     # convenience -------------------------------------------------------
     def supports_symbol(self, symbol: str, markets: Optional[set[str]] = None) -> bool:
