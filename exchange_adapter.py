@@ -264,104 +264,27 @@ def to_sdk(symbol: str) -> str:
 
 
 def set_valid_leverage(exchange, symbol: str, leverage: int | float):
-    """Set leverage for derivatives while skipping spot markets when required."""
+    """Set leverage for Bybit linear/inverse derivatives using minimal, explicit params."""
 
+    # normalize leverage to int
     try:
-        L = max(1, int(leverage))
+        L = int(leverage)
     except Exception:
-        try:
-            L = max(1, int(float(leverage)))
-        except Exception:
-            L = 1
+        L = int(float(leverage))
 
-    exid = str(getattr(exchange, "id", "") or "").lower()
-    is_bybit = exid == "bybit"
-
-    def _resolve_short_symbol(sym: str):
-        if not isinstance(sym, str):
-            return sym
-        for source in (
-            getattr(exchange, "adapter", None),
-            exchange,
-        ):
-            converter = getattr(source, "_ccxt_symbol", None)
-            if not callable(converter):
-                continue
-            try:
-                mapped = converter(sym)
-            except Exception:
-                mapped = None
-            if isinstance(mapped, str) and mapped:
-                sym = mapped
-                break
-        return _ccxt_symbol(sym)
-
+    # category resolution
     cat = detect_market_category(exchange, symbol) or "linear"
-    cat = str(cat or "").lower()
-    if cat in {"", "swap"}:
+    if cat == "swap":
         cat = "linear"
-    if cat == "spot":
-        return LEVERAGE_SKIPPED
 
+    # short symbol for CCXT
+    short_symbol = _ccxt_symbol(symbol)
+
+    # exact params required by Bybit linear
     params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
-    short_symbol = _resolve_short_symbol(symbol)
 
-    if is_bybit:
-        try:
-            exchange.set_leverage(L, short_symbol, params)
-            return L
-        except Exception as e:  # pragma: no cover - network interaction
-            logging.info("leverage | %s | soft-skip: %s", symbol, e)
-            return None
-
-    if cat == "spot":
-        return LEVERAGE_SKIPPED
-
-    market_meta: dict[str, Any] | None = None
-    candidates: list[str] = []
-    for candidate in (short_symbol, symbol):
-        if isinstance(candidate, str) and candidate and candidate not in candidates:
-            candidates.append(candidate)
-    for candidate in candidates:
-        try:
-            market_obj = exchange.market(candidate)
-        except Exception:
-            markets = getattr(exchange, "markets", {}) or {}
-            market_obj = markets.get(candidate)
-        if isinstance(market_obj, dict):
-            market_meta = market_obj
-            break
-
-    if isinstance(market_meta, dict):
-        derivative_hint = bool(
-            market_meta.get("linear")
-            or market_meta.get("inverse")
-            or market_meta.get("swap")
-        )
-        market_type = str(market_meta.get("type") or "").lower()
-        spot_hint = bool(market_meta.get("spot") or market_type == "spot")
-        info = market_meta.get("info")
-        if isinstance(info, dict):
-            for key in ("category", "contractType", "productType", "market"):
-                hint = normalize_bybit_category(info.get(key))
-                if hint == "spot":
-                    spot_hint = True
-                elif hint in {"linear", "inverse"}:
-                    derivative_hint = True
-        type_hint = normalize_bybit_category(market_meta.get("type"))
-        if type_hint == "spot":
-            spot_hint = True
-        elif type_hint in {"linear", "inverse"}:
-            derivative_hint = True
-        if spot_hint and not derivative_hint:
-            return LEVERAGE_SKIPPED
-
-    try:
-        exchange.set_leverage(L, short_symbol)
-        return L
-    except Exception as exc:
-        logging.info("exchange_adapter | leverage | %s | soft-skip: %s", symbol, exc)
-        return None
+    # single CCXT call; no positionIdx, no extra probing
+    return exchange.set_leverage(L, short_symbol, params)
 
 
 def validate_api(exchange) -> None:
