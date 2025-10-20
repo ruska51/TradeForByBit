@@ -14,7 +14,6 @@ from typing import Any, Dict, Optional, Callable
 from logging_utils import (
     log,
     normalize_bybit_category,
-    detect_market_category,
 )
 
 
@@ -22,13 +21,196 @@ LEVERAGE_SKIPPED = object()
 
 
 def _ccxt_symbol(symbol: str) -> str:
-    """Return a shortened CCXT symbol without settlement suffixes."""
+    """Return the short CCXT identifier without settlement suffixes."""
 
     if not isinstance(symbol, str):
         return symbol
-    if ":" in symbol:
-        return symbol.split(":", 1)[0]
-    return symbol
+
+    value = symbol.strip()
+    if not value:
+        return value
+
+    if ":" in value:
+        value = value.split(":", 1)[0]
+
+    if "/" in value:
+        base, quote = value.split("/", 1)
+        value = f"{base}{quote}"
+
+    return value
+
+
+def detect_market_category(exchange, symbol: str) -> str | None:
+    """Best-effort detection of the market category for ``symbol``.
+
+    Returns ``"linear"`` or ``"inverse"`` when a derivative contract can be
+    detected.  Spot markets result in ``None``.  ``"swap"`` hints are treated as
+    ``"linear"`` because Bybit represents perpetual contracts that way.
+    """
+
+    if not exchange or not isinstance(symbol, str) or not symbol.strip():
+        return None
+
+    markets_loaded = getattr(exchange, "markets", None)
+    if not markets_loaded:
+        loader = getattr(exchange, "load_markets", None)
+        if callable(loader):
+            try:
+                loader()
+            except Exception:
+                pass
+
+    def _normalize(value) -> str | None:
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if not lowered:
+                return None
+            if "inverse" in lowered:
+                return "inverse"
+            if "linear" in lowered:
+                return "linear"
+            if lowered in {"swap", "perp", "perpetual"}:
+                return "linear"
+        return None
+
+    def _market_category(meta: dict | None) -> str | None:
+        if not isinstance(meta, dict):
+            return None
+
+        if meta.get("inverse"):
+            return "inverse"
+        if meta.get("linear"):
+            return "linear"
+        if meta.get("swap"):
+            return "linear"
+
+        info = meta.get("info")
+        if isinstance(info, dict):
+            for key in (
+                "category",
+                "contractType",
+                "productType",
+                "market",
+                "subType",
+            ):
+                normalized = _normalize(info.get(key))
+                if normalized:
+                    return normalized
+
+        for key in ("category", "type"):
+            normalized = _normalize(meta.get(key))
+            if normalized:
+                return normalized
+
+        settle = str(meta.get("settle") or meta.get("settleId") or "").upper()
+        quote = str(meta.get("quote") or "").upper()
+        if settle and quote:
+            if settle != quote:
+                return "inverse"
+            return "linear"
+
+        market_type = str(meta.get("type") or "").lower()
+        if market_type in {"swap", "future", "futures", "contract"}:
+            return "linear"
+
+        return None
+
+    def _lookup_market(sym: str) -> dict | None:
+        try:
+            market = exchange.market(sym)
+            if isinstance(market, dict) and market:
+                return market
+        except Exception:
+            pass
+
+        markets = getattr(exchange, "markets", {}) or {}
+        if isinstance(markets, dict):
+            market = markets.get(sym)
+            if isinstance(market, dict) and market:
+                return market
+
+        markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
+        if isinstance(markets_by_id, dict):
+            market = markets_by_id.get(sym)
+            if isinstance(market, dict) and market:
+                return market
+
+        return None
+
+    def _iter_markets():
+        markets = getattr(exchange, "markets", {}) or {}
+        if isinstance(markets, dict):
+            yield from markets.values()
+        markets_by_id = getattr(exchange, "markets_by_id", {}) or {}
+        if isinstance(markets_by_id, dict):
+            yield from markets_by_id.values()
+
+    def _parse_base_quote(sym: str) -> tuple[str | None, str | None]:
+        if not isinstance(sym, str):
+            return (None, None)
+        if "/" in sym:
+            base, rest = sym.split("/", 1)
+            quote = rest.split(":", 1)[0]
+            base = base.strip().upper()
+            quote = quote.strip().upper()
+            return (base or None, quote or None)
+        return (None, None)
+
+    symbol = symbol.strip()
+    short_symbol = _ccxt_symbol(symbol)
+    market_symbol = symbol.split(":", 1)[0]
+    candidates: list[str] = []
+    for candidate in (symbol, market_symbol, short_symbol):
+        if isinstance(candidate, str) and candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        market = _lookup_market(candidate)
+        category = _market_category(market)
+        if category:
+            return category
+
+    base = quote = None
+    for candidate in candidates:
+        base, quote = _parse_base_quote(candidate)
+        if base and quote:
+            break
+
+    if not (base and quote):
+        for market in _iter_markets():
+            mapped_symbol = None
+            if isinstance(market, dict):
+                mapped_symbol = market.get("symbol") or market.get("id")
+            if isinstance(mapped_symbol, str):
+                base, quote = _parse_base_quote(mapped_symbol)
+                if base and quote and _market_category(market):
+                    if short_symbol and short_symbol.upper() == _ccxt_symbol(mapped_symbol).upper():
+                        return _market_category(market)
+        return None
+
+    base = base.upper()
+    quote = quote.upper()
+
+    for market in _iter_markets():
+        if not isinstance(market, dict):
+            continue
+        meta_base = str(market.get("base") or "").upper()
+        meta_quote = str(market.get("quote") or "").upper()
+        if not meta_base or not meta_quote:
+            mapped = market.get("symbol") or market.get("id")
+            if isinstance(mapped, str):
+                meta_base, meta_quote = _parse_base_quote(mapped)
+                meta_base = (meta_base or "").upper()
+                meta_quote = (meta_quote or "").upper()
+        if not meta_base or not meta_quote:
+            continue
+        if meta_base != base or meta_quote != quote:
+            continue
+        category = _market_category(market)
+        if category:
+            return category
+
+    return None
 
 
 # ``ccxt`` is imported lazily so tests can monkeypatch the module before the
