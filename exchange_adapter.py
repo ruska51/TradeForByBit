@@ -654,7 +654,7 @@ class ExchangeAdapter:
         timeframe: str,
         limit: int,
         request_params: dict | None = None,
-    ) -> list[list]:
+    ) -> list[list] | None:
         ex = getattr(self, "x", None)
         if not ex:
             raise AdapterOHLCVUnavailable("exchange unavailable")
@@ -682,7 +682,9 @@ class ExchangeAdapter:
         except TypeError:
             return ex.fetch_ohlcv(symbol, timeframe, limit)
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, *, limit: int = 500) -> list[list]:
+    def fetch_ohlcv(
+        self, symbol: str, timeframe: str, *, limit: int = 500
+    ) -> list[list] | None:
         if not symbol:
             raise AdapterOHLCVUnavailable("symbol required")
         if not timeframe:
@@ -741,7 +743,12 @@ class ExchangeAdapter:
         try:
             data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
             if not data:
-                raise AdapterOHLCVUnavailable("empty result")
+                self._warn(
+                    "ohlcv_empty",
+                    f"{symbol}:{timeframe}",
+                    f"adapter | fetch_ohlcv empty result symbol={symbol} tf={timeframe}",
+                )
+                return None
             url = getattr(self.x, "last_request_url", "unknown")
             status = getattr(self.x, "last_http_status_code", "unknown")
             logging.debug(
@@ -773,7 +780,12 @@ class ExchangeAdapter:
             try:
                 data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
                 if not data:
-                    raise AdapterOHLCVUnavailable("empty result")
+                    self._warn(
+                        "ohlcv_empty",
+                        f"{symbol}:{timeframe}",
+                        f"adapter | fetch_ohlcv empty result symbol={symbol} tf={timeframe}",
+                    )
+                    return None
                 url = getattr(self.x, "last_request_url", "unknown")
                 status = getattr(self.x, "last_http_status_code", "unknown")
                 logging.debug(
@@ -812,15 +824,12 @@ class ExchangeAdapter:
                         request_symbol=ccxt_symbol,
                     )
                 if not data:
-                    return self._handle_fetch_failure(
-                        symbol,
-                        timeframe,
-                        limit,
-                        log_params,
-                        exc,
-                        request_params=request_params,
-                        request_symbol=ccxt_symbol,
+                    self._warn(
+                        "ohlcv_empty",
+                        f"{symbol}:{timeframe}",
+                        f"adapter | fetch_ohlcv empty result symbol={symbol} tf={timeframe}",
                     )
+                    return None
                 url = getattr(self.x, "last_request_url", "unknown")
                 status = getattr(self.x, "last_http_status_code", "unknown")
                 logging.debug(
@@ -907,7 +916,7 @@ class ExchangeAdapter:
         *,
         request_params: dict | None = None,
         request_symbol: str | None = None,
-    ) -> list[list]:
+    ) -> list[list] | None:
         url = getattr(self.x, "last_request_url", "unknown")
         status = getattr(self.x, "last_http_status_code", "unknown")
         logging.warning(
@@ -961,7 +970,12 @@ class ExchangeAdapter:
             self._store_ohlcv_cache((symbol, timeframe, int(limit or 0)), data)
             return data
 
-        raise AdapterOHLCVUnavailable(str(exc)) from exc
+        self._warn(
+            "ohlcv_fail",
+            f"{symbol}:{timeframe}",
+            f"adapter | fetch_ohlcv giving up symbol={symbol} tf={timeframe} error={exc}",
+        )
+        return None
 
     # ------------------------------------------------------------------
     def fetch_multi_ohlcv(self, symbol: str, timeframes: list[str], limit: int = 300) -> dict[str, list[list]]:
@@ -973,8 +987,13 @@ class ExchangeAdapter:
         statuses: list[str] = []
         for tf in timeframes:
             try:
-                results[tf] = self.fetch_ohlcv(symbol, tf, limit=limit)
-                statuses.append(f"{tf}:ok")
+                data = self.fetch_ohlcv(symbol, tf, limit=limit)
+                if data:
+                    results[tf] = data
+                    statuses.append(f"{tf}:ok")
+                else:
+                    failed.append(tf)
+                    statuses.append(f"{tf}:empty")
             except Exception:
                 failed.append(tf)
                 statuses.append(f"{tf}:fail")
@@ -982,6 +1001,88 @@ class ExchangeAdapter:
         if failed:
             logging.warning("adapter | %s | failed %s", symbol, ",".join(failed))
         return results
+
+    # ------------------------------------------------------------------
+    def fetch_positions(
+        self,
+        symbols: list[str] | None = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> list[dict]:
+        """Fetch open positions while applying Bybit specific defaults."""
+
+        ex = getattr(self, "x", None)
+        if ex is None or not hasattr(ex, "fetch_positions"):
+            return []
+
+        merged: dict[str, Any] = dict(params or {})
+        cat_raw = str(merged.get("category") or "").lower()
+
+        normalized_symbols: list[str] | None = None
+        first_symbol: str | None = None
+        if symbols:
+            normalized_symbols = []
+            for sym in symbols:
+                if not sym:
+                    continue
+                mapped = self._ccxt_symbol(sym)
+                normalized_symbols.append(mapped)
+                if first_symbol is None:
+                    first_symbol = sym
+
+        if not cat_raw and first_symbol:
+            detected = detect_market_category(ex, first_symbol)
+            if detected:
+                cat_raw = str(detected).lower()
+        if not cat_raw and self.futures:
+            cat_raw = "linear"
+
+        if cat_raw in {"", "swap", "spot"}:
+            category = "linear"
+        elif cat_raw in {"linear", "inverse"}:
+            category = cat_raw
+        else:
+            category = "linear"
+
+        merged["category"] = category
+        merged.pop("positionIdx", None)
+
+        call_params = merged or None
+        symbol_arg: Any = normalized_symbols
+
+        attempts: list[Callable[[], Any]] = []
+        if symbol_arg is not None:
+            if call_params is not None:
+                attempts.append(lambda: ex.fetch_positions(symbol_arg, call_params))
+            attempts.append(lambda: ex.fetch_positions(symbol_arg))
+        else:
+            if call_params is not None:
+                attempts.append(lambda: ex.fetch_positions(None, call_params))
+            attempts.append(lambda: ex.fetch_positions())
+
+        last_error: Exception | None = None
+        for attempt in attempts:
+            try:
+                result = attempt()
+                if result is not None:
+                    return result
+            except TypeError:
+                continue
+            except Exception as exc:  # pragma: no cover - network dependent
+                last_error = exc
+                if call_params and "category" in call_params:
+                    self._warn(
+                        "positions",
+                        str(first_symbol or symbol_arg or "ALL"),
+                        f"adapter | fetch_positions warning symbol={first_symbol or 'ALL'} error={exc}",
+                    )
+
+        if last_error is not None:
+            self._warn(
+                "positions",
+                str(first_symbol or symbol_arg or "ALL"),
+                f"adapter | fetch_positions failed symbol={first_symbol or 'ALL'} error={last_error}",
+            )
+        return []
 
     # ------------------------------------------------------------------
     def fetch_open_orders(self, symbol: str | None = None) -> tuple[int, list]:

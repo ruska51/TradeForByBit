@@ -1564,7 +1564,8 @@ def log_decision(symbol: str, reason: str, *, decision: str = "skip", path: str 
             writer.writerow(["timestamp", "symbol", "signal", "reason"])
         writer.writerow([datetime.now(timezone.utc).isoformat(), symbol, decision, reason])
     message = "Skipped: " + reason if decision == "skip" else reason
-    log(logging.INFO, "decision", decision, symbol, message)
+    text = " | ".join(["decision", decision, symbol, message])
+    log_once(logging, "info", text)
     _info_status[symbol]["last_reason"] = reason
     emit_summary(symbol, reason)
 
