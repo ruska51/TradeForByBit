@@ -2931,24 +2931,24 @@ def run_trade(
         log_decision(symbol, "no_futures_contract")
         return False
     want_side = "buy" if signal == "long" else "sell"
-    qty_signed, _ = has_open_position(exchange, symbol, category)
-    if abs(qty_signed) > 0:
+    qty_signed, qty_abs = has_open_position(exchange, symbol, category)
+    if qty_abs > 0:
         logging.info(
             "entry | %s | skip: position already open (qty=%.4f)",
             symbol,
             qty_signed,
         )
-        log_decision(symbol, "position already open")
+        log_decision(symbol, "position_already_open")
         return False
     if has_pending_entry(exchange, symbol, want_side, category):
         logging.info("entry | %s | skip: pending entry exists (%s)", symbol, want_side)
-        log_decision(symbol, "pending entry exists")
+        log_decision(symbol, "pending_entry_exists")
         return False
     bar_id = int(time.time() // (5 * 60))
     guard_state = _entry_guard.get(symbol) or {}
     if guard_state.get("bar") == bar_id and guard_state.get("side") == want_side:
         logging.info("entry | %s | skip: already entered this bar", symbol)
-        log_decision(symbol, "already entered this bar")
+        log_decision(symbol, "entry_guard_active")
         return False
 
     lev = LEVERAGE if leverage is None else leverage
@@ -3075,7 +3075,6 @@ def run_trade(
             want_side,
             qty_target,
             category=category,
-            prefer_limit=True,
             slip_pct=0.001,
             wait_fill_sec=2.0,
         )
@@ -3115,6 +3114,7 @@ def run_trade(
             f"entry | {symbol} | filled order but no position detected yet; exits postponed",
             window=60.0,
         )
+        log_decision(symbol, "position_unavailable")
         return False
 
     want_long = signal == "long"
@@ -3291,24 +3291,24 @@ def attempt_direct_market_entry(
         )
         log_decision(symbol, "no_futures_contract")
         return False
-    qty_signed, _ = has_open_position(ADAPTER.x, symbol, category)
-    if abs(qty_signed) > 0:
+    qty_signed, qty_abs = has_open_position(ADAPTER.x, symbol, category)
+    if qty_abs > 0:
         logging.info(
             "entry | %s | skip: position already open (qty=%.4f)",
             symbol,
             qty_signed,
         )
-        log_decision(symbol, "position already open")
+        log_decision(symbol, "position_already_open")
         return False
     if has_pending_entry(ADAPTER.x, symbol, side, category):
         logging.info("entry | %s | skip: pending entry exists (%s)", symbol, side)
-        log_decision(symbol, "pending entry exists")
+        log_decision(symbol, "pending_entry_exists")
         return False
     bar_id = int(time.time() // (5 * 60))
     guard_state = _entry_guard.get(symbol) or {}
     if guard_state.get("bar") == bar_id and guard_state.get("side") == side:
         logging.info("entry | %s | skip: already entered this bar", symbol)
-        log_decision(symbol, "already entered this bar")
+        log_decision(symbol, "entry_guard_active")
         return False
 
     balance = 0.0
@@ -3427,7 +3427,6 @@ def attempt_direct_market_entry(
             side,
             qty_target,
             category=category,
-            prefer_limit=True,
             slip_pct=0.001,
             wait_fill_sec=2.0,
         )
@@ -3467,6 +3466,7 @@ def attempt_direct_market_entry(
             f"entry | {symbol} | filled order but no position detected yet; exits postponed",
             window=60.0,
         )
+        log_decision(symbol, "position_unavailable")
         return False
 
     want_long = direction == "long"
@@ -5064,6 +5064,16 @@ def run_bot():
             multi_df = pd.DataFrame()
         if multi_df.empty:
             logging.info("data | %s | insufficient multi-timeframe data", symbol)
+            log_decision(symbol, "no_data")
+            continue
+        required_multi_cols = {"close_15m", "volume_15m"}
+        missing_multi = [col for col in required_multi_cols if col not in multi_df.columns]
+        if missing_multi:
+            logging.info(
+                "data | %s | missing multi-timeframe columns %s",
+                symbol,
+                ",".join(sorted(missing_multi)),
+            )
             log_decision(symbol, "no_data")
             continue
         tf_signals = {tf: timeframe_direction(multi_df, tf) for tf in ["5m", "15m", "30m"]}

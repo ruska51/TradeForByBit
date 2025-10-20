@@ -119,7 +119,7 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
 
     if is_bybit:
         detected = detect_market_category(exchange, symbol)
-        cat = str(detected or "").lower()
+        cat = str(detected or "").lower() or "linear"
         if not cat or cat == "swap":
             cat = "linear"
         if cat == "spot":
@@ -729,6 +729,16 @@ class ExchangeAdapter:
         request_params = self._default_params(
             include_position_idx=False, symbol=ccxt_symbol or symbol
         ) or None
+        is_futures = bool(getattr(self, "futures", getattr(self, "is_futures", False)))
+        if is_futures:
+            cat = str((request_params or {}).get("category") or "").lower()
+            if cat in {"", "swap"}:
+                cat = "linear"
+            if cat == "spot":
+                cat = "linear"
+            if cat:
+                request_params = dict(request_params or {})
+                request_params["category"] = cat
 
         try:
             data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
