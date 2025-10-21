@@ -9,7 +9,7 @@ import importlib
 import csv
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Dict, Optional
 
 from logging_utils import (
     log,
@@ -1130,6 +1130,55 @@ class ExchangeAdapter:
         return results
 
     # ------------------------------------------------------------------
+    def _normalize_symbol_key(self, symbol: str | None) -> str | None:
+        """Return a canonical symbol representation for comparisons."""
+
+        if not isinstance(symbol, str):
+            return None
+
+        candidate = self._ccxt_symbol(symbol)
+        if not isinstance(candidate, str) or not candidate:
+            candidate = symbol
+
+        candidate = candidate.split(":", 1)[0]
+        candidate = candidate.replace("/", "")
+        candidate = candidate.strip().upper()
+        return candidate or None
+
+    def _normalize_position_symbol(self, position: dict[str, Any] | None) -> str | None:
+        """Extract and normalise the symbol identifier from a position."""
+
+        if not isinstance(position, dict):
+            return None
+
+        candidates: list[str] = []
+        symbol = position.get("symbol")
+        if isinstance(symbol, str) and symbol:
+            candidates.append(symbol)
+
+        info = position.get("info")
+        if isinstance(info, dict) and info:
+            for key in (
+                "symbol",
+                "symbolName",
+                "instrumentId",
+                "instrument_id",
+                "instId",
+                "productId",
+                "pair",
+                "market",
+            ):
+                value = info.get(key)
+                if isinstance(value, str) and value:
+                    candidates.append(value)
+
+        for candidate in candidates:
+            normalized = self._normalize_symbol_key(candidate)
+            if normalized:
+                return normalized
+
+        return None
+
     def fetch_positions(
         self,
         symbols: list[str] | None = None,
@@ -1137,89 +1186,79 @@ class ExchangeAdapter:
     ) -> list[dict]:
         """Fetch open positions while applying Bybit specific defaults."""
 
-        ex = getattr(self, "x", None)
-        if ex is None or not hasattr(ex, "fetch_positions"):
+        exchange = getattr(self, "x", None)
+        if exchange is None or not hasattr(exchange, "fetch_positions"):
             return []
 
-        merged: dict[str, Any] = dict(params or {})
-        cat_raw = str(merged.get("category") or "").lower()
-
-        normalized_symbols: list[str] | None = None
+        symbol_arg: Any = None
         first_symbol: str | None = None
-        if symbols:
-            normalized_symbols = []
+        if isinstance(symbols, (list, tuple, set)):
+            normalized_symbols: list[str] = []
             for sym in symbols:
                 if not sym:
                     continue
-                mapped = self._ccxt_symbol(sym)
-                if isinstance(mapped, str) and mapped:
-                    mapped = mapped.split(":", 1)[0]
-                normalized_symbols.append(mapped or sym)
                 if first_symbol is None:
                     first_symbol = sym
+                normalized = self._ccxt_symbol(sym)
+                if isinstance(normalized, str) and normalized:
+                    normalized_symbols.append(normalized)
+                else:
+                    normalized_symbols.append(sym)
+            if normalized_symbols:
+                symbol_arg = normalized_symbols
+        elif isinstance(symbols, str) and symbols:
+            first_symbol = symbols
+            normalized = self._ccxt_symbol(symbols)
+            symbol_arg = [normalized] if isinstance(normalized, str) and normalized else [symbols]
 
-        if not cat_raw and first_symbol:
-            detected = detect_market_category(ex, first_symbol)
-            if detected:
-                cat_raw = str(detected).lower()
-        if not cat_raw and self.futures:
-            cat_raw = "linear"
+        cat = detect_market_category(exchange, first_symbol or "") or "linear"
+        if cat == "swap":
+            cat = "linear"
 
-        if cat_raw in {"", "swap", "spot"}:
-            category = "linear"
-        elif cat_raw in {"linear", "inverse"}:
-            category = cat_raw
-        else:
-            category = "linear"
+        call_params: dict[str, Any] = dict(params or {})
+        call_params["category"] = cat
 
-        merged["category"] = category
-        merged.pop("positionIdx", None)
-
-        call_params = merged or None
-        symbol_arg: Any = normalized_symbols
-
-        attempts: list[Callable[[], Any]] = []
-        if symbol_arg is not None:
-            if call_params is not None:
-                attempts.append(lambda: ex.fetch_positions(symbol_arg, call_params))
-            attempts.append(lambda: ex.fetch_positions(symbol_arg))
-        else:
-            if call_params is not None:
-                attempts.append(lambda: ex.fetch_positions(None, call_params))
-            attempts.append(lambda: ex.fetch_positions())
-
-        last_error: Exception | None = None
-        for attempt in attempts:
+        try:
             try:
-                result = attempt()
-                if result is not None:
-                    return result
+                positions = exchange.fetch_positions(symbol_arg, params=call_params)
             except TypeError:
-                continue
-            except Exception as exc:  # pragma: no cover - network dependent
-                last_error = exc
-                if call_params and "category" in call_params:
-                    self._warn(
-                        "positions",
-                        str(first_symbol or symbol_arg or "ALL"),
-                        f"adapter | fetch_positions warning symbol={first_symbol or 'ALL'} error={exc}",
-                    )
+                if symbol_arg is None:
+                    positions = exchange.fetch_positions(params=call_params)
+                else:
+                    positions = exchange.fetch_positions(symbol_arg, call_params)
+        except Exception as exc:
+            message = str(exc).lower()
+            symbol_label = first_symbol or "ALL"
+            if "empty" in message or "unknown" in message or "status" in message:
+                self.log_once(
+                    "warning",
+                    f"fetch_positions failed: {symbol_label} cat={cat} ({exc})",
+                )
+                return []
+            raise
 
-        if last_error is not None:
-            self._warn(
-                "positions",
-                str(first_symbol or symbol_arg or "ALL"),
-                f"adapter | fetch_positions failed symbol={first_symbol or 'ALL'} error={last_error}",
-            )
+        if not positions:
+            symbol_label = first_symbol or "ALL"
+            self.log_once("warning", f"fetch_positions empty: {symbol_label} cat={cat}")
             return []
 
-        key_symbol = str(first_symbol or symbol_arg or "ALL")
-        self._warn(
-            "positions_empty",
-            key_symbol,
-            f"adapter | fetch_positions empty result symbol={key_symbol}",
-        )
-        return None
+        if first_symbol:
+            target = self._normalize_symbol_key(first_symbol)
+            if target:
+                filtered = [
+                    position
+                    for position in positions
+                    if self._normalize_position_symbol(position) == target
+                ]
+                if not filtered:
+                    self.log_once(
+                        "warning",
+                        f"fetch_positions empty: {first_symbol} cat={cat}",
+                    )
+                    return []
+                positions = filtered
+
+        return positions
 
     # ------------------------------------------------------------------
     def fetch_open_orders(self, symbol: str | None = None) -> tuple[int, list]:

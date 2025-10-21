@@ -13,7 +13,7 @@ class _BaseExchange:
         self.symbols = ["BTC/USDT", "ETH/USDT"]
         return {}
 
-    def fetch_positions(self, symbols):
+    def fetch_positions(self, symbols=None, params=None):
         return []
 
     def cancel_all_orders(self, symbol):
