@@ -579,13 +579,17 @@ def fetch_multi_ohlcv(
                 break
             except AdapterOHLCVUnavailable as exc:
                 if attempt == 2:
-                    logging.warning(
-                        "data | %s | %s ohlcv unavailable: %s", symbol, tf, exc
+                    log_once(
+                        "warning",
+                        f"data | {symbol} | {tf} ohlcv unavailable: {exc}",
                     )
                 time.sleep(0.1 * (attempt + 1))
             except Exception as exc:  # pragma: no cover - network errors
                 if attempt == 2:
-                    logging.warning("data | %s | %s fetch failed: %s", symbol, tf, exc)
+                    log_once(
+                        "warning",
+                        f"data | {symbol} | {tf} fetch failed: {exc}",
+                    )
                 time.sleep(0.1 * (attempt + 1))
         if not ohlcv:
             log_once(
@@ -2918,7 +2922,7 @@ def run_trade(
     try:
         ticker = exchange.fetch_ticker(symbol)
     except Exception as exc:
-        logging.warning("trade | %s | fetch_ticker failed: %s", symbol, exc)
+        log_once("warning", f"trade | {symbol} | fetch_ticker failed: {exc}")
         ticker = None
     price_candidates: list[float | None] = []
     if isinstance(ticker, dict):
