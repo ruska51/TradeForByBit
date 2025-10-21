@@ -2544,48 +2544,82 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
     return None, last_error or "order_failed"
 
 
-def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, pct: float, *, is_tp: bool):
-    detected_cat = detect_market_category(ex, symbol)
-    cat = str(detected_cat).lower() if detected_cat else ""
+def place_conditional_exit(
+    exchange,
+    symbol: str,
+    side_open: str,
+    entry_price: float,
+    last: float,
+    pct: float,
+    category: str,
+    *,
+    is_tp: bool,
+):
+    """Place a conditional market exit for Bybit when a position exists."""
+
+    cat = str(category or "").lower()
     if cat in ("", "swap"):
         cat = "linear"
-    norm = _normalize_bybit_symbol(ex, symbol, cat)
-    precision_cb: Callable[[float], float | str] | None = None
-    if hasattr(ex, "price_to_precision"):
-        def _precision_cb(value: float, *, _symbol: str = norm, _ex=ex):
-            return _ex.price_to_precision(_symbol, value)
 
-        precision_cb = _precision_cb
-    _, pos_qty = has_open_position(ex, symbol, cat)
-    if pos_qty <= 0:
-        raise RuntimeError("нет позиции")
+    norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+
+    qty_signed, qty_abs = has_open_position(exchange, symbol, cat)
     try:
-        ticker = ex.fetch_ticker(norm)
-    except Exception:
-        ticker = {}
-    last = float((ticker or {}).get("last") or (ticker or {}).get("bid") or (ticker or {}).get("ask") or 0.0)
-    price_to_precision = precision_cb or (lambda value: value)
+        qty_abs_val = float(qty_abs)
+    except (TypeError, ValueError):
+        qty_abs_val = 0.0
+    if qty_abs_val <= 0:
+        return None, "exit skipped: no position"
+
+    exit_side = "sell" if str(side_open or "").lower() == "buy" else "buy"
+
+    if hasattr(exchange, "price_to_precision"):
+        def _precision_cb(value: float, *, _symbol: str = norm_symbol, _ex=exchange):
+            return _ex.price_to_precision(_symbol, value)
+    else:
+        _precision_cb = lambda value, *_args, **_kwargs: value  # type: ignore
+
+    try:
+        entry_val = float(entry_price)
+    except (TypeError, ValueError):
+        entry_val = 0.0
+    try:
+        last_val = float(last)
+    except (TypeError, ValueError):
+        last_val = 0.0
+    if last_val <= 0:
+        last_val = entry_val
+
     direction, trig = _bybit_trigger_for_exit(
         side_open,
-        last,
-        base_price,
+        last_val,
+        entry_val,
         pct,
         is_tp=is_tp,
-        price_to_precision=price_to_precision,
+        price_to_precision=_precision_cb,
     )
-    side_to_send = "sell" if str(side_open).lower() == "buy" else "buy"
-    trig, _ = _price_qty_to_precision(ex, norm, price=trig, amount=None)
+
+    trig, _ = _price_qty_to_precision(exchange, norm_symbol, price=trig, amount=None)
     try:
-        trig = float(trig)
-    except Exception:
-        trig = float(base_price or last)
-    amount = _round_qty(ex, norm, pos_qty)
+        trig_val = float(trig)
+    except (TypeError, ValueError):
+        trig_val = float(entry_val or last_val)
+
+    amount = _round_qty(exchange, norm_symbol, qty_abs_val)
     try:
-        stops = ex.fetch_open_orders(
-            norm, params={"category": cat, "orderFilter": "StopOrder"}
+        amount_val = float(amount)
+    except (TypeError, ValueError):
+        amount_val = float(qty_abs_val)
+    if amount_val <= 0:
+        return None, "exit skipped: qty too small"
+
+    try:
+        stops = exchange.fetch_open_orders(
+            norm_symbol, params={"category": cat, "orderFilter": "StopOrder"}
         )
     except Exception:
         stops = []
+
     stop_orders: list[tuple[dict, float, str]] = []
     for stop in stops or []:
         order_id = stop.get("id") or stop.get("orderId")
@@ -2606,22 +2640,29 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
             if cand is None:
                 continue
             try:
-                ts_val = float(cand) / (1000 if float(cand) > 1e12 else 1)
-                break
-            except Exception:
+                cand_float = float(cand)
+            except (TypeError, ValueError):
                 continue
+            try:
+                ts_val = cand_float / (1000 if cand_float > 1e12 else 1)
+            except Exception:
+                ts_val = 0.0
+            else:
+                break
         stop_orders.append((stop, ts_val, str(order_id)))
+
     if len(stop_orders) > 2:
         stop_orders.sort(key=lambda item: item[1], reverse=True)
         for _stop, _ts, order_id in stop_orders[2:]:
             try:
-                ex.cancel_order(order_id, norm, {"category": cat})
+                exchange.cancel_order(order_id, norm_symbol, {"category": cat})
             except Exception:
                 continue
+
     params = {
         "category": cat,
         "orderType": "Market",
-        "triggerPrice": float(trig),
+        "triggerPrice": float(trig_val),
         "triggerDirection": direction,
         "triggerBy": "LastPrice",
         "reduceOnly": True,
@@ -2629,10 +2670,14 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
         "tpSlMode": "Full",
     }
     params = _clean_params(params)
+
     try:
-        resp = ex.create_order(norm, "market", side_to_send, amount, None, params)
+        resp = exchange.create_order(
+            norm_symbol, "market", exit_side, amount_val, None, params
+        )
     except Exception as exc:
         return None, str(exc)
+
     order_id = None
     if isinstance(resp, dict):
         order_id = resp.get("id") or resp.get("orderId")
