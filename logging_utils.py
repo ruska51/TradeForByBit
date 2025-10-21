@@ -246,53 +246,33 @@ def enter_ensure_filled(
 def _bybit_trigger_for_exit(
     side_open: str,
     last: float,
-    base_price: float,
+    entry_price: float,
     pct: float,
     *,
     is_tp: bool,
-    precision: Callable[[float], float | str] | None = None,
-) -> tuple[float, str, str]:
-    buffer = 0.001
-
-    try:
-        last_val = float(last)
-    except Exception:
-        last_val = 0.0
-    try:
-        entry_val = float(base_price)
-    except Exception:
-        entry_val = 0.0
-
-    if entry_val <= 0:
-        entry_val = last_val if last_val > 0 else 0.0
-    if last_val <= 0:
-        last_val = entry_val
-
-    side_lower = str(side_open).lower()
-    if side_lower == "buy":
-        exit_side = "sell"
+    price_to_precision,
+) -> tuple[str, float]:
+    """Return (direction, triggerPrice). Round price with price_to_precision."""
+    s = side_open.lower()
+    up = "ascending"
+    dn = "descending"
+    if s == "buy":  # long
         if is_tp:
-            trigger = max(entry_val * (1 + pct), last_val * (1 + buffer))
-            direction = "ascending"
+            direction = up
+            raw = max(entry_price * (1 + pct), last * 1.001)
         else:
-            trigger = min(entry_val * (1 - pct), last_val * (1 - buffer))
-            direction = "descending"
-    else:
-        exit_side = "buy"
+            direction = dn
+            raw = min(entry_price * (1 - pct), last * 0.999)
+    else:  # sell/short
         if is_tp:
-            trigger = min(entry_val * (1 - pct), last_val * (1 - buffer))
-            direction = "descending"
+            direction = dn
+            raw = min(entry_price * (1 - pct), last * 0.999)
         else:
-            trigger = max(entry_val * (1 + pct), last_val * (1 + buffer))
-            direction = "ascending"
+            direction = up
+            raw = max(entry_price * (1 + pct), last * 1.001)
 
-    if callable(precision):
-        try:
-            trigger = float(precision(trigger))
-        except Exception:
-            trigger = float(trigger)
-
-    return float(trigger), direction, exit_side
+    trig = float(price_to_precision(raw))
+    return direction, trig
 
 
 def normalize_bybit_category(value: str | None) -> str | None:
@@ -2584,14 +2564,16 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
     except Exception:
         ticker = {}
     last = float((ticker or {}).get("last") or (ticker or {}).get("bid") or (ticker or {}).get("ask") or 0.0)
-    trig, direction, side_to_send = _bybit_trigger_for_exit(
+    price_to_precision = precision_cb or (lambda value: value)
+    direction, trig = _bybit_trigger_for_exit(
         side_open,
         last,
         base_price,
         pct,
         is_tp=is_tp,
-        precision=precision_cb,
+        price_to_precision=price_to_precision,
     )
+    side_to_send = "sell" if str(side_open).lower() == "buy" else "buy"
     trig, _ = _price_qty_to_precision(ex, norm, price=trig, amount=None)
     try:
         trig = float(trig)
