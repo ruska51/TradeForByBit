@@ -1012,6 +1012,153 @@ def has_open_position(exchange, symbol: str, category: str = "linear") -> tuple[
     return qty_signed, abs(qty_signed)
 
 
+def get_position_entry_price(
+    exchange,
+    symbol: str,
+    category: str = "linear",
+) -> float | None:
+    """Return the average entry price for an open position or ``None``."""
+
+    cat = str(category or "").lower()
+    if not cat or cat == "swap":
+        cat = "linear"
+    if cat == "spot":
+        cat = "linear"
+
+    params = {"category": cat}
+    fetch_positions = getattr(exchange, "fetch_positions", None)
+    if not callable(fetch_positions):
+        return None
+
+    positions: list[dict] = []
+    try:
+        positions = fetch_positions([symbol], params=params) or []
+    except Exception:
+        positions = []
+
+    if not positions:
+        alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
+        if alt_symbol and alt_symbol != symbol:
+            try:
+                positions = fetch_positions([alt_symbol], params=params) or []
+            except Exception:
+                positions = []
+
+    if not positions:
+        try:
+            positions = fetch_positions(params=params) or []
+        except Exception:
+            positions = []
+
+    norm_symbol = _normalize_symbol_key(_resolve_ccxt_symbol(exchange, symbol))
+
+    for position in positions or []:
+        psym = normalize_position_symbol(position)
+        if not psym or psym != norm_symbol:
+            continue
+
+        qty = _extract_position_quantity(position)
+        if abs(qty) <= 0:
+            continue
+
+        entry_candidates: list[float | None] = []
+        for key in ("entryPrice", "avgPrice", "entry_price", "price", "avg_entry_price"):
+            if key in position:
+                entry_candidates.append(position.get(key))
+
+        info = position.get("info") if isinstance(position, dict) else None
+        if isinstance(info, dict):
+            for key in (
+                "entryPrice",
+                "avgPrice",
+                "avg_entry_price",
+                "avgEntryPrice",
+                "basePrice",
+                "positionValue",
+            ):
+                if key in info:
+                    entry_candidates.append(info.get(key))
+
+        for candidate in entry_candidates:
+            try:
+                price = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(price) and price > 0:
+                return price
+
+    return None
+
+
+def get_last_price(exchange, symbol: str, category: str = "linear") -> float | None:
+    """Return the last traded price for ``symbol`` or ``None`` when unavailable."""
+
+    cat = str(category or "").lower()
+    if not cat or cat == "swap":
+        cat = "linear"
+    if cat == "spot":
+        cat = "linear"
+
+    norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+    fetch_ticker = getattr(exchange, "fetch_ticker", None)
+    if not callable(fetch_ticker):
+        fetch_ticker = getattr(exchange, "fetchTicker", None)
+    if not callable(fetch_ticker):
+        return None
+
+    params = {"category": cat} if _is_bybit_exchange(exchange) else None
+
+    ticker = None
+    try:
+        if params:
+            ticker = fetch_ticker(norm_symbol, params=params)
+        else:
+            ticker = fetch_ticker(norm_symbol)
+    except Exception:
+        ticker = None
+
+    if ticker is None:
+        try:
+            alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
+            if alt_symbol:
+                if params:
+                    ticker = fetch_ticker(alt_symbol, params=params)
+                else:
+                    ticker = fetch_ticker(alt_symbol)
+        except Exception:
+            ticker = None
+
+    if not isinstance(ticker, dict):
+        return None
+
+    price_candidates: list[float | None] = []
+    for key in ("last", "close", "ask", "bid", "markPrice", "indexPrice"):
+        if key in ticker:
+            price_candidates.append(ticker.get(key))
+
+    info = ticker.get("info") if isinstance(ticker, dict) else None
+    if isinstance(info, dict):
+        for key in (
+            "lastPrice",
+            "close",
+            "markPrice",
+            "indexPrice",
+            "price",
+        ):
+            if key in info:
+                price_candidates.append(info.get(key))
+
+    for candidate in price_candidates:
+        try:
+            price = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price) and price > 0:
+            return price
+
+    return None
+
+
 def _get_position_size(exchange, symbol: str, category: str = "linear") -> float:
     """Return absolute size of the open position for ``symbol`` in base units."""
 

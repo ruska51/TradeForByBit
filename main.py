@@ -121,6 +121,8 @@ from logging_utils import (
     wait_position_after_entry,
     has_pending_entry,
     has_open_position,
+    get_position_entry_price,
+    get_last_price,
     SOFT_ORDER_ERRORS,
     flush_symbol_logs,
     flush_cycle_logs,
@@ -1233,7 +1235,7 @@ _last_exit_qty: Dict[str, float] = {}
 exit_orders_fetch_guard: Dict[str, Dict[str, bool]] = {}
 fallback_cooldown: Dict[str, int] = {}
 tf_skip_counters: Dict[str, int] = defaultdict(int)
-_entry_guard: Dict[str, Dict[str, Any]] = {}
+_entry_guard: Dict[str, int] = {}
 TF_SKIP_THRESHOLD = 3
 
 
@@ -2978,9 +2980,8 @@ def run_trade(
         logging.info("entry | %s | skip: pending entry exists (%s)", symbol, want_side)
         log_decision(symbol, "pending_entry_exists")
         return False
-    bar_id = int(time.time() // (5 * 60))
-    guard_state = _entry_guard.get(symbol) or {}
-    if guard_state.get("bar") == bar_id and guard_state.get("side") == want_side:
+    now_bar5 = int(time.time() // (5 * 60))
+    if _entry_guard.get(symbol) == now_bar5:
         logging.info("entry | %s | skip: already entered this bar", symbol)
         log_decision(symbol, "entry_guard_active")
         return False
@@ -3118,7 +3119,7 @@ def run_trade(
     if (filled_qty or 0.0) <= 0:
         log_decision(symbol, "order_failed")
         return False
-    _entry_guard[symbol] = {"bar": bar_id, "side": want_side}
+    _entry_guard[symbol] = now_bar5
 
     entry_price = price
 
@@ -3322,9 +3323,8 @@ def attempt_direct_market_entry(
         logging.info("entry | %s | skip: pending entry exists (%s)", symbol, side)
         log_decision(symbol, "pending_entry_exists")
         return False
-    bar_id = int(time.time() // (5 * 60))
-    guard_state = _entry_guard.get(symbol) or {}
-    if guard_state.get("bar") == bar_id and guard_state.get("side") == side:
+    now_bar5 = int(time.time() // (5 * 60))
+    if _entry_guard.get(symbol) == now_bar5:
         logging.info("entry | %s | skip: already entered this bar", symbol)
         log_decision(symbol, "entry_guard_active")
         return False
@@ -3454,7 +3454,7 @@ def attempt_direct_market_entry(
     if (filled_qty or 0.0) <= 0:
         log_decision(symbol, "order_failed")
         return False
-    _entry_guard[symbol] = {"bar": bar_id, "side": side}
+    _entry_guard[symbol] = now_bar5
 
     entry_price = last_price
 
@@ -5326,149 +5326,278 @@ def run_bot():
             if current_price is None or current_price <= 0:
                 log_decision(symbol, "price_unavailable")
             else:
-                balance_total = 0.0
-                try:
-                    balance_info = safe_fetch_balance(exchange, {"type": "future"})
-                    balance_total = float((balance_info.get("total") or {}).get("USDT", 0.0))
-                except Exception as exc:
-                    logging.warning("pattern trade | %s | fetch_balance failed: %s", symbol, exc)
-                    log_decision(symbol, "balance_unavailable")
-                if balance_total > 0:
-                    side = "buy" if model_signal == "long" else "sell"
-                    qty = risk_management.compute_order_qty(
-                        ADAPTER,
-                        symbol,
-                        side,
-                        balance_total,
-                        RISK_PER_TRADE,
-                        price=current_price,
-                    )
-                    if qty is None or qty <= 0:
-                        log_decision(symbol, "qty_insufficient")
+                side = "buy" if model_signal == "long" else "sell"
+                cat = detect_market_category(exchange, symbol) or "linear"
+                cat = str(cat or "").lower()
+                if cat in ("", "swap"):
+                    cat = "linear"
+                if cat not in {"linear", "inverse"}:
+                    log_decision(symbol, "no_futures_contract")
+                else:
+                    qty_signed, _qty_abs = has_open_position(exchange, symbol, cat)
+                    if (side == "buy" and qty_signed > 0) or (side == "sell" and qty_signed < 0):
+                        log_decision(symbol, "position_already_open")
+                    elif has_pending_entry(exchange, symbol, side, cat):
+                        log_decision(symbol, "pending_entry_exists")
                     else:
-                        max_notional = balance_total * MAX_POSITION_PCT
-                        if max_notional and current_price:
-                            qty = min(qty, max_notional / current_price)
-                        try:
-                            qty = float(exchange.amount_to_precision(symbol, qty))
-                        except Exception:
-                            qty = float(qty)
-                        if qty <= 0:
-                            log_decision(symbol, "qty_insufficient")
+                        now_bar5 = int(time.time() // (5 * 60))
+                        if _entry_guard.get(symbol) == now_bar5:
+                            log_decision(symbol, "entry_guard_active")
                         else:
-                            params = {"newOrderRespType": "RESULT"}
-                            order_id, err = safe_create_order(
-                                exchange,
-                                symbol,
-                                "market",
-                                side,
-                                qty,
-                                None,
-                                params,
+                            balance = 0.0
+                            available_margin = 0.0
+                            try:
+                                balance_info = safe_fetch_balance(exchange, {"type": "future"})
+                                totals = balance_info.get("total") if isinstance(balance_info, dict) else None
+                                frees = balance_info.get("free") if isinstance(balance_info, dict) else None
+                                balance = float((totals or {}).get("USDT", 0.0))
+                                available_margin = float((frees or totals or {}).get("USDT", 0.0))
+                            except Exception as exc:
+                                logging.warning(
+                                    "pattern trade | %s | fetch_balance failed: %s",
+                                    symbol,
+                                    exc,
+                                )
+                            try:
+                                market = exchange.market(symbol) or {}
+                            except Exception as exc:
+                                logging.warning(
+                                    "pattern trade | %s | market lookup failed: %s",
+                                    symbol,
+                                    exc,
+                                )
+                                market = {}
+                            min_qty = float(
+                                ((market.get("limits") or {}).get("amount") or {}).get("min", 0.0) or 0.0
                             )
-                            if err in SOFT_ORDER_ERRORS:
-                                log_decision(symbol, err)
-                            elif order_id is None:
-                                log_decision(symbol, err or "order_failed")
-                            else:
-                                tick_size = None
+                            precision = market.get("precision") or {}
+                            price_precision = 0
+                            if isinstance(precision, dict):
                                 try:
-                                    market = exchange.market(symbol) or {}
-                                    precision = market.get("precision") or {}
                                     price_precision = int((precision or {}).get("price") or 0)
-                                    tick_size = 1 / (10 ** price_precision) if price_precision else None
-                                except Exception as exc:
-                                    logging.warning(
-                                        "pattern trade | %s | market lookup failed: %s", symbol, exc
-                                    )
+                                except (TypeError, ValueError):
+                                    price_precision = 0
+                            tick_size = 1 / (10 ** price_precision) if price_precision else None
 
-                                sl_mult = mode_params.get("sl_mult", 2.0)
-                                tp_mult = mode_params.get("tp_mult", 4.0)
-                                atr_pct = (atr_val / current_price) if current_price else 0.0
-                                if atr_pct > 0.01:
-                                    sl_mult *= 1.2
-                                    tp_mult *= 1.2
-                                mode_params_pattern = {
-                                    "sl_mult": float(sl_mult),
-                                    "tp_mult": float(tp_mult),
-                                }
-                                tp_price_raw, sl_price_raw, _ = risk_management.calc_sl_tp(
-                                    current_price,
-                                    atr_val,
-                                    mode_params_pattern,
-                                    "long" if model_signal == "long" else "short",
-                                    tick_size=tick_size,
-                                )
-                                opp_side = "sell" if model_signal == "long" else "buy"
-                                place_protected_exit(
-                                    symbol,
-                                    "STOP_MARKET",
-                                    opp_side,
-                                    qty,
-                                    sl_price_raw,
-                                    close_all=True,
-                                    reference_price=current_price,
-                                )
-                                place_protected_exit(
-                                    symbol,
-                                    "TAKE_PROFIT_MARKET",
-                                    opp_side,
-                                    qty,
-                                    tp_price_raw,
-                                    close_all=True,
-                                    reference_price=current_price,
-                                )
-
-                                now = datetime.now(timezone.utc)
-                                entry_ctx = {
-                                    "symbol": symbol,
-                                    "side": model_signal.upper(),
-                                    "entry_price": float(current_price),
-                                    "entry_time": now.isoformat().replace("+00:00", "Z"),
-                                    "qty": float(qty),
-                                    "open_bar_index": int(now.timestamp() // (5 * 60)),
-                                    "trailing_profit_used": False,
-                                    "order_id": order_id,
-                                    "source": "pattern",
-                                    "reason": "pattern_override",
-                                    "atr": float(atr_val),
-                                    "tick_size": float(tick_size or 0.0),
-                                    "sl_price": float(sl_price_raw) if sl_price_raw is not None else None,
-                                    "tp_price": float(tp_price_raw) if tp_price_raw is not None else None,
-                                }
-                                open_trade_ctx[symbol] = entry_ctx
-                                memory_manager.add_trade_open(entry_ctx)
-                                trade_id = log_entry(symbol, entry_ctx, trade_log_path)
-                                pair_state.setdefault(symbol, {})["trade_id"] = trade_id
-                                symbol_activity[symbol] = now
-                                log(
-                                    logging.INFO,
-                                    "order",
-                                    symbol,
-                                    f"Pattern entry {model_signal} qty={qty:.6f} price≈{current_price:.6f}",
-                                )
-                                log_decision(symbol, "pattern_entry", decision="entry")
+                            symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, cat)
+                            qty_target = _compute_entry_qty(
+                                symbol,
+                                side,
+                                current_price,
+                                mode_params.get("lev", LEVERAGE),
+                                balance,
+                                available_margin,
+                                risk_factor=1.0,
+                            )
+                            if qty_target <= 0:
+                                log_decision(symbol, "qty_insufficient")
+                            else:
                                 try:
-                                    ensure_exit_orders(
-                                        ADAPTER,
-                                        symbol,
-                                        model_signal,
-                                        qty,
-                                        entry_ctx.get("sl_price"),
-                                        entry_ctx.get("tp_price"),
-                                    )
-                                except Exception as exc:
-                                    logging.warning(
-                                        "exit_guard | %s | ensure_exit_orders failed: %s",
-                                        symbol,
-                                        exc,
-                                    )
-                                recent_hits.append(True)
-                                recent_trade_times.append(now)
-                                fallback_cooldown[symbol] = entry_ctx["open_bar_index"] + 2
-                                hard_entries += 1
-                                emit_summary(symbol, "entry")
-                                pattern_trade_executed = True
+                                    leverage_val = int(float(mode_params.get("lev", LEVERAGE)))
+                                except Exception:
+                                    leverage_val = int(LEVERAGE)
+                                leverage_val = max(leverage_val, 1)
+                                affordable_qty = _max_affordable_amount(
+                                    exchange,
+                                    symbol,
+                                    side,
+                                    leverage_val,
+                                    current_price,
+                                    MIN_NOTIONAL,
+                                )
+                                if affordable_qty <= 0:
+                                    log_decision(symbol, "insufficient_balance")
+                                else:
+                                    qty_target = min(qty_target, affordable_qty)
+                                    qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
+                                    if qty_target <= 0:
+                                        log_decision(symbol, "qty_insufficient")
+                                    else:
+                                        adjusted_qty, margin_reason = _adjust_qty_for_margin(
+                                            exchange,
+                                            symbol,
+                                            qty_target,
+                                            current_price,
+                                            leverage_val,
+                                            available_margin,
+                                            min_qty,
+                                        )
+                                        if adjusted_qty is None or adjusted_qty <= 0:
+                                            log_decision(symbol, margin_reason or "insufficient_balance")
+                                        else:
+                                            qty_target = adjusted_qty
+                                            max_pos_qty = get_max_position_qty(symbol, leverage_val, current_price)
+                                            if max_pos_qty:
+                                                qty_target = min(qty_target, max_pos_qty)
+                                            qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
+                                            if qty_target <= 0:
+                                                log_decision(symbol, "qty_insufficient")
+                                            else:
+                                                sl_mult = mode_params.get("sl_mult", 2.0)
+                                                tp_mult = mode_params.get("tp_mult", 4.0)
+                                                atr_pct = (atr_val / current_price) if current_price else 0.0
+                                                if atr_pct > 0.01:
+                                                    sl_mult *= 1.2
+                                                    tp_mult *= 1.2
+                                                pattern_mode_params = {
+                                                    "sl_mult": float(sl_mult),
+                                                    "tp_mult": float(tp_mult),
+                                                }
+                                                tp_price_raw, sl_price_raw, sl_pct_raw = risk_management.calc_sl_tp(
+                                                    current_price,
+                                                    atr_val,
+                                                    pattern_mode_params,
+                                                    "long" if model_signal == "long" else "short",
+                                                    tick_size=tick_size,
+                                                )
+                                                try:
+                                                    sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
+                                                except Exception:
+                                                    sl_price = float(sl_price_raw)
+                                                try:
+                                                    tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
+                                                except Exception:
+                                                    tp_price = float(tp_price_raw)
+
+                                                try:
+                                                    filled_qty = enter_ensure_filled(
+                                                        ADAPTER.x,
+                                                        symbol,
+                                                        side,
+                                                        qty_target,
+                                                        category=cat,
+                                                    )
+                                                except Exception as exc:
+                                                    logging.warning(
+                                                        "pattern trade | %s | ensure_filled failed: %s",
+                                                        symbol,
+                                                        exc,
+                                                    )
+                                                    log_decision(symbol, "order_failed")
+                                                    filled_qty = 0.0
+
+                                                if (filled_qty or 0.0) <= 0:
+                                                    log_decision(symbol, "order_failed")
+                                                else:
+                                                    appeared = wait_position_after_entry(
+                                                        ADAPTER.x,
+                                                        symbol,
+                                                        category=cat,
+                                                        timeout_sec=3.0,
+                                                    )
+                                                    if not appeared:
+                                                        log_decision(symbol, "position_unavailable")
+                                                    else:
+                                                        entry_price = get_position_entry_price(
+                                                            exchange,
+                                                            symbol,
+                                                            cat,
+                                                        )
+                                                        if entry_price is None or entry_price <= 0:
+                                                            entry_price = current_price
+                                                        last_price = get_last_price(exchange, symbol, cat)
+                                                        if last_price is None or last_price <= 0:
+                                                            last_price = entry_price
+
+                                                        try:
+                                                            sl_pct_eff = abs((sl_price / entry_price) - 1)
+                                                        except Exception:
+                                                            sl_pct_eff = sl_pct_raw
+                                                        if not sl_pct_eff or not math.isfinite(sl_pct_eff):
+                                                            sl_pct_eff = max(sl_pct_raw, SL_PCT)
+                                                        try:
+                                                            tp_pct_eff = abs((tp_price / entry_price) - 1)
+                                                        except Exception:
+                                                            tp_pct_eff = TP_PCT
+                                                        if not tp_pct_eff or not math.isfinite(tp_pct_eff):
+                                                            tp_pct_eff = TP_PCT
+
+                                                        _, tp_err = place_conditional_exit(
+                                                            exchange,
+                                                            symbol,
+                                                            side,
+                                                            entry_price,
+                                                            last_price,
+                                                            tp_pct_eff,
+                                                            cat,
+                                                            is_tp=True,
+                                                        )
+                                                        if tp_err:
+                                                            log_once(
+                                                                "warning",
+                                                                f"pattern trade | {symbol} | Failed to set TP: {tp_err}",
+                                                                window_sec=60.0,
+                                                            )
+                                                        _, sl_err = place_conditional_exit(
+                                                            exchange,
+                                                            symbol,
+                                                            side,
+                                                            entry_price,
+                                                            last_price,
+                                                            sl_pct_eff,
+                                                            cat,
+                                                            is_tp=False,
+                                                        )
+                                                        if sl_err:
+                                                            log_once(
+                                                                "warning",
+                                                                f"pattern trade | {symbol} | Failed to set SL: {sl_err}",
+                                                                window_sec=60.0,
+                                                            )
+
+                                                        _entry_guard[symbol] = now_bar5
+                                                        _, pos_qty = has_open_position(exchange, symbol, cat)
+                                                        qty_val = float(pos_qty)
+                                                        now = datetime.now(timezone.utc)
+                                                        entry_ctx = {
+                                                            "symbol": symbol,
+                                                            "side": model_signal.upper(),
+                                                            "entry_price": float(entry_price),
+                                                            "entry_time": now.isoformat().replace("+00:00", "Z"),
+                                                            "qty": float(qty_val),
+                                                            "open_bar_index": int(now.timestamp() // (5 * 60)),
+                                                            "trailing_profit_used": False,
+                                                            "order_id": None,
+                                                            "source": "pattern",
+                                                            "reason": "pattern_override",
+                                                            "atr": float(atr_val),
+                                                            "tick_size": float(tick_size or 0.0),
+                                                            "sl_price": float(sl_price) if sl_price is not None else None,
+                                                            "tp_price": float(tp_price) if tp_price is not None else None,
+                                                        }
+                                                        open_trade_ctx[symbol] = entry_ctx
+                                                        memory_manager.add_trade_open(entry_ctx)
+                                                        trade_id = log_entry(symbol, entry_ctx, trade_log_path)
+                                                        pair_state.setdefault(symbol, {})["trade_id"] = trade_id
+                                                        symbol_activity[symbol] = now
+                                                        log(
+                                                            logging.INFO,
+                                                            "order",
+                                                            symbol,
+                                                            f"Pattern entry {model_signal} qty={qty_val:.6f} price≈{entry_price:.6f}",
+                                                        )
+                                                        log_decision(symbol, "pattern_entry", decision="entry")
+                                                        try:
+                                                            ensure_exit_orders(
+                                                                ADAPTER,
+                                                                symbol,
+                                                                model_signal,
+                                                                qty_val,
+                                                                entry_ctx.get("sl_price"),
+                                                                entry_ctx.get("tp_price"),
+                                                            )
+                                                        except Exception as exc:
+                                                            logging.warning(
+                                                                "exit_guard | %s | ensure_exit_orders failed: %s",
+                                                                symbol,
+                                                                exc,
+                                                            )
+                                                        recent_hits.append(True)
+                                                        recent_trade_times.append(now)
+                                                        fallback_cooldown[symbol] = entry_ctx["open_bar_index"] + 2
+                                                        hard_entries += 1
+                                                        emit_summary(symbol, "entry")
+                                                        pattern_trade_executed = True
 
         if pattern_trade_executed:
             continue
