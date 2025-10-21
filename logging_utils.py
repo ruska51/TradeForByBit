@@ -1775,7 +1775,14 @@ def emit_summary(symbol: str, reason: str) -> None:
     log(logging.INFO, "summary", symbol, msg)
 
 
-def log_decision(symbol: str, reason: str, *, decision: str = "skip", path: str = "decision_log.csv") -> None:
+def log_decision(
+    symbol: str,
+    reason: str,
+    *,
+    decision: str = "skip",
+    path: str = "decision_log.csv",
+    detail: str | None = None,
+) -> None:
     """Append a trade decision (entry/skip) to ``decision_log.csv``."""
     write_header = not os.path.exists(path)
     with open(path, "a", newline="", encoding="utf-8") as f:
@@ -1783,7 +1790,10 @@ def log_decision(symbol: str, reason: str, *, decision: str = "skip", path: str 
         if write_header:
             writer.writerow(["timestamp", "symbol", "signal", "reason"])
         writer.writerow([datetime.now(timezone.utc).isoformat(), symbol, decision, reason])
-    text = " | ".join(["decision", decision, symbol, reason])
+    parts = ["decision", decision, symbol, reason]
+    if detail:
+        parts.append(detail)
+    text = " | ".join(parts)
     log_once("info", text)
     _info_status[symbol]["last_reason"] = reason
     emit_summary(symbol, reason)
