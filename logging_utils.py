@@ -21,36 +21,31 @@ except Exception:  # pragma: no cover - ccxt may be stubbed in tests
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
-_LAST_LOGGED_MESSAGE: dict[str, float] = {}
+_last_logs: dict[str, float] = {}
 
 
-def log_once(
-    level: str,
-    message: str,
-    *,
-    window_sec: float = 5.0,
-    logger=None,
-) -> None:
-    """Emit ``message`` once per ``window_sec`` for the requested log ``level``."""
+def get_logger() -> logging.Logger:
+    """Return the root logger used across the project."""
 
-    if logger is None:
-        logger = logging
+    return logging.getLogger()
 
-    try:
-        now = time.time()
-    except Exception:
-        now = 0.0
-    last_ts = float(_LAST_LOGGED_MESSAGE.get(message, 0.0) or 0.0)
+
+def log_once(level: str, message: str, window_sec: float = 5.0) -> None:
+    """Emit *message* at most once per *window_sec* for the given log *level*."""
+
+    import time
+
+    now = time.time()
+    key = f"{level}:{message}"
+    last_ts = _last_logs.get(key, 0.0)
     if now - last_ts < window_sec:
         return
-    _LAST_LOGGED_MESSAGE[message] = now
-    # prune occasionally to avoid unbounded growth
-    if len(_LAST_LOGGED_MESSAGE) > 256:
-        stale_cutoff = now - (window_sec * 4)
-        for msg in list(_LAST_LOGGED_MESSAGE.keys()):
-            if msg != message and _LAST_LOGGED_MESSAGE[msg] < stale_cutoff:
-                _LAST_LOGGED_MESSAGE.pop(msg, None)
-    getattr(logger, level)(message)
+    _last_logs[key] = now
+    logger = get_logger()
+    log_method = getattr(logger, level, None)
+    if not callable(log_method):
+        log_method = logger.info
+    log_method(message)
 
 # ``colorama`` is an optional dependency used only for colored console output.
 # In minimal environments (such as some CI systems) it may be absent.  Import it
@@ -1575,8 +1570,7 @@ def log_decision(symbol: str, reason: str, *, decision: str = "skip", path: str 
         if write_header:
             writer.writerow(["timestamp", "symbol", "signal", "reason"])
         writer.writerow([datetime.now(timezone.utc).isoformat(), symbol, decision, reason])
-    message = "Skipped: " + reason if decision == "skip" else reason
-    text = " | ".join(["decision", decision, symbol, message])
+    text = " | ".join(["decision", decision, symbol, reason])
     log_once("info", text)
     _info_status[symbol]["last_reason"] = reason
     emit_summary(symbol, reason)
@@ -2071,11 +2065,11 @@ def safe_fetch_balance(exchange, params: dict | None = None, *, retries: int = 1
                 or "-1003" in message
             )
             if attempt < retries and is_rate_limited:
-                logging.warning("exchange | fetch_balance rate limited: %s", exc)
+                log_once("warning", f"exchange | fetch_balance rate limited: {exc}")
                 time.sleep(max(delay, 0.1))
                 attempt += 1
                 continue
-            logging.warning("exchange | fetch_balance failed: %s", exc)
+            log_once("warning", f"exchange | fetch_balance failed: {exc}")
             raise
 
 
@@ -2643,7 +2637,31 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
     from exchange_adapter import LEVERAGE_SKIPPED, set_valid_leverage
 
     for attempt in range(attempts):
-        L = set_valid_leverage(exchange, symbol, leverage)
+        try:
+            L = set_valid_leverage(exchange, symbol, leverage)
+        except TypeError:
+            try:
+                L = exchange.set_leverage(leverage, symbol)
+            except Exception as exc:
+                L = None
+                if attempt >= attempts - 1:
+                    log_once(
+                        "warning",
+                        f"leverage | {symbol} | Legacy set_leverage call failed: {exc}",
+                    )
+            else:
+                if L:
+                    log(logging.INFO, "leverage", symbol, f"Leverage set to {leverage}x")
+                    return True
+                if attempt < attempts - 1:
+                    time.sleep(2)
+                    continue
+                message = f"leverage | {symbol} | Failed to set leverage {leverage} (legacy)"
+                log_once("warning", message, window_sec=5.0)
+                tag = "leverage_failed_soft"
+                if tag not in _order_status[symbol]:
+                    _order_status[symbol].append(tag)
+                return False
         if L is LEVERAGE_SKIPPED:
             log(logging.INFO, "leverage", symbol, "Leverage setup skipped")
             return True
