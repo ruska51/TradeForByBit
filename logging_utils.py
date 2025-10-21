@@ -882,68 +882,202 @@ def _normalize_bybit_symbol(
     return _finalize(symbol)
 
 
-def has_open_position(ex, symbol: str, category: str = "linear") -> tuple[float, float]:
-    """Return the signed and absolute quantity for ``symbol`` in ``category``."""
+def _normalize_symbol_key(symbol: str | None) -> str:
+    """Return a canonical representation for *symbol* comparisons."""
+
+    if not isinstance(symbol, str) or not symbol:
+        return ""
+
+    candidate = symbol.split(":", 1)[0]
+    candidate = candidate.replace("/", "")
+    candidate = candidate.replace("-", "")
+    candidate = candidate.replace("_", "")
+    return candidate.upper()
+
+
+def _resolve_ccxt_symbol(exchange, symbol: str) -> str:
+    """Return the exchange specific CCXT symbol when available."""
+
+    getter = getattr(exchange, "_ccxt_symbol", None)
+    if callable(getter):
+        try:
+            resolved = getter(symbol)
+            if isinstance(resolved, str) and resolved:
+                return resolved
+        except Exception:
+            pass
+    return symbol
+
+
+def normalize_position_symbol(position: dict | None) -> str:
+    """Extract a normalised comparison key for *position* symbols."""
+
+    if not isinstance(position, dict):
+        return ""
+
+    candidates: list[str] = []
+
+    symbol_value = position.get("symbol")
+    if isinstance(symbol_value, str) and symbol_value:
+        candidates.append(symbol_value)
+
+    info = position.get("info")
+    if isinstance(info, dict) and info:
+        for key in (
+            "symbol",
+            "symbolName",
+            "instrumentId",
+            "instrument_id",
+            "instId",
+            "productId",
+            "pair",
+            "market",
+        ):
+            value = info.get(key)
+            if isinstance(value, str) and value:
+                candidates.append(value)
+
+        base_coin = info.get("baseCoin") or info.get("baseCurrency")
+        quote_coin = info.get("quoteCoin") or info.get("quoteCurrency")
+        if isinstance(base_coin, str) and isinstance(quote_coin, str):
+            combined = f"{base_coin}{quote_coin}"
+            candidates.append(combined)
+
+    base_coin = position.get("baseCoin") or position.get("baseCurrency")
+    quote_coin = position.get("quoteCoin") or position.get("quoteCurrency")
+    if isinstance(base_coin, str) and isinstance(quote_coin, str):
+        candidates.append(f"{base_coin}{quote_coin}")
+
+    for candidate in candidates:
+        normalized = _normalize_symbol_key(candidate)
+        if normalized:
+            return normalized
+
+    return ""
+
+
+def _extract_position_quantity(position: dict) -> float:
+    """Return the signed quantity extracted from *position* metadata."""
+
+    quantity_fields = (
+        "contracts",
+        "contractsSize",
+        "positionAmt",
+        "positionSize",
+        "openQty",
+        "openSize",
+        "size",
+        "positionQty",
+        "qty",
+        "quantity",
+        "amount",
+        "baseSize",
+        "baseQty",
+    )
+
+    for field in quantity_fields:
+        value = position.get(field)
+        if value is not None:
+            try:
+                return float(value)
+            except Exception:
+                continue
+
+    info = position.get("info")
+    if isinstance(info, dict):
+        for field in quantity_fields:
+            value = info.get(field)
+            if value is not None:
+                try:
+                    return float(value)
+                except Exception:
+                    continue
+
+    return 0.0
+
+
+def _extract_position_side(position: dict) -> str:
+    """Return a lowercase side indicator from *position*."""
+
+    side_fields = (
+        "side",
+        "positionSide",
+        "position_side",
+        "direction",
+    )
+
+    for field in side_fields:
+        value = position.get(field)
+        if isinstance(value, str) and value:
+            return value.lower()
+
+    info = position.get("info")
+    if isinstance(info, dict):
+        for field in side_fields:
+            value = info.get(field)
+            if isinstance(value, str) and value:
+                return value.lower()
+
+    return ""
+
+
+def has_open_position(exchange, symbol: str, category: str = "linear") -> tuple[float, float]:
+    """Return ``(signed_qty, abs_qty)`` for ``symbol`` in ``category``."""
 
     cat = str(category or "").lower()
     if not cat or cat == "swap":
         cat = "linear"
     if cat == "spot":
         cat = "linear"
+    params = {"category": cat}
 
-    norm = _normalize_bybit_symbol(ex, symbol, cat)
-    short_symbol = norm.split(":", 1)[0]
+    fetch_positions = getattr(exchange, "fetch_positions", None)
+    if not callable(fetch_positions):
+        return 0.0, 0.0
 
     positions: list[dict] = []
     try:
-        positions = ex.fetch_positions([short_symbol], params={"category": cat}) or []
+        positions = fetch_positions([symbol], params=params) or []
     except Exception:
-        try:
-            positions = ex.fetch_positions([norm], params={"category": cat}) or []
-        except Exception:
+        positions = []
+
+    if not positions:
+        alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
+        if alt_symbol and alt_symbol != symbol:
             try:
-                positions = ex.fetch_positions(params={"category": cat}) or []
+                positions = fetch_positions([alt_symbol], params=params) or []
             except Exception:
                 positions = []
 
-    qty_signed = 0.0
-    for pos in positions:
-        if not isinstance(pos, dict):
-            continue
-        pos_symbol = str(
-            pos.get("symbol")
-            or pos.get("info", {}).get("symbol")
-            or pos.get("info", {}).get("baseCoin")
-            or ""
-        )
-        pos_short = pos_symbol.split(":", 1)[0]
-        if pos_short != short_symbol and pos_symbol != norm:
-            continue
-
-        contracts = (
-            pos.get("contracts")
-            or pos.get("positionAmt")
-            or pos.get("info", {}).get("size")
-            or pos.get("info", {}).get("positionAmt")
-            or pos.get("info", {}).get("positionQty")
-            or 0
-        )
+    if not positions:
         try:
-            qty = float(contracts)
+            positions = fetch_positions(params=params) or []
         except Exception:
-            qty = 0.0
+            positions = []
 
-        side = str(pos.get("side") or pos.get("info", {}).get("side") or "").lower()
-        if side in {"sell", "short"}:
-            qty = -abs(qty)
-        elif side in {"buy", "long"}:
-            qty = abs(qty)
-        qty_signed += qty
+    norm_symbol = _normalize_symbol_key(_resolve_ccxt_symbol(exchange, symbol))
 
-    _, qty_abs = _price_qty_to_precision(ex, norm, price=None, amount=abs(qty_signed))
-    qty_abs = float(qty_abs or 0.0)
-    qty_signed = float(qty_signed if qty_signed >= 0 else -qty_abs)
-    return qty_signed, qty_abs
+    qty = 0.0
+    for position in positions or []:
+        psym = normalize_position_symbol(position)
+        if not psym or psym != norm_symbol:
+            continue
+
+        pos_qty = _extract_position_quantity(position)
+        side = _extract_position_side(position)
+
+        if side in {"buy", "long"} or pos_qty > 0:
+            qty += abs(pos_qty)
+        elif side in {"sell", "short"}:
+            qty -= abs(pos_qty)
+        else:
+            qty += pos_qty
+
+    qty_signed = float(qty)
+    if abs(qty_signed) < 1e-12:
+        return 0.0, 0.0
+
+    return qty_signed, abs(qty_signed)
 
 
 def _get_position_size(exchange, symbol: str, category: str = "linear") -> float:
@@ -2592,42 +2726,44 @@ def wait_position_after_entry(
     return 0.0
 
 
-def has_pending_entry(ex, symbol: str, side: str, category: str = "linear") -> bool:
+def has_pending_entry(exchange, symbol: str, side: str, category: str = "linear") -> bool:
+    """Return ``True`` when a non-reduceOnly order exists for *symbol* and *side*."""
+
     cat = str(category or "").lower()
     if not cat or cat == "swap":
         cat = "linear"
     if cat == "spot":
         cat = "linear"
 
-    norm = _normalize_bybit_symbol(ex, symbol, cat)
-    short_symbol = norm.split(":", 1)[0]
+    params = {"category": cat}
 
-    orders: list[dict] = []
-    for candidate in (short_symbol, norm):
-        try:
-            orders = ex.fetch_open_orders(candidate, params={"category": cat}) or []
-            if orders:
-                break
-        except Exception:
-            orders = []
+    fetch_open_orders = getattr(exchange, "fetch_open_orders", None)
+    if not callable(fetch_open_orders):
+        fetch_open_orders = getattr(exchange, "fetchOpenOrders", None)
+    if not callable(fetch_open_orders):
+        return False
+
+    try:
+        orders = fetch_open_orders(symbol, params=params) or []
+    except Exception:
+        return False
 
     side_lower = str(side).lower()
-    for order in orders:
+    for order in orders or []:
         if not isinstance(order, dict):
             continue
-        reduce_flag = order.get("reduceOnly")
-        if isinstance(reduce_flag, str):
-            if reduce_flag.strip().lower() in {"true", "1", "yes"}:
+
+        reduce_only = order.get("reduceOnly")
+        if isinstance(reduce_only, str):
+            if reduce_only.strip().lower() in {"true", "1", "yes"}:
                 continue
-        elif reduce_flag:
+        elif reduce_only:
             continue
-        order_side = str(order.get("side") or order.get("info", {}).get("side") or "").lower()
-        if order_side != side_lower:
-            continue
-        status = str(order.get("status") or order.get("info", {}).get("orderStatus") or "").lower()
-        if status in {"canceled", "cancelled", "closed", "filled"}:
-            continue
-        return True
+
+        order_side = str(order.get("side") or "").lower()
+        if order_side == side_lower:
+            return True
+
     return False
 
 
