@@ -3102,8 +3102,9 @@ def run_trade(
             "open",
         )
     )
+    order_id = None
     try:
-        order_id, filled_qty = enter_ensure_filled(
+        filled_qty = enter_ensure_filled(
             ADAPTER.x,
             symbol,
             want_side,
@@ -3114,29 +3115,12 @@ def run_trade(
         logging.warning("entry | %s | ensure_filled failed: %s", symbol, exc)
         log_decision(symbol, "order_failed")
         return False
-    if not order_id or (filled_qty or 0.0) <= 0:
+    if (filled_qty or 0.0) <= 0:
         log_decision(symbol, "order_failed")
         return False
     _entry_guard[symbol] = {"bar": bar_id, "side": want_side}
 
     entry_price = price
-    try:
-        order_info = ADAPTER.x.fetch_order(
-            order_id,
-            symbol_norm,
-            params={"category": category},
-        )
-    except Exception:
-        order_info = None
-    if isinstance(order_info, dict):
-        for key in ("average", "avgPrice", "price"):
-            try:
-                candidate = float(order_info.get(key) or 0.0)
-            except Exception:
-                candidate = 0.0
-            if candidate > 0:
-                entry_price = candidate
-                break
 
     pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
     if pos_qty <= 0:
@@ -3451,8 +3435,9 @@ def attempt_direct_market_entry(
     except Exception:
         tp_price = float(tp_price_raw)
 
+    order_id = None
     try:
-        order_id, filled_qty = enter_ensure_filled(
+        filled_qty = enter_ensure_filled(
             ADAPTER.x,
             symbol,
             side,
@@ -3463,29 +3448,12 @@ def attempt_direct_market_entry(
         logging.warning("fallback trade | %s | ensure_filled failed: %s", symbol, exc)
         log_decision(symbol, "order_failed")
         return False
-    if not order_id or (filled_qty or 0.0) <= 0:
+    if (filled_qty or 0.0) <= 0:
         log_decision(symbol, "order_failed")
         return False
     _entry_guard[symbol] = {"bar": bar_id, "side": side}
 
     entry_price = last_price
-    try:
-        order_info = ADAPTER.x.fetch_order(
-            order_id,
-            symbol_norm,
-            params={"category": category},
-        )
-    except Exception:
-        order_info = None
-    if isinstance(order_info, dict):
-        for key in ("average", "avgPrice", "price"):
-            try:
-                candidate = float(order_info.get(key) or 0.0)
-            except Exception:
-                candidate = 0.0
-            if candidate > 0:
-                entry_price = candidate
-                break
 
     pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
     if pos_qty <= 0:

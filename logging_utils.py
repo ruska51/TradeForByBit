@@ -190,105 +190,57 @@ def _clean_params(d: dict | None) -> dict | None:
 
 
 def enter_ensure_filled(
-    ex,
+    exchange,
     symbol: str,
     side: str,
     qty: float,
-    *,
-    category: str = "linear",
-) -> tuple[str | None, float]:
-    """Place an IOC limit entry, then complete any remainder with a market order."""
+    category: str,
+) -> float:
+    """Place IOC limit near last, then market the remainder. Return filled qty."""
 
-    cat = str(category or "").lower()
-    if not cat or cat == "swap":
-        cat = "linear"
-    if cat == "spot":
-        cat = "linear"
-
-    norm = _normalize_bybit_symbol(ex, symbol, cat)
-    try:
-        ticker = ex.fetch_ticker(norm)
-    except Exception:
-        ticker = {}
-
+    normalized_symbol = _normalize_bybit_symbol(exchange, symbol, category)
+    ticker = exchange.fetch_ticker(normalized_symbol, params={"category": category}) or {}
     last = float(
-        (ticker or {}).get("last")
-        or (ticker or {}).get("close")
-        or (ticker or {}).get("ask")
-        or (ticker or {}).get("bid")
+        ticker.get("last")
+        or ticker.get("lastPrice")
+        or (ticker.get("info", {}).get("lastPrice") if isinstance(ticker, dict) else 0.0)
         or 0.0
     )
-    if last <= 0 and isinstance(ticker, dict):
-        info = ticker.get("info") or {}
-        try:
-            last = float(
-                info.get("lastPrice")
-                or info.get("markPrice")
-                or info.get("indexPrice")
-                or info.get("price")
-                or 0.0
-            )
-        except Exception:
-            last = 0.0
-    if last <= 0:
-        last = 1.0
+    if not last:
+        raise RuntimeError(f"No last price for {symbol}")
 
-    side_lower = str(side).lower()
-    if side_lower == "buy":
-        price_raw = last * 1.001
-    else:
-        price_raw = last * 0.999
+    price = last * (1.001 if side.lower() == "buy" else 0.999)
+    try:
+        price = float(exchange.price_to_precision(normalized_symbol, price))
+    except Exception:
+        price = float(price)
 
-    price_prec, qty_prec = _price_qty_to_precision(ex, norm, price=price_raw, amount=qty)
-    qty_prec = _round_qty(ex, norm, float(qty_prec or 0.0))
-    if qty_prec <= 0:
-        return None, 0.0
+    params = {"category": category, "timeInForce": "IOC", "reduceOnly": False}
+    try:
+        r = exchange.create_order(normalized_symbol, "limit", side, qty, price, params)
+        filled1 = float(r.get("filled") or 0.0) if isinstance(r, dict) else 0.0
+    except Exception:
+        filled1 = 0.0
 
-    params = {"category": cat, "reduceOnly": False, "timeInForce": "IOC"}
-    limit_resp = ex.create_order(norm, "limit", side, qty_prec, price_prec, params)
-    oid = limit_resp.get("id") if isinstance(limit_resp, dict) else None
-    filled = float(limit_resp.get("filled") or 0) if isinstance(limit_resp, dict) else 0.0
+    time.sleep(2.0)
 
-    deadline = time.time() + 2.0
-    while time.time() < deadline and filled < qty_prec and oid:
-        time.sleep(0.2)
-        try:
-            state = ex.fetch_order(oid, norm, params={"category": cat})
-        except Exception:
-            state = None
-        if not isinstance(state, dict):
-            continue
-        try:
-            filled = float(state.get("filled") or filled)
-        except Exception:
-            pass
-        status = str(state.get("status") or state.get("info", {}).get("orderStatus") or "").lower()
-        if status in {"canceled", "cancelled", "closed", "filled"}:
-            break
-
-    remainder = max(qty_prec - filled, 0.0)
-    _, remainder = _price_qty_to_precision(ex, norm, price=None, amount=remainder)
-    remainder = _round_qty(ex, norm, float(remainder or 0.0))
-    market_id = None
+    remainder = max(0.0, qty - filled1)
+    filled2 = 0.0
     if remainder > 0:
-        try:
-            if oid:
-                ex.cancel_order(oid, norm, {"category": cat})
-        except Exception:
-            pass
-        market_resp = ex.create_order(
-            norm,
+        r2 = exchange.create_order(
+            normalized_symbol,
             "market",
             side,
             remainder,
             None,
-            {"category": cat, "reduceOnly": False},
+            {"category": category, "reduceOnly": False},
         )
-        if isinstance(market_resp, dict):
-            market_id = market_resp.get("id") or market_resp.get("orderId")
-        filled += remainder
+        if isinstance(r2, dict):
+            filled2 = float(r2.get("filled") or remainder)
+        else:
+            filled2 = remainder
 
-    return market_id or oid, float(filled)
+    return max(0.0, min(qty, filled1 + filled2))
 
 
 def _bybit_trigger_for_exit(
