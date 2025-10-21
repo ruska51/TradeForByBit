@@ -3151,7 +3151,9 @@ def run_trade(
             symbol,
             "buy" if want_long else "sell",
             entry_price,
+            price,
             sl_pct_eff,
+            category,
             is_tp=False,
         )
         if err:
@@ -3167,7 +3169,9 @@ def run_trade(
             symbol,
             "buy" if want_long else "sell",
             entry_price,
+            price,
             tp_pct_eff,
+            category,
             is_tp=True,
         )
         if err:
@@ -3483,7 +3487,9 @@ def attempt_direct_market_entry(
             symbol,
             "buy" if want_long else "sell",
             entry_price,
+            last_price,
             sl_pct_eff,
+            category,
             is_tp=False,
         )
         if err:
@@ -3499,7 +3505,9 @@ def attempt_direct_market_entry(
             symbol,
             "buy" if want_long else "sell",
             entry_price,
+            last_price,
             tp_pct_eff,
+            category,
             is_tp=True,
         )
         if err:
@@ -3916,6 +3924,34 @@ def place_protected_exit(
     if not (is_stop or is_take_profit):
         return None
 
+    category = detect_market_category(exchange, symbol) or "linear"
+    category = str(category or "").lower()
+    if category in ("", "swap"):
+        category = "linear"
+
+    ticker: dict[str, Any] | None = None
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+    except Exception:
+        ticker = None
+
+    last_price = None
+    if isinstance(ticker, dict):
+        for key in ("last", "close", "ask", "bid"):
+            try:
+                candidate = float(ticker.get(key) or 0.0)
+            except (TypeError, ValueError):
+                candidate = 0.0
+            if math.isfinite(candidate) and candidate > 0:
+                last_price = candidate
+                break
+
+    if last_price is None or last_price <= 0:
+        try:
+            last_price = float(reference_price) if reference_price else None
+        except (TypeError, ValueError):
+            last_price = None
+
     def _pct(target: float | None, default: float) -> float:
         if target is None:
             return default
@@ -3946,13 +3982,21 @@ def place_protected_exit(
         except (TypeError, ValueError):
             base_value = stop_prec
         sl_pct = _pct(stop_prec, 0.02)
+        entry_for_exit = (
+            float(reference_price)
+            if reference_price and reference_price > 0
+            else float(base_value)
+        )
+        last_for_exit = last_price if last_price and last_price > 0 else entry_for_exit
         try:
             order_id, err = place_conditional_exit(
                 exchange,
                 symbol,
                 position_side,
-                base_value or stop_prec,
+                entry_for_exit,
+                last_for_exit,
                 sl_pct,
+                category,
                 is_tp=False,
             )
         except RuntimeError as exc:
@@ -3989,14 +4033,22 @@ def place_protected_exit(
     except (TypeError, ValueError):
         base_tp = tp_price
     tp_pct = _pct(tp_price, 0.04)
+    entry_for_exit = (
+        float(reference_price)
+        if reference_price and reference_price > 0
+        else float(base_tp)
+    )
+    last_for_exit = last_price if last_price and last_price > 0 else entry_for_exit
 
     try:
         order_id, err = place_conditional_exit(
             exchange,
             symbol,
             position_side,
-            base_tp or tp_price,
+            entry_for_exit,
+            last_for_exit,
             tp_pct,
+            category,
             is_tp=True,
         )
     except RuntimeError as exc:
@@ -4199,6 +4251,26 @@ def ensure_exit_orders(
 
     placed_any = False
 
+    ticker_info: dict[str, Any] | None = None
+    try:
+        ticker_info = exchange_obj.fetch_ticker(symbol)
+    except Exception:
+        ticker_info = None
+
+    last_price = None
+    if isinstance(ticker_info, dict):
+        for key in ("last", "close", "ask", "bid"):
+            try:
+                candidate = float(ticker_info.get(key) or 0.0)
+            except (TypeError, ValueError):
+                candidate = 0.0
+            if math.isfinite(candidate) and candidate > 0:
+                last_price = candidate
+                break
+
+    if last_price is None or last_price <= 0:
+        last_price = entry_price if entry_price > 0 else None
+
     def _pct(target: float | None, default: float = 0.02) -> float:
         if target is None:
             return default
@@ -4217,13 +4289,19 @@ def ensure_exit_orders(
 
     if need_sl and sl_price is not None:
         sl_pct = _pct(sl_price)
+        entry_for_exit = entry_price if entry_price > 0 else float(sl_base or 0.0)
+        if entry_for_exit <= 0 and sl_price is not None:
+            entry_for_exit = float(sl_price)
+        last_for_exit = last_price if last_price and last_price > 0 else entry_for_exit
         try:
             order_id, err = place_conditional_exit(
                 exchange_obj,
                 symbol,
                 side_open,
-                sl_base,
+                entry_for_exit,
+                last_for_exit,
                 sl_pct,
+                cat,
                 is_tp=False,
             )
         except RuntimeError as exc:
@@ -4252,13 +4330,19 @@ def ensure_exit_orders(
 
     if need_tp and tp_price is not None:
         tp_pct = _pct(tp_price, default=0.04)
+        entry_for_exit = entry_price if entry_price > 0 else float(tp_base or 0.0)
+        if entry_for_exit <= 0 and tp_price is not None:
+            entry_for_exit = float(tp_price)
+        last_for_exit = last_price if last_price and last_price > 0 else entry_for_exit
         try:
             order_id, err = place_conditional_exit(
                 exchange_obj,
                 symbol,
                 side_open,
-                tp_base,
+                entry_for_exit,
+                last_for_exit,
                 tp_pct,
+                cat,
                 is_tp=True,
             )
         except RuntimeError as exc:

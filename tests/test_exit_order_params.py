@@ -41,14 +41,24 @@ def _capture_conditional_calls(monkeypatch, main):
     main._last_exit_qty = {}
 
     def fake_place_conditional_exit(
-        _exchange, symbol, side_open, base_price, pct, *, is_tp
+        _exchange,
+        symbol,
+        side_open,
+        entry_price,
+        last,
+        pct,
+        category,
+        *,
+        is_tp,
     ):
         calls.append(
             {
                 "symbol": symbol,
                 "side_open": side_open,
-                "base_price": base_price,
+                "entry_price": entry_price,
+                "last": last,
                 "pct": pct,
+                "category": category,
                 "is_tp": is_tp,
             }
         )
@@ -280,14 +290,24 @@ def test_ensure_exit_orders_derivative_long_sets_trigger_direction(monkeypatch, 
     captured_calls: list[dict[str, Any]] = []
 
     def fake_place_conditional_exit(
-        _exchange, symbol, side_open, base_price, pct, *, is_tp
+        _exchange,
+        symbol,
+        side_open,
+        entry_price,
+        last,
+        pct,
+        category,
+        *,
+        is_tp,
     ):
         captured_calls.append(
             {
                 "symbol": symbol,
                 "side_open": side_open,
-                "base_price": base_price,
+                "entry_price": entry_price,
+                "last": last,
                 "pct": pct,
+                "category": category,
                 "is_tp": is_tp,
             }
         )
@@ -323,14 +343,24 @@ def test_ensure_exit_orders_derivative_short_sets_trigger_direction(monkeypatch,
     captured_calls: list[dict[str, Any]] = []
 
     def fake_place_conditional_exit(
-        _exchange, symbol, side_open, base_price, pct, *, is_tp
+        _exchange,
+        symbol,
+        side_open,
+        entry_price,
+        last,
+        pct,
+        category,
+        *,
+        is_tp,
     ):
         captured_calls.append(
             {
                 "symbol": symbol,
                 "side_open": side_open,
-                "base_price": base_price,
+                "entry_price": entry_price,
+                "last": last,
                 "pct": pct,
+                "category": category,
                 "is_tp": is_tp,
             }
         )
@@ -371,14 +401,24 @@ def test_ensure_exit_orders_adjusts_trigger_direction_to_price(monkeypatch, main
     captured_calls: list[dict[str, Any]] = []
 
     def fake_place_conditional_exit(
-        _exchange, symbol, side_open, base_price, pct, *, is_tp
+        _exchange,
+        symbol,
+        side_open,
+        entry_price,
+        last,
+        pct,
+        category,
+        *,
+        is_tp,
     ):
         captured_calls.append(
             {
                 "symbol": symbol,
                 "side_open": side_open,
-                "base_price": base_price,
+                "entry_price": entry_price,
+                "last": last,
                 "pct": pct,
+                "category": category,
                 "is_tp": is_tp,
             }
         )

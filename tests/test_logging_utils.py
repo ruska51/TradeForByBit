@@ -520,7 +520,9 @@ def test_place_conditional_exit_normalized(caplog):
         "ETH/USDT",
         "buy",
         1000.0,
+        1000.0,
         0.02,
+        "linear",
         is_tp=False,
     )
     assert order_id == "3"
@@ -696,14 +698,24 @@ def test_ensure_exit_orders_trigger_direction_long(monkeypatch):
     recorded: list[dict[str, Any]] = []
 
     def _recording_place_conditional_exit(
-        _exchange, symbol, side_open, base_price, pct, *, is_tp
+        _exchange,
+        symbol,
+        side_open,
+        entry_price,
+        last,
+        pct,
+        category,
+        *,
+        is_tp,
     ):
         recorded.append(
             {
                 "symbol": symbol,
                 "side_open": side_open,
-                "base_price": base_price,
+                "entry_price": entry_price,
+                "last": last,
                 "pct": pct,
+                "category": category,
                 "is_tp": is_tp,
             }
         )
@@ -729,14 +741,24 @@ def test_ensure_exit_orders_trigger_direction_short(monkeypatch):
     recorded: list[dict[str, Any]] = []
 
     def _recording_place_conditional_exit(
-        _exchange, symbol, side_open, base_price, pct, *, is_tp
+        _exchange,
+        symbol,
+        side_open,
+        entry_price,
+        last,
+        pct,
+        category,
+        *,
+        is_tp,
     ):
         recorded.append(
             {
                 "symbol": symbol,
                 "side_open": side_open,
-                "base_price": base_price,
+                "entry_price": entry_price,
+                "last": last,
                 "pct": pct,
+                "category": category,
                 "is_tp": is_tp,
             }
         )
