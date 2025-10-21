@@ -2959,31 +2959,35 @@ def run_trade(
     if category in ("", "swap"):
         category = "linear"
     if category not in {"linear", "inverse"}:
-        logging.info(
-            "entry | %s | skip: unsupported market category %s",
+        log_decision(
             symbol,
-            category or "unknown",
+            "no_futures_contract",
+            detail=f"entry | {symbol} | skip: unsupported market category {category or 'unknown'}",
         )
-        log_decision(symbol, "no_futures_contract")
         return False
     want_side = "buy" if signal == "long" else "sell"
     qty_signed, qty_abs = has_open_position(exchange, symbol, category)
     if qty_abs > 0:
-        logging.info(
-            "entry | %s | skip: position already open (qty=%.4f)",
+        log_decision(
             symbol,
-            qty_signed,
+            "position_already_open",
+            detail=f"entry | {symbol} | skip: position already open (qty={qty_signed:.4f})",
         )
-        log_decision(symbol, "position_already_open")
         return False
     if has_pending_entry(exchange, symbol, want_side, category):
-        logging.info("entry | %s | skip: pending entry exists (%s)", symbol, want_side)
-        log_decision(symbol, "pending_entry_exists")
+        log_decision(
+            symbol,
+            "pending_entry_exists",
+            detail=f"entry | {symbol} | skip: pending entry exists ({want_side})",
+        )
         return False
     now_bar5 = int(time.time() // (5 * 60))
     if _entry_guard.get(symbol) == now_bar5:
-        logging.info("entry | %s | skip: already entered this bar", symbol)
-        log_decision(symbol, "entry_guard_active")
+        log_decision(
+            symbol,
+            "entry_guard_active",
+            detail=f"entry | {symbol} | skip: already entered this bar",
+        )
         return False
 
     lev = LEVERAGE if leverage is None else leverage
@@ -3044,8 +3048,11 @@ def run_trade(
         risk_factor,
     )
     if qty_target <= 0:
-        logging.info("entry | %s | skip: qty_target too small", symbol)
-        log_decision(symbol, "qty_insufficient")
+        log_decision(
+            symbol,
+            "qty_insufficient",
+            detail=f"entry | {symbol} | skip: qty_target too small",
+        )
         return False
 
     try:
@@ -3062,15 +3069,21 @@ def run_trade(
         MIN_NOTIONAL,
     )
     if affordable_qty <= 0:
-        logging.warning("order | %s | skipped: insufficient balance for entry", symbol)
-        log_decision(symbol, "insufficient_balance")
+        log_decision(
+            symbol,
+            "insufficient_balance",
+            detail=f"order | {symbol} | skipped: insufficient balance for entry",
+        )
         return False
     qty_target = min(qty_target, affordable_qty)
 
     qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
     if qty_target <= 0:
-        logging.info("entry | %s | skip: qty_target too small after rounding", symbol)
-        log_decision(symbol, "qty_insufficient")
+        log_decision(
+            symbol,
+            "qty_insufficient",
+            detail=f"entry | {symbol} | skip: qty_target too small after rounding",
+        )
         return False
 
     adjusted_qty, margin_reason = _adjust_qty_for_margin(
@@ -3093,8 +3106,11 @@ def run_trade(
 
     qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
     if qty_target <= 0:
-        logging.info("entry | %s | skip: qty_target too small", symbol)
-        log_decision(symbol, "qty_insufficient")
+        log_decision(
+            symbol,
+            "qty_insufficient",
+            detail=f"entry | {symbol} | skip: qty_target too small",
+        )
         return False
 
     logging.info(
@@ -3273,7 +3289,10 @@ def attempt_direct_market_entry(
         try:
             ticker = exchange.fetch_ticker(symbol)
         except Exception as exc:
-            logging.warning("fallback trade | %s | fetch_ticker failed: %s", symbol, exc)
+            log_once(
+                "warning",
+                f"fallback trade | {symbol} | fetch_ticker failed: {exc}",
+            )
         if isinstance(ticker, dict):
             for key in ("last", "close", "ask", "bid"):
                 try:
@@ -3303,30 +3322,34 @@ def attempt_direct_market_entry(
     if category in ("", "swap"):
         category = "linear"
     if category not in {"linear", "inverse"}:
-        logging.info(
-            "entry | %s | skip: unsupported market category %s",
+        log_decision(
             symbol,
-            category or "unknown",
+            "no_futures_contract",
+            detail=f"entry | {symbol} | skip: unsupported market category {category or 'unknown'}",
         )
-        log_decision(symbol, "no_futures_contract")
         return False
     qty_signed, qty_abs = has_open_position(ADAPTER.x, symbol, category)
     if qty_abs > 0:
-        logging.info(
-            "entry | %s | skip: position already open (qty=%.4f)",
+        log_decision(
             symbol,
-            qty_signed,
+            "position_already_open",
+            detail=f"entry | {symbol} | skip: position already open (qty={qty_signed:.4f})",
         )
-        log_decision(symbol, "position_already_open")
         return False
     if has_pending_entry(ADAPTER.x, symbol, side, category):
-        logging.info("entry | %s | skip: pending entry exists (%s)", symbol, side)
-        log_decision(symbol, "pending_entry_exists")
+        log_decision(
+            symbol,
+            "pending_entry_exists",
+            detail=f"entry | {symbol} | skip: pending entry exists ({side})",
+        )
         return False
     now_bar5 = int(time.time() // (5 * 60))
     if _entry_guard.get(symbol) == now_bar5:
-        logging.info("entry | %s | skip: already entered this bar", symbol)
-        log_decision(symbol, "entry_guard_active")
+        log_decision(
+            symbol,
+            "entry_guard_active",
+            detail=f"entry | {symbol} | skip: already entered this bar",
+        )
         return False
 
     balance = 0.0
@@ -3338,11 +3361,17 @@ def attempt_direct_market_entry(
         balance = float((totals or {}).get("USDT", 0.0))
         available_margin = float((frees or totals or {}).get("USDT", 0.0))
     except Exception as exc:
-        logging.warning("fallback trade | %s | fetch_balance failed: %s", symbol, exc)
+        log_once(
+            "warning",
+            f"fallback trade | {symbol} | fetch_balance failed: {exc}",
+        )
     try:
         market = exchange.market(symbol) or {}
     except Exception as exc:
-        logging.warning("fallback trade | %s | market lookup failed: %s", symbol, exc)
+        log_once(
+            "warning",
+            f"fallback trade | {symbol} | market lookup failed: {exc}",
+        )
         market = {}
     min_qty = float(
         ((market.get("limits") or {}).get("amount") or {}).get("min", 0.0) or 0.0
@@ -3448,7 +3477,10 @@ def attempt_direct_market_entry(
             category=category,
         )
     except Exception as exc:
-        logging.warning("fallback trade | %s | ensure_filled failed: %s", symbol, exc)
+        log_once(
+            "warning",
+            f"fallback trade | {symbol} | ensure_filled failed: {exc}",
+        )
         log_decision(symbol, "order_failed")
         return False
     if (filled_qty or 0.0) <= 0:
@@ -3561,7 +3593,7 @@ def attempt_direct_market_entry(
             ctx_copy.get("tp_price"),
         )
     except Exception as exc:
-        logging.warning("exit_guard | %s | ensure_exit_orders failed: %s", symbol, exc)
+        log_once("warning", f"exit_guard | {symbol} | ensure_exit_orders failed: {exc}")
     return True
 
 
@@ -5086,8 +5118,11 @@ def run_bot():
         # Получаем тренд и режим торговли заранее, чтобы они логировались даже при пропуске
         df_trend = fetch_ohlcv(symbol, "1h", limit=250)
         if df_trend is None or df_trend.empty:
-            logging.info("data | %s | missing timeframe 1h", symbol)
-            log_decision(symbol, "no_data")
+            log_decision(
+                symbol,
+                "no_data",
+                detail=f"data | {symbol} | missing timeframe 1h",
+            )
             continue
 
         trend_state = determine_trend(df_trend)
@@ -5123,8 +5158,11 @@ def run_bot():
         df_5m = fetch_ohlcv(symbol, "5m", limit=100)
         df_15m = fetch_ohlcv(symbol, "15m", limit=100)
         if df_5m is None or df_15m is None:
-            logging.info("data | %s | missing lower timeframe data", symbol)
-            log_decision(symbol, "no_data")
+            log_decision(
+                symbol,
+                "no_data",
+                detail=f"data | {symbol} | missing lower timeframe data",
+            )
             continue
         trend_dfs["5m"] = df_5m
         trend_dfs["15m"] = df_15m
@@ -5139,18 +5177,21 @@ def run_bot():
         except Exception:
             multi_df = None
         if multi_df is None or multi_df.empty:
-            logging.info("data | %s | insufficient multi-timeframe data", symbol)
-            log_decision(symbol, "no_data")
+            log_decision(
+                symbol,
+                "no_data",
+                detail=f"data | {symbol} | insufficient multi-timeframe data",
+            )
             continue
         required_multi_cols = {"close_15m", "volume_15m"}
         missing_multi = [col for col in required_multi_cols if col not in multi_df.columns]
         if missing_multi:
-            logging.info(
-                "data | %s | missing multi-timeframe columns %s",
+            missing_cols = ",".join(sorted(missing_multi))
+            log_decision(
                 symbol,
-                ",".join(sorted(missing_multi)),
+                "no_data",
+                detail=f"data | {symbol} | missing multi-timeframe columns {missing_cols}",
             )
-            log_decision(symbol, "no_data")
             continue
         tf_signals = {tf: timeframe_direction(multi_df, tf) for tf in ["5m", "15m", "30m"]}
         global_dir = timeframe_direction(multi_df, "4h")
