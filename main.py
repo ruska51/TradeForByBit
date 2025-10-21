@@ -3122,8 +3122,7 @@ def run_trade(
 
     entry_price = price
 
-    pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
-    if pos_qty <= 0:
+    if not wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0):
         log_once(
             "warning",
             f"entry | {symbol} | filled order but no position detected yet; exits postponed",
@@ -3455,8 +3454,7 @@ def attempt_direct_market_entry(
 
     entry_price = last_price
 
-    pos_qty = wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0)
-    if pos_qty <= 0:
+    if not wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0):
         log_once(
             "warning",
             f"entry | {symbol} | filled order but no position detected yet; exits postponed",

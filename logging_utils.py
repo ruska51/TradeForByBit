@@ -2658,24 +2658,20 @@ def place_conditional_exit(ex, symbol: str, side_open: str, base_price: float, p
 
 
 def wait_position_after_entry(
-    ex,
+    exchange,
     symbol: str,
     category: str = "linear",
     timeout_sec: float = 3.0,
-) -> float:
-    cat = str(category or "").lower()
-    if not cat or cat == "swap":
-        cat = "linear"
-    if cat == "spot":
-        cat = "linear"
-    norm = _normalize_bybit_symbol(ex, symbol, cat)
+) -> bool:
+    import time
+
     t0 = time.time()
     while time.time() - t0 < timeout_sec:
-        _, qabs = has_open_position(ex, symbol, cat)
-        if qabs > 0:
-            return qabs
-        time.sleep(0.3)
-    return 0.0
+        _, qty_abs = has_open_position(exchange, symbol, category)
+        if qty_abs > 0:
+            return True
+        time.sleep(0.25)
+    return False
 
 
 def has_pending_entry(exchange, symbol: str, side: str, category: str = "linear") -> bool:
