@@ -956,38 +956,55 @@ def _extract_position_side(position: dict) -> str:
 def has_open_position(exchange, symbol: str, category: str = "linear") -> tuple[float, float]:
     """Return ``(signed_qty, abs_qty)`` for ``symbol`` in ``category``."""
 
-    cat = str(category or "").lower()
-    if not cat or cat == "swap":
-        cat = "linear"
-    if cat == "spot":
-        cat = "linear"
-    params = {"category": cat}
+    normalize_category = normalize_bybit_category(category)
+    if normalize_category == "swap":
+        normalize_category = "linear"
+    request_cat = "linear" if normalize_category == "linear" else None
 
     fetch_positions = getattr(exchange, "fetch_positions", None)
     if not callable(fetch_positions):
         return 0.0, 0.0
 
-    positions: list[dict] = []
-    try:
-        positions = fetch_positions([symbol], params=params) or []
-    except Exception:
-        positions = []
+    primary_symbol = _normalize_bybit_symbol(exchange, symbol, request_cat or category)
+    if not primary_symbol:
+        primary_symbol = symbol
 
-    if not positions:
-        alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
-        if alt_symbol and alt_symbol != symbol:
-            try:
-                positions = fetch_positions([alt_symbol], params=params) or []
-            except Exception:
-                positions = []
+    alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
+    if not alt_symbol:
+        alt_symbol = symbol
 
-    if not positions:
+    def _invoke(arg):
+        params = {"category": request_cat} if request_cat else None
+        payload = dict(params) if params else None
         try:
-            positions = fetch_positions(params=params) or []
+            if payload is not None:
+                if arg is None:
+                    return fetch_positions(params=payload) or []
+                return fetch_positions(arg, params=payload) or []
+            if arg is None:
+                return fetch_positions() or []
+            return fetch_positions(arg) or []
+        except TypeError:
+            if payload is not None:
+                if arg is None:
+                    return fetch_positions(payload) or []
+                return fetch_positions(arg, payload) or []
+            if arg is None:
+                return fetch_positions() or []
+            return fetch_positions(arg) or []
         except Exception:
-            positions = []
+            return []
 
-    norm_symbol = _normalize_symbol_key(_resolve_ccxt_symbol(exchange, symbol))
+    positions = _invoke([primary_symbol]) if primary_symbol else []
+
+    if not positions and alt_symbol and alt_symbol != primary_symbol:
+        positions = _invoke([alt_symbol])
+
+    if not positions:
+        positions = _invoke(None)
+
+    norm_source = primary_symbol or alt_symbol or symbol
+    norm_symbol = _normalize_symbol_key(norm_source)
 
     qty = 0.0
     for position in positions or []:
