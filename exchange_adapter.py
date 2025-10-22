@@ -283,8 +283,13 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     if cat not in {"linear", "inverse"}:
         cat = "linear"
 
-    # short symbol for CCXT
-    short_symbol = _ccxt_symbol(symbol)
+    # short symbol for CCXT (no settlement suffix)
+    try:
+        short_symbol = str(symbol).split(":", 1)[0]
+    except Exception:
+        short_symbol = symbol
+    if not short_symbol:
+        short_symbol = symbol
 
     # exact params required by Bybit linear
     params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
@@ -852,19 +857,19 @@ class ExchangeAdapter:
         log_params = {"symbol": symbol, "timeframe": timeframe, "limit": limit}
         exchange = getattr(self, "x", None) or getattr(self, "exchange", None)
         detected_cat = detect_market_category(exchange, symbol) if exchange else None
-        cat = str(detected_cat or "linear").lower()
-        if cat == "swap":
-            cat = "linear"
-        if cat not in {"linear", "inverse"}:
-            cat = "linear"
-        request_params: dict[str, Any] | None = {"category": cat}
+        cat_norm = str(detected_cat or "").lower()
+        if cat_norm == "swap":
+            cat_norm = "linear"
+        request_cat = "linear" if cat_norm == "linear" else None
+        cat_label = request_cat or (cat_norm if cat_norm else "none")
+        request_params: dict[str, Any] | None = {"category": request_cat} if request_cat else None
 
         try:
             data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
             if not data:
                 log_once(
                     "warning",
-                    f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat}",
+                    f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
                 )
                 self._no_data_symbols[symbol] = time.time()
                 return None
@@ -873,7 +878,8 @@ class ExchangeAdapter:
             logging.debug(
                 "adapter | fetch_ohlcv success url=%s params=%s status=%s",
                 url,
-                log_params | ({"request_params": request_params} if request_params else {}),
+                log_params
+                | ({"request_params": request_params} if request_params else {}),
                 status,
             )
             self._store_ohlcv_cache(cache_key, data)
@@ -902,7 +908,7 @@ class ExchangeAdapter:
                 if not data:
                     log_once(
                         "warning",
-                        f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat}",
+                        f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
                     )
                     self._no_data_symbols[symbol] = time.time()
                     return None
@@ -911,7 +917,8 @@ class ExchangeAdapter:
                 logging.debug(
                     "adapter | fetch_ohlcv success url=%s params=%s status=%s",
                     url,
-                    log_params | ({"request_params": request_params} if request_params else {}),
+                    log_params
+                    | ({"request_params": request_params} if request_params else {}),
                     status,
                 )
                 self._store_ohlcv_cache(cache_key, data)
@@ -921,7 +928,7 @@ class ExchangeAdapter:
                 if self._is_empty_result_exception(exc):
                     log_once(
                         "warning",
-                        f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat} ({exc})",
+                        f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat_label} ({exc})",
                     )
                     self._no_data_symbols[symbol] = time.time()
                     return None
@@ -938,7 +945,7 @@ class ExchangeAdapter:
             if self._is_empty_result_exception(exc):
                 log_once(
                     "warning",
-                    f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat} ({exc})",
+                    f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat_label} ({exc})",
                 )
                 self._no_data_symbols[symbol] = time.time()
                 return None
@@ -952,7 +959,7 @@ class ExchangeAdapter:
                     if self._is_empty_result_exception(retry_exc):
                         log_once(
                             "warning",
-                            f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat} ({retry_exc})",
+                            f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat_label} ({retry_exc})",
                         )
                         self._no_data_symbols[symbol] = time.time()
                         return None
@@ -968,7 +975,7 @@ class ExchangeAdapter:
                 if not data:
                     log_once(
                         "warning",
-                        f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat}",
+                        f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
                     )
                     self._no_data_symbols[symbol] = time.time()
                     return None
@@ -977,7 +984,8 @@ class ExchangeAdapter:
                 logging.debug(
                     "adapter | fetch_ohlcv retry success url=%s params=%s status=%s",
                     url,
-                    log_params | ({"request_params": request_params} if request_params else {}),
+                    log_params
+                    | ({"request_params": request_params} if request_params else {}),
                     status,
                 )
                 self._store_ohlcv_cache(cache_key, data)
@@ -1240,15 +1248,18 @@ class ExchangeAdapter:
             normalized = self._ccxt_symbol(symbols)
             symbol_arg = [normalized] if isinstance(normalized, str) and normalized else [symbols]
 
-        cat = detect_market_category(exchange, first_symbol or "") or "linear"
-        cat = str(cat or "").lower()
-        if cat in ("", "swap", "spot"):
-            cat = "linear"
-        if cat not in {"linear", "inverse"}:
-            cat = "linear"
+        detected_cat = detect_market_category(exchange, first_symbol or "")
+        cat_norm = str(detected_cat or "").lower()
+        if cat_norm == "swap":
+            cat_norm = "linear"
+        request_cat = "linear" if cat_norm == "linear" else None
+        cat_label = request_cat or (cat_norm if cat_norm else "none")
 
         call_params: dict[str, Any] = dict(params or {})
-        call_params["category"] = cat
+        if request_cat:
+            call_params["category"] = request_cat
+        else:
+            call_params.pop("category", None)
 
         try:
             try:
@@ -1264,14 +1275,17 @@ class ExchangeAdapter:
             if "empty" in message or "unknown" in message or "status" in message:
                 log_once(
                     "warning",
-                    f"adapter | fetch_positions failed: {symbol_label} cat={cat} ({exc})",
+                    f"adapter | fetch_positions failed: {symbol_label} cat={cat_label} ({exc})",
                 )
                 return []
             raise
 
         if not positions:
             symbol_label = first_symbol or "ALL"
-            log_once("warning", f"adapter | fetch_positions empty: {symbol_label} cat={cat}")
+            log_once(
+                "warning",
+                f"adapter | fetch_positions empty: {symbol_label} cat={cat_label}",
+            )
             return []
 
         if first_symbol:
@@ -1285,7 +1299,7 @@ class ExchangeAdapter:
                 if not filtered:
                     log_once(
                         "warning",
-                        f"adapter | fetch_positions empty: {first_symbol} cat={cat}",
+                        f"adapter | fetch_positions empty: {first_symbol} cat={cat_label}",
                     )
                     return []
                 positions = filtered

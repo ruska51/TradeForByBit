@@ -2959,15 +2959,18 @@ def run_trade(
         log(logging.ERROR, "trade", symbol, "unable to determine valid price; skipping order")
         log_decision(symbol, "price_unavailable")
         return False
-    category = detect_market_category(exchange, symbol) or "linear"
-    category = str(category or "").lower()
-    if category in ("", "swap"):
+    detected_category = detect_market_category(exchange, symbol)
+    category = str(detected_category or "").lower()
+    if category == "swap":
         category = "linear"
-    if category not in {"linear", "inverse"}:
+    if category != "linear":
         log_decision(
             symbol,
             "no_futures_contract",
-            detail=f"entry | {symbol} | skip: unsupported market category {category or 'unknown'}",
+            detail=(
+                f"entry | {symbol} | skip: unsupported market category "
+                f"{category or 'unknown'}"
+            ),
         )
         return False
     want_side = "buy" if signal == "long" else "sell"
