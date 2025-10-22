@@ -1794,7 +1794,7 @@ def log_decision(
     if detail:
         parts.append(detail)
     text = " | ".join(parts)
-    log_once("info", text)
+    get_logger().info(text)
     _info_status[symbol]["last_reason"] = reason
     emit_summary(symbol, reason)
 
@@ -2726,7 +2726,7 @@ def place_conditional_exit(
     except (TypeError, ValueError):
         qty_abs_val = 0.0
     if qty_abs_val <= 0:
-        return None, "exit skipped: no position"
+        raise RuntimeError("exit postponed: no position")
 
     exit_side = "sell" if str(side_open or "").lower() == "buy" else "buy"
 
@@ -2846,16 +2846,22 @@ def wait_position_after_entry(
     symbol: str,
     category: str = "linear",
     timeout_sec: float = 3.0,
-) -> bool:
+) -> float:
+    """Poll positions for *symbol* until ``timeout_sec`` and return the size."""
+
     import time
 
     t0 = time.time()
     while time.time() - t0 < timeout_sec:
         _, qty_abs = has_open_position(exchange, symbol, category)
-        if qty_abs > 0:
-            return True
-        time.sleep(0.25)
-    return False
+        try:
+            qty_val = float(qty_abs)
+        except (TypeError, ValueError):
+            qty_val = 0.0
+        if qty_val > 0:
+            return qty_val
+        time.sleep(0.3)
+    return 0.0
 
 
 def has_pending_entry(exchange, symbol: str, side: str, category: str = "linear") -> bool:
