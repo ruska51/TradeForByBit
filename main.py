@@ -612,6 +612,7 @@ def fetch_multi_ohlcv(
             log_once("warning", message)
         else:
             log_once("info", message)
+        record_no_data(symbol, "multi", "no_timeframes")
         log_decision(symbol, "ohlcv_unavailable")
         return None
 
@@ -648,6 +649,7 @@ def fetch_multi_ohlcv(
     missing_cols = [col for col in expected_cols if col not in result.columns]
     if result is None or result.empty:
         log_once("warning", f"data | {symbol} | empty OHLCV result")
+        record_no_data(symbol, "multi", "empty_result")
         log_decision(symbol, "ohlcv_empty")
         return None
     if missing_cols:
@@ -656,8 +658,11 @@ def fetch_multi_ohlcv(
             level,
             f"data | {symbol} | missing columns: {', '.join(missing_cols)}",
         )
+        record_no_data(symbol, "multi", "missing_columns")
         log_decision(symbol, "ohlcv_missing_columns")
         return None
+
+    clear_no_data(symbol, "multi")
 
     return result
 
@@ -1235,7 +1240,7 @@ _last_exit_qty: Dict[str, float] = {}
 exit_orders_fetch_guard: Dict[str, Dict[str, bool]] = {}
 fallback_cooldown: Dict[str, int] = {}
 tf_skip_counters: Dict[str, int] = defaultdict(int)
-_entry_guard: Dict[str, int] = {}
+_entry_guard: Dict[str, Dict[str, Any]] = {}
 TF_SKIP_THRESHOLD = 3
 
 
@@ -2967,7 +2972,10 @@ def run_trade(
         return False
     want_side = "buy" if signal == "long" else "sell"
     qty_signed, qty_abs = has_open_position(exchange, symbol, category)
-    if qty_abs > 0:
+    if qty_abs > 0 and (
+        (want_side == "buy" and qty_signed > 0)
+        or (want_side == "sell" and qty_signed < 0)
+    ):
         log_decision(
             symbol,
             "position_already_open",
@@ -2982,7 +2990,8 @@ def run_trade(
         )
         return False
     now_bar5 = int(time.time() // (5 * 60))
-    if _entry_guard.get(symbol) == now_bar5:
+    guard_state = _entry_guard.get(symbol) or {}
+    if guard_state.get("bar") == now_bar5:
         log_decision(
             symbol,
             "entry_guard_active",
@@ -3135,18 +3144,20 @@ def run_trade(
     if (filled_qty or 0.0) <= 0:
         log_decision(symbol, "order_failed")
         return False
-    _entry_guard[symbol] = now_bar5
+    _entry_guard[symbol] = {"bar": now_bar5, "side": want_side}
 
-    entry_price = price
-
-    if not wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0):
+    detected_qty = wait_position_after_entry(
+        ADAPTER.x, symbol, category=category, timeout_sec=3.0
+    )
+    if detected_qty <= 0:
         log_once(
             "warning",
-            f"entry | {symbol} | filled order but no position detected yet; exits postponed",
+            f"entry | {symbol} | filled order but position not visible yet; exits postponed",
             window_sec=60.0,
         )
-        log_decision(symbol, "position_unavailable")
-        return False
+
+    _pos_signed_after, pos_abs_after = has_open_position(exchange, symbol, category)
+    entry_price = get_position_entry_price(exchange, symbol, category) or price
 
     want_long = signal == "long"
     try:
@@ -3162,43 +3173,44 @@ def run_trade(
     if not tp_pct_eff or not math.isfinite(tp_pct_eff):
         tp_pct_eff = TP_PCT
 
-    try:
-        _, err = place_conditional_exit(
-            ADAPTER.x,
-            symbol,
-            "buy" if want_long else "sell",
-            entry_price,
-            price,
-            sl_pct_eff,
-            category,
-            is_tp=False,
-        )
-        if err:
-            log_once("warning", f"Failed to set SL for {symbol}: {err}")
-    except RuntimeError as exc:
-        log_once("warning", f"Failed to set SL for {symbol}: {exc}")
-    except Exception as exc:
-        log_once("warning", f"Failed to set SL for {symbol}: {exc}")
+    if pos_abs_after > 0:
+        try:
+            _, err = place_conditional_exit(
+                ADAPTER.x,
+                symbol,
+                "buy" if want_long else "sell",
+                entry_price,
+                price,
+                sl_pct_eff,
+                category,
+                is_tp=False,
+            )
+            if err:
+                log_once("warning", f"Failed to set SL for {symbol}: {err}")
+        except RuntimeError as exc:
+            log_once("warning", f"Failed to set SL for {symbol}: {exc}")
+        except Exception as exc:
+            log_once("warning", f"Failed to set SL for {symbol}: {exc}")
 
-    try:
-        _, err = place_conditional_exit(
-            ADAPTER.x,
-            symbol,
-            "buy" if want_long else "sell",
-            entry_price,
-            price,
-            tp_pct_eff,
-            category,
-            is_tp=True,
-        )
-        if err:
-            log_once("warning", f"Failed to set TP for {symbol}: {err}")
-    except RuntimeError as exc:
-        log_once("warning", f"Failed to set TP for {symbol}: {exc}")
-    except Exception as exc:
-        log_once("warning", f"Failed to set TP for {symbol}: {exc}")
+        try:
+            _, err = place_conditional_exit(
+                ADAPTER.x,
+                symbol,
+                "buy" if want_long else "sell",
+                entry_price,
+                price,
+                tp_pct_eff,
+                category,
+                is_tp=True,
+            )
+            if err:
+                log_once("warning", f"Failed to set TP for {symbol}: {err}")
+        except RuntimeError as exc:
+            log_once("warning", f"Failed to set TP for {symbol}: {exc}")
+        except Exception as exc:
+            log_once("warning", f"Failed to set TP for {symbol}: {exc}")
 
-    qty = float(pos_qty)
+    qty = float(pos_abs_after or detected_qty or filled_qty)
 
     current_bar_index = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -3328,8 +3340,12 @@ def attempt_direct_market_entry(
             detail=f"entry | {symbol} | skip: unsupported market category {category or 'unknown'}",
         )
         return False
+    side_norm = str(side or "").lower()
     qty_signed, qty_abs = has_open_position(ADAPTER.x, symbol, category)
-    if qty_abs > 0:
+    if qty_abs > 0 and (
+        (side_norm == "buy" and qty_signed > 0)
+        or (side_norm == "sell" and qty_signed < 0)
+    ):
         log_decision(
             symbol,
             "position_already_open",
@@ -3344,7 +3360,8 @@ def attempt_direct_market_entry(
         )
         return False
     now_bar5 = int(time.time() // (5 * 60))
-    if _entry_guard.get(symbol) == now_bar5:
+    guard_state = _entry_guard.get(symbol) or {}
+    if guard_state.get("bar") == now_bar5:
         log_decision(
             symbol,
             "entry_guard_active",
@@ -3486,18 +3503,20 @@ def attempt_direct_market_entry(
     if (filled_qty or 0.0) <= 0:
         log_decision(symbol, "order_failed")
         return False
-    _entry_guard[symbol] = now_bar5
+    _entry_guard[symbol] = {"bar": now_bar5, "side": side_norm}
 
-    entry_price = last_price
-
-    if not wait_position_after_entry(ADAPTER.x, symbol, category=category, timeout_sec=3.0):
+    detected_qty = wait_position_after_entry(
+        ADAPTER.x, symbol, category=category, timeout_sec=3.0
+    )
+    if detected_qty <= 0:
         log_once(
             "warning",
-            f"entry | {symbol} | filled order but no position detected yet; exits postponed",
+            f"fallback trade | {symbol} | filled order but position not visible yet; exits postponed",
             window_sec=60.0,
         )
-        log_decision(symbol, "position_unavailable")
-        return False
+
+    _pos_after, pos_abs_after = has_open_position(ADAPTER.x, symbol, category)
+    entry_price = get_position_entry_price(ADAPTER.x, symbol, category) or last_price
 
     want_long = direction == "long"
     try:
@@ -3513,43 +3532,44 @@ def attempt_direct_market_entry(
     if not tp_pct_eff or not math.isfinite(tp_pct_eff):
         tp_pct_eff = TP_PCT
 
-    try:
-        _, err = place_conditional_exit(
-            ADAPTER.x,
-            symbol,
-            "buy" if want_long else "sell",
-            entry_price,
-            last_price,
-            sl_pct_eff,
-            category,
-            is_tp=False,
-        )
-        if err:
-            log_once("warning", f"fallback trade | {symbol} | Failed to set SL: {err}")
-    except RuntimeError as exc:
-        log_once("warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
-    except Exception as exc:
-        log_once("warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
+    if pos_abs_after > 0:
+        try:
+            _, err = place_conditional_exit(
+                ADAPTER.x,
+                symbol,
+                "buy" if want_long else "sell",
+                entry_price,
+                last_price,
+                sl_pct_eff,
+                category,
+                is_tp=False,
+            )
+            if err:
+                log_once("warning", f"fallback trade | {symbol} | Failed to set SL: {err}")
+        except RuntimeError as exc:
+            log_once("warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
+        except Exception as exc:
+            log_once("warning", f"fallback trade | {symbol} | Failed to set SL: {exc}")
 
-    try:
-        _, err = place_conditional_exit(
-            ADAPTER.x,
-            symbol,
-            "buy" if want_long else "sell",
-            entry_price,
-            last_price,
-            tp_pct_eff,
-            category,
-            is_tp=True,
-        )
-        if err:
-            log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {err}")
-    except RuntimeError as exc:
-        log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
-    except Exception as exc:
-        log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
+        try:
+            _, err = place_conditional_exit(
+                ADAPTER.x,
+                symbol,
+                "buy" if want_long else "sell",
+                entry_price,
+                last_price,
+                tp_pct_eff,
+                category,
+                is_tp=True,
+            )
+            if err:
+                log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {err}")
+        except RuntimeError as exc:
+            log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
+        except Exception as exc:
+            log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
 
-    qty = float(pos_qty)
+    qty = float(pos_abs_after or detected_qty or filled_qty)
 
     now = datetime.now(timezone.utc)
     ctx_copy = {k: v for k, v in ctx.items() if v is not None}
@@ -4338,7 +4358,11 @@ def ensure_exit_orders(
             )
         except RuntimeError as exc:
             err_lower = str(exc).lower()
-            if err_lower.startswith("exit skipped") or "нет позиции" in err_lower:
+            if (
+                err_lower.startswith("exit skipped")
+                or err_lower.startswith("exit postponed")
+                or "нет позиции" in err_lower
+            ):
                 pass
             else:
                 log_once(
@@ -4351,7 +4375,10 @@ def ensure_exit_orders(
                 f"exit_guard | {symbol} | stop order rejected: {exc}",
             )
         else:
-            if err and not str(err).lower().startswith("exit skipped"):
+            if err and not (
+                str(err).lower().startswith("exit skipped")
+                or str(err).lower().startswith("exit postponed")
+            ):
                 log_once(
                     "warning",
                     f"exit_guard | {symbol} | stop order rejected: {err}",
@@ -4379,7 +4406,11 @@ def ensure_exit_orders(
             )
         except RuntimeError as exc:
             err_lower = str(exc).lower()
-            if err_lower.startswith("exit skipped") or "нет позиции" in err_lower:
+            if (
+                err_lower.startswith("exit skipped")
+                or err_lower.startswith("exit postponed")
+                or "нет позиции" in err_lower
+            ):
                 pass
             else:
                 log_once(
@@ -4392,7 +4423,10 @@ def ensure_exit_orders(
                 f"exit_guard | {symbol} | take-profit rejected: {exc}",
             )
         else:
-            if err and not str(err).lower().startswith("exit skipped"):
+            if err and not (
+                str(err).lower().startswith("exit skipped")
+                or str(err).lower().startswith("exit postponed")
+            ):
                 log_once(
                     "warning",
                     f"exit_guard | {symbol} | take-profit rejected: {err}",
@@ -5382,7 +5416,8 @@ def run_bot():
                         log_decision(symbol, "pending_entry_exists")
                     else:
                         now_bar5 = int(time.time() // (5 * 60))
-                        if _entry_guard.get(symbol) == now_bar5:
+                        guard_state = _entry_guard.get(symbol) or {}
+                        if guard_state.get("bar") == now_bar5:
                             log_decision(symbol, "entry_guard_active")
                         else:
                             balance = 0.0
@@ -5520,13 +5555,13 @@ def run_bot():
                                                 if (filled_qty or 0.0) <= 0:
                                                     log_decision(symbol, "order_failed")
                                                 else:
-                                                    appeared = wait_position_after_entry(
+                                                    detected_qty = wait_position_after_entry(
                                                         ADAPTER.x,
                                                         symbol,
                                                         category=cat,
                                                         timeout_sec=3.0,
                                                     )
-                                                    if not appeared:
+                                                    if detected_qty <= 0:
                                                         log_decision(symbol, "position_unavailable")
                                                     else:
                                                         entry_price = get_position_entry_price(
@@ -5586,7 +5621,10 @@ def run_bot():
                                                                 window_sec=60.0,
                                                             )
 
-                                                        _entry_guard[symbol] = now_bar5
+                                                        _entry_guard[symbol] = {
+                                                            "bar": now_bar5,
+                                                            "side": side,
+                                                        }
                                                         _, pos_qty = has_open_position(exchange, symbol, cat)
                                                         qty_val = float(pos_qty)
                                                         now = datetime.now(timezone.utc)
