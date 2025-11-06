@@ -1004,7 +1004,7 @@ TRAIL_ACTIVATION_OFFSET = 0.005  # 0.5%
 # Сниженные пороги для более активной торговли
 THRESHOLD = 0.001  # 0.1% минимальное движение для сделки
 SL_PCT = 0.02  # 2% стоп-лосс
-TP_PCT = 0.04  # 4% тейк-профит
+TP_PCT = 0.05  # 5% тейк-профит для RR ≈ 2.5
 MIN_RR = 1.5  # минимальное соотношение TP/SL
 
 
@@ -1023,16 +1023,16 @@ MIN_PROBA_FILTER = _env_float(
     "MIN_PROBA_FILTER", min(0.4, float(PROBA_FILTER))
 )
 # Стратегия допускает сделки только при умеренном тренде
-BASE_ADX_THRESHOLD = 2.0
+BASE_ADX_THRESHOLD = 15.0
 ADX_THRESHOLD = _env_float("ADX_THRESHOLD", BASE_ADX_THRESHOLD)  # минимальный ADX для сделки
 MIN_ADX_THRESHOLD = _env_float(
     "MIN_ADX_THRESHOLD", min(12.0, float(ADX_THRESHOLD))
 )
-RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 70.0)  # порог перекупленности для long
-RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 30.0)  # порог перепроданности для short
+RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 75.0)  # порог перекупленности для long
+RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 25.0)  # порог перепроданности для short
 RSI_OVERBOUGHT_MAX = max(RSI_OVERBOUGHT, _env_float("RSI_OVERBOUGHT_MAX", 80.0))
 RSI_OVERSOLD_MIN = min(RSI_OVERSOLD, _env_float("RSI_OVERSOLD_MIN", 20.0))
-PRED_HORIZON = 2  # число свечей вперёд для прогноза и бэктеста
+PRED_HORIZON = 3  # число свечей вперёд для прогноза и бэктеста
 MAX_LOSS_ROI = 0.10  # допустимый убыток по позиции (10% ROI)
 ROI_TARGET_PCT = 1.5  # целевой ROI для автофиксации прибыли (в процентах)
 ALLOW_FALLBACK_ENTRY = True  # allow entering trades when only fallback signal confirms
@@ -1058,6 +1058,11 @@ BREAKEVEN_BUFFER_ATR = 0.2
 # Inactivity adaptation thresholds (hours)
 INACTIVITY_ADAPT_HOURS = 0.5
 INACTIVITY_CONDITIONAL_HOURS = 1
+
+# PATCH NOTES:
+# - Обновлены базовые TP/SL, ADX, RSI и PRED_HORIZON.
+# - Безопасно: значения можно переопределить через ENV, MIN_RR контролирует TP.
+# - Критерии: TP/SL >= 1.5, ADX-фильтр логирует пропуски, модель использует горизонт 3.
 INACTIVITY_FALLBACK_HOURS = 2
 BOT_CYCLE_MINUTES = _env_float("BOT_CYCLE_MINUTES", 5.0)
 INACTIVITY_ADAPT_CYCLES = int(os.getenv("INACTIVITY_ADAPT_CYCLES", "6"))
