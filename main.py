@@ -6136,15 +6136,33 @@ def run_bot():
             model_signal, confidence = predict_signal(
                 symbol, X_last, adx_val, bool(rsi_cross_from_extreme), returns_1h
             )
-            if model_signal == "hold" or confidence < 0.5:
+            if model_signal == "hold":
                 continue
             tf_signals = {
                 tf: timeframe_direction(multi_df, tf) for tf in ["5m", "15m", "30m"]
             }
-            if sum(s == model_signal for s in tf_signals.values()) < 2:
+            tf_matches = sum(s == model_signal for s in tf_signals.values())
+            if tf_matches < 2:
                 continue
             global_dir = timeframe_direction(multi_df, "4h")
             if global_dir not in (model_signal, "hold"):
+                continue
+            trend_supported = tf_matches >= 2 and global_dir == model_signal
+            pattern_supports_signal = (
+                pattern_dir in (model_signal, "both")
+                if pattern_dir is not None
+                else False
+            )
+            required_confidence = apply_pattern_proba_bonus(
+                0.5,
+                pattern_info["confidence"],
+                trend_supported and pattern_supports_signal,
+            )
+            # PATCH NOTES:
+            # - применили бонус паттерна в fallback-фильтре и перенесли проверку после трендов.
+            # - безопасно: удерживаем cap MIN_PROBA_FILTER и прежние фильтры направлений.
+            # - критерии: сильный паттерн (>=0.7) + тренд снижает порог, слабый/hold остаётся без изменений.
+            if confidence < required_confidence:
                 continue
             vol_ratio_fb = safe_vol_ratio(
                 df_trend.get("volume"), VOL_WINDOW, key=f"{symbol}_fb"
