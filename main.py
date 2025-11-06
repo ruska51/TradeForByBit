@@ -1038,10 +1038,21 @@ ROI_TARGET_PCT = 1.5  # целевой ROI для автофиксации пр�
 ALLOW_FALLBACK_ENTRY = True  # allow entering trades when only fallback signal confirms
 ALLOW_MARKET_FALLBACK = True  # switch to market order if limit rejected
 MAX_PERCENT_DIFF = 0.0015  # max deviation from best price for limit orders
-RISK_PER_TRADE = 0.05  # 5% of equity risked per trade
-# сниженные пороги объёма (см. логи: vol_ratio ~0.10–0.20, поэтому 0.1 достаточно)
-VOLUME_RATIO_MIN = float(os.getenv("VOLUME_RATIO_MIN", "0.10"))
-VOLUME_RATIO_ENTRY = float(os.getenv("VOLUME_RATIO_ENTRY", "0.10"))
+RISK_PER_TRADE = 0.03  # 3% of equity risked per trade
+# базовые пороги объёма для фильтра ликвидности
+VOLUME_RATIO_MIN = float(os.getenv("VOLUME_RATIO_MIN", "1.0"))
+VOLUME_RATIO_ENTRY = float(os.getenv("VOLUME_RATIO_ENTRY", "1.0"))
+
+# PATCH NOTES:
+# Что изменено:
+# 1) RISK_PER_TRADE по умолчанию снижен до 3%, а VOLUME_RATIO_MIN/VOLUME_RATIO_ENTRY теперь >= 1.0.
+# 2) run_trade снижает риск при vol_missing и пропускает сделки при vol_low перед расчётом объёма.
+# Почему безопасно:
+# 1) Пороговые значения переопределяются ENV/конфигом, а log_once защищает от спама при частых проверках.
+# Критерии приёмки:
+# - vol_low приводит к log_decision("volume_low") и возврату False до отправки ордера.
+# - vol_reason == "vol_missing" уменьшает risk_factor до 50% перед расчётом qty.
+# - qty_target рассчитывается с effective_risk_factor >= 0.
 
 # Minimum number of agreeing lower timeframe signals required for entry
 # разрешаем вход даже без совпадений по младшим таймфреймам
@@ -1117,9 +1128,9 @@ def update_dynamic_thresholds() -> None:
     if trades_per_hour < 1:
         PROBA_FILTER = max(MIN_PROBA_FILTER, PROBA_FILTER - 0.03)
         ADX_THRESHOLD = max(MIN_ADX_THRESHOLD, ADX_THRESHOLD - 2)
-        VOLUME_RATIO_MIN = max(0.10, VOLUME_RATIO_MIN)
+        VOLUME_RATIO_MIN = max(1.0, VOLUME_RATIO_MIN)
     else:
-        VOLUME_RATIO_MIN = max(0.10, VOLUME_RATIO_MIN)
+        VOLUME_RATIO_MIN = max(1.0, VOLUME_RATIO_MIN)
     PROBA_FILTER = max(MIN_PROBA_FILTER, PROBA_FILTER)
     ADX_THRESHOLD = max(MIN_ADX_THRESHOLD, ADX_THRESHOLD)
 
@@ -3108,6 +3119,36 @@ def run_trade(
                 sizing_price = candidate
                 break
 
+    vol_series_entry = df_trend["volume"] if "volume" in df_trend.columns else None
+    vol_ratio_entry = safe_vol_ratio(vol_series_entry, VOL_WINDOW, key=f"{symbol}_entry_main")
+    vol_reason_entry = volume_reason(vol_series_entry, VOLUME_RATIO_MIN, VOL_WINDOW)
+
+    if entry_ctx is not None:
+        entry_ctx["entry_vol_ratio"] = vol_ratio_entry
+        entry_ctx["entry_vol_reason"] = vol_reason_entry
+
+    effective_risk_factor = float(risk_factor)
+    if vol_reason_entry == "vol_low":
+        if vol_ratio_entry is not None:
+            detail = (
+                f"entry | {symbol} | skip: volume ratio {vol_ratio_entry:.2f} "
+                f"below minimum {VOLUME_RATIO_MIN:.2f}"
+            )
+        else:
+            detail = (
+                f"entry | {symbol} | skip: volume ratio below minimum {VOLUME_RATIO_MIN:.2f}"
+            )
+        log_once("info", detail, window_sec=120.0)
+        log_decision(symbol, "volume_low", detail=detail)
+        return False
+    if vol_reason_entry == "vol_missing":
+        effective_risk_factor = max(0.0, risk_factor * 0.5)
+        log_once(
+            "info",
+            f"entry | {symbol} | missing volume data; risk_factor cut to {effective_risk_factor:.2f}",
+            window_sec=300.0,
+        )
+
     symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
     qty_target = _compute_entry_qty(
         symbol,
@@ -3116,7 +3157,7 @@ def run_trade(
         lev,
         balance,
         available_margin,
-        risk_factor,
+        effective_risk_factor,
     )
     if qty_target <= 0:
         log_decision(
