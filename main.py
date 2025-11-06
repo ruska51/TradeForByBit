@@ -1434,10 +1434,6 @@ def initialize_symbols() -> list[str]:
         "ETH/USDT",
         "SOL/USDT",
         "BNB/USDT",
-        "SUI/USDT",
-        "APT/USDT",
-        "OP/USDT",
-        "DOGE/USDT",
         "ADA/USDT",
         "MATIC/USDT",
     ]
@@ -1449,9 +1445,10 @@ def initialize_symbols() -> list[str]:
             seen.add(s)
             unique.append(s)
     # PATCH NOTES:
-    # - Removed недоступные на тестнете пары и добавили ликвидные фьючерсы (BTC, ADA, MATIC).
-    # - Безопасно: список проходит через filter_supported_symbols и исключит неподдерживаемые рынки.
-    # - Критерии: initialize_symbols возвращает список без TON/USDT, ARB/USDT, SEI/USDT; присутствует BTC/USDT.
+    # - Сокращён список до базовых ликвидных контрактов (BTC, ETH, SOL, BNB, ADA, MATIC).
+    # - Обновлён лимит max_open_trades до 6 в risk_config, чтобы покрыть весь список.
+    # - Безопасно: filter_supported_symbols убирает неподдерживаемые рынки на тестнете.
+    # - Критерии: initialize_symbols включает BTC/USDT и пары из резервного пула (ADA, MATIC).
     # Scanning for new symbols is temporarily disabled.
     return unique
 
