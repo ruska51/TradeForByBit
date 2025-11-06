@@ -288,7 +288,12 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     except TypeError:
         raise
     except Exception as exc:  # pragma: no cover - network errors
-        logging.info("leverage | %s | soft-skip: %s", symbol, exc)
+        message = str(exc)
+        lowered = message.lower()
+        if any(token in lowered for token in ("soft", "cross", "not modify")):
+            log_once("info", f"leverage | {symbol} | skipped ({exc})", window_sec=30.0)
+            return LEVERAGE_SKIPPED
+        log_once("warning", f"leverage | {symbol} | failed: {exc}", window_sec=30.0)
         return None
 
 

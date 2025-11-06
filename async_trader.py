@@ -9,16 +9,18 @@ from datetime import datetime, timezone
 from async_utils import fetch_multi_ohlcv_async
 from logging_utils import (
     log,
+    log_once,
     record_pattern,
     safe_create_order,
     safe_fetch_balance,
+    safe_set_leverage,
     SOFT_ORDER_ERRORS,
     setup_logging,
 )
 from metrics_utils import backtest_metrics
 from pattern_detector import detect_pattern
 from main import predict_signal, log_trade
-from exchange_adapter import ExchangeAdapter, set_valid_leverage
+from exchange_adapter import ExchangeAdapter
 from main import ADAPTER, API_KEY, API_SECRET, SANDBOX_MODE  # type: ignore
 from model_utils import load_global_bundle
 import risk_management
@@ -173,6 +175,94 @@ async def run_trade(
             f"{side} {qty:.4f} @ {price:.5f} | SL={sl_price:.5f} TP={tp_price:.5f}",
         )
 
+        exit_side = "sell" if side == "LONG" else "buy"
+
+        async def _place_stop_order(stop_value: float) -> str | None:
+            trigger = float(exchange.price_to_precision(symbol, stop_value))
+            params = {
+                "category": "linear",
+                "orderType": "Market",
+                "triggerPrice": trigger,
+                "triggerDirection": "descending"
+                if side_ccxt == "buy"
+                else "ascending",
+                "triggerBy": "LastPrice",
+                "reduceOnly": True,
+                "closeOnTrigger": True,
+                "tpSlMode": "Full",
+            }
+            try:
+                response = await asyncio.to_thread(
+                    exchange.create_order,
+                    symbol,
+                    "market",
+                    exit_side,
+                    qty,
+                    None,
+                    params,
+                )
+            except Exception as exc:
+                log_once(
+                    "warning",
+                    f"order | {symbol} | stop setup failed: {exc}",
+                    window_sec=10.0,
+                )
+                return None
+            order_id = None
+            if isinstance(response, dict):
+                order_id = response.get("id") or response.get("orderId")
+            log(logging.INFO, "order", symbol, f"stop set @ {trigger:.5f}")
+            return order_id
+
+        async def _place_take_profit_order(target_value: float) -> str | None:
+            limit_price = float(exchange.price_to_precision(symbol, target_value))
+            params = {
+                "category": "linear",
+                "reduceOnly": True,
+                "tpSlMode": "Full",
+            }
+            try:
+                response = await asyncio.to_thread(
+                    exchange.create_order,
+                    symbol,
+                    "limit",
+                    exit_side,
+                    qty,
+                    limit_price,
+                    params,
+                )
+            except Exception as exc:
+                log_once(
+                    "warning",
+                    f"order | {symbol} | target setup failed: {exc}",
+                    window_sec=10.0,
+                )
+                return None
+            order_id = None
+            if isinstance(response, dict):
+                order_id = response.get("id") or response.get("orderId")
+            log(logging.INFO, "order", symbol, f"target set @ {limit_price:.5f}")
+            return order_id
+
+        async def _replace_stop_order(stop_value: float, current_id: str | None) -> str | None:
+            if current_id:
+                try:
+                    await asyncio.to_thread(
+                        exchange.cancel_order,
+                        current_id,
+                        symbol,
+                        {"category": "linear"},
+                    )
+                except Exception:
+                    pass
+            return await _place_stop_order(stop_value)
+
+        sl_order_id = None
+        if sl_price > 0:
+            sl_order_id = await _place_stop_order(sl_price)
+        if tp_price > 0:
+            await _place_take_profit_order(tp_price)
+
         trail = risk_management.TrailingStop(
             side, price, sl_price, atr, tick_size
         )
@@ -180,12 +270,30 @@ async def run_trade(
         open_idx = start_index
         cur_idx = start_index
         stop_hit = False
+        trail_logged = False
 
         while True:
             await asyncio.sleep(1)
             ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
             last = ticker["last"]
+            prev_stop = trail.stop_price
             stop_price = trail.update(last)
+
+            if trail.active and not trail_logged:
+                log(logging.INFO, "trail", symbol, f"activated @ {stop_price:.5f}")
+                trail_logged = True
+
+            if trail.active:
+                eps = tick_size if tick_size > 0 else 1e-6
+                moved = False
+                if side == "LONG":
+                    moved = stop_price > (prev_stop + eps)
+                else:
+                    moved = stop_price < (prev_stop - eps)
+                if moved:
+                    log(logging.INFO, "trail", symbol, f"stop moved to {stop_price:.5f}")
+                    if stop_price > 0:
+                        sl_order_id = await _replace_stop_order(stop_price, sl_order_id)
 
             if side == "LONG":
                 if last <= stop_price:
@@ -394,13 +502,20 @@ async def process_symbol(
             return
         current_index = len(df_5m)
         lev = 10 if mode == "scalp" else 20
-        ex = _make_exchange()
-        try:
-            await asyncio.to_thread(ex.load_markets)
-            await asyncio.to_thread(set_valid_leverage, ex, symbol, lev)
-        finally:
-            if hasattr(ex, "close"):
-                await asyncio.to_thread(ex.close)
+        pair = pair_state.get(symbol, risk_management.PairState())
+        pair_state[symbol] = pair
+        if not pair.leverage_ready:
+            ex = _make_exchange()
+            try:
+                await asyncio.to_thread(ex.load_markets)
+                success = await asyncio.to_thread(safe_set_leverage, ex, symbol, lev)
+            finally:
+                if hasattr(ex, "close"):
+                    await asyncio.to_thread(ex.close)
+            if not success:
+                log(logging.INFO, "leverage", symbol, "skip leverage change, using cross")
+            pair.leverage_ready = True
+            pair_state[symbol] = pair
         tp_mult = config.get("tp_mult", 2.0)
         if side == "LONG" and pattern_info["pattern_name"] == "bull_flag":
             tp_mult = 3.0
