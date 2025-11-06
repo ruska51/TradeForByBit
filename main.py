@@ -669,24 +669,42 @@ def fetch_multi_ohlcv(
 
 def _health_check(symbols: list[str]) -> None:
     """Verify model availability and basic data fetch before trading."""
-    issues: list[str] = []
+
+    fatal_issues: list[str] = []
+    data_issues: list[str] = []
     if (
         GLOBAL_MODEL is None
         or not hasattr(GLOBAL_MODEL, "classes_")
         or len(getattr(GLOBAL_MODEL, "classes_", [])) < 3
     ):
-        issues.append("model_unavailable")
+        fatal_issues.append("model_unavailable")
+
+    if timeframes:
+        required_col = "close_15m" if "15m" in timeframes else f"close_{timeframes[0]}"
+    else:
+        required_col = "close_15m"
+
     for sym in symbols:
         try:
             df = fetch_multi_ohlcv(sym, timeframes, limit=5, warn=False)
-            if df is None or df.empty or "close_15m" not in df.columns:
-                issues.append(f"data:{sym}")
-        except Exception as e:  # pragma: no cover - defensive
-            issues.append(f"data:{sym}:{e}")
-    if issues:
-        msg = "health check failed: " + ", ".join(issues)
+        except Exception as exc:  # pragma: no cover - defensive
+            data_issues.append(f"{sym} ({exc})")
+            continue
+
+        if df is None or df.empty:
+            data_issues.append(f"{sym} (empty)")
+            continue
+        if required_col not in df.columns:
+            data_issues.append(f"{sym} (missing {required_col})")
+
+    if fatal_issues:
+        msg = "health check failed: " + ", ".join(fatal_issues)
         logging.error(msg)
         raise RuntimeError(msg)
+
+    if data_issues:
+        msg = "health check degraded: data unavailable for " + ", ".join(data_issues)
+        log_once("warning", msg, window_sec=300)
 
 # === Подгружаем обученную модель CNN ===
 # Если файл отсутствует, создаём небольшую обучающую выборку
