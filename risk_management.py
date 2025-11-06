@@ -224,6 +224,9 @@ def calc_sl_tp(
     tp_pct = max(tp_mult * atr_pct, 0.01)
 
     side_lower = str(side).lower()
+    if side_lower == "short" and tp_pct >= 1.0:
+        tp_pct = 0.99
+
     if side_lower == "long":
         sl_price = price * (1 - sl_pct)
         tp_price = price * (1 + tp_pct)
