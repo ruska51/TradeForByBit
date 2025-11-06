@@ -63,16 +63,11 @@ try:
 except ImportError:
     has_xgb = False
 from model_utils import (
-    make_xgb_classifier,
     load_global_bundle,
     BUNDLE_PATH,
     SimpleScaler,
 )
-from sklearn.model_selection import train_test_split, TimeSeriesSplit, StratifiedKFold
-from sklearn.ensemble import ExtraTreesClassifier
-from sklearn.metrics import accuracy_score, make_scorer, f1_score, precision_score
-from sklearn.feature_selection import SelectFromModel
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import f1_score
 from collections import Counter, defaultdict
 from uuid import uuid4
 from utils.data_prep import fetch_and_prepare_training_data
@@ -2109,100 +2104,46 @@ def train_optuna_model(symbol: str, n_trials: int = 20):
         if not c.startswith("timestamp") and c not in ["target", "delta"]
     ]
     # [ANCHOR:FEATURE_SHAPE_GUARD]
-    X = df[feature_cols].fillna(0)
-    if X.shape[1] != len(feature_cols):
+    df_features = df[feature_cols].fillna(0).copy()
+    if df_features.shape[1] != len(feature_cols):
         logging.warning("feature | shape_mismatch")
         return None
-    y = df["target"].astype(int)
-    if len(np.unique(y)) < 2:
+    df_target = df["target"].astype(int)
+    if len(np.unique(df_target)) < 2:
         logging.error(f"model | {symbol} | only one class present; aborting")
         return None
 
-    class_counts = np.bincount(y, minlength=3)
-    if class_counts[class_counts > 0].min() < 2:
-        additions_x: list[pd.DataFrame] = []
-        additions_y: list[pd.Series] = []
-        for cls, count in enumerate(class_counts):
-            if count > 0 and count < 2:
-                need = 2 - int(count)
-                sample_idx = y[y == cls].index
-                reps = X.loc[sample_idx].sample(n=need, replace=True, random_state=42)
-                additions_x.append(reps.reset_index(drop=True))
-                additions_y.append(pd.Series([cls] * need))
-        if additions_x:
-            X = pd.concat([X.reset_index(drop=True)] + additions_x, ignore_index=True)
-            y = pd.concat([y.reset_index(drop=True)] + additions_y, ignore_index=True)
-        class_counts = np.bincount(y.astype(int), minlength=3)
-
-    scaler = StandardScaler().fit(X)
-    X_scaled = pd.DataFrame(scaler.transform(X), columns=feature_cols)
-
-    class_counts = np.bincount(y.astype(int), minlength=3)
-    min_class = class_counts[class_counts > 0].min()
-    n_splits = max(2, min(5, int(min_class)))
-    if n_splits < 2:
-        logging.error(f"model | {symbol} | insufficient data per class")
-        return None
-
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    best_score = -1.0
-    best_model = None
-    for train_idx, val_idx in skf.split(X_scaled, y):
-        model = make_xgb_classifier(3, random_state=42)
-        model.set_params(
-            n_estimators=500,
-            learning_rate=0.05,
-            max_depth=6,
-            subsample=0.8,
-            colsample_bytree=0.8,
-        )
-        model.fit(
-            X_scaled.iloc[train_idx],
-            y.iloc[train_idx],
-            eval_set=[(X_scaled.iloc[val_idx], y.iloc[val_idx])],
-            verbose=False,
-        )
-        preds = model.predict(X_scaled.iloc[val_idx])
-        score = f1_score(y.iloc[val_idx], preds, average="macro")
-        prec = precision_score(
-            y.iloc[val_idx], preds, average="macro", zero_division=0
-        )
-        best_iter = getattr(
-            model, "best_iteration", model.get_params().get("n_estimators", 0)
-        )
-        logging.info(
-            f"cv | fold score f1={score:.3f} precision={prec:.3f} best_iter={best_iter}"
-        )
-        if score > best_score:
-            best_score = score
-            best_model = model
-
-    if best_model is None:
-        logging.error("model | training failed")
-        return None
-
-    # retrain on full dataset using best iteration
-    best_params = best_model.get_xgb_params()
     try:
-        n_estimators = best_model.best_iteration
-    except AttributeError:
-        n_estimators = best_model.get_params().get("n_estimators", 100)
-    final_model = make_xgb_classifier(3, random_state=42)
-    final_model.set_params(**best_params)
-    final_model.set_params(n_estimators=n_estimators)
-    final_model.fit(X_scaled, y)
+        model, scaler, features, classes = retrain_global_model(
+            df_features, df_target, feature_cols
+        )
+    except Exception as exc:
+        logging.error("model | %s | retrain failed: %s", symbol, exc)
+        return None
 
-    model_dir = os.path.join(os.path.dirname(__file__), "models")
-    os.makedirs(model_dir, exist_ok=True)
-    joblib.dump(
-        {"model": final_model, "scaler": scaler, "features": feature_cols},
-        os.path.join(model_dir, "global_model.joblib"),
-    )
-    logging.info("model | global | ✅ model saved")
-    globals()["GLOBAL_MODEL"] = final_model
+    try:
+        joblib.dump(
+            {
+                "model": model,
+                "scaler": scaler,
+                "features": list(features),
+                "classes": classes,
+            },
+            BUNDLE_PATH,
+        )
+    except Exception as exc:
+        logging.warning("model | %s | bundle dump failed: %s", symbol, exc)
+
+    globals()["GLOBAL_MODEL"] = model
     globals()["GLOBAL_SCALER"] = scaler
-    globals()["GLOBAL_FEATURES"] = feature_cols
-    return final_model
+    globals()["GLOBAL_FEATURES"] = list(features)
+    globals()["GLOBAL_CLASSES"] = classes
+    logging.info(
+        "model | %s | ✅ model retrained (%d features)",
+        symbol,
+        len(features),
+    )
+    return model
 
 
 def train_model(symbol):
