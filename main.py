@@ -246,6 +246,7 @@ def append_csv(path: str, row: dict, fieldnames: list[str]) -> None:
 # [ANCHOR:IMPORTS_INTEGRATION]
 from exchange_adapter import (
     ExchangeAdapter,
+    AdapterInitError,
     AdapterOHLCVUnavailable,
     safe_fetch_closed_orders,
 )
@@ -1376,6 +1377,7 @@ def apply_pattern_proba_bonus(adj_proba: float, pattern_conf: float, trend_ok: b
         return max(MIN_PROBA_FILTER, adj_proba - 0.20)
     return adj_proba
 
+ADAPTER_READY = False
 try:
     ADAPTER = ExchangeAdapter(
         config={
@@ -1391,8 +1393,9 @@ try:
         ADAPTER.load_markets()  # via ExchangeAdapter
     except Exception as e:  # pragma: no cover - log only
         logging.warning("adapter | load_markets skipped: %s", e)
-except Exception as e:  # pragma: no cover - import fallback
-    logging.warning("main | adapter init failed: %s", e)
+    ADAPTER_READY = bool(exchange)
+except AdapterInitError as e:  # pragma: no cover - init diagnostics
+    logging.error("main | adapter init failed: %s", e)
     ADAPTER = ExchangeAdapter.__new__(ExchangeAdapter)
     ADAPTER.backend = "ccxt"
     ADAPTER.x = None
@@ -1400,7 +1403,28 @@ except Exception as e:  # pragma: no cover - import fallback
     ADAPTER.last_warn_at = {}
     ADAPTER.markets_loaded_at = 0.0
     ADAPTER.config = {}
+    ADAPTER.sandbox = SANDBOX_MODE
+    ADAPTER.futures = True
+    ADAPTER_READY = False
     exchange = None
+except Exception as e:  # pragma: no cover - unexpected init failure
+    logging.exception("main | unexpected adapter init failure")
+    ADAPTER = ExchangeAdapter.__new__(ExchangeAdapter)
+    ADAPTER.backend = "ccxt"
+    ADAPTER.x = None
+    ADAPTER.sdk = None
+    ADAPTER.last_warn_at = {}
+    ADAPTER.markets_loaded_at = 0.0
+    ADAPTER.config = {}
+    ADAPTER.sandbox = SANDBOX_MODE
+    ADAPTER.futures = True
+    ADAPTER_READY = False
+    exchange = None
+
+# PATCH NOTES:
+# - Sandbox startup now tracks adapter readiness and aborts trading when unavailable.
+# - Keeps ccxt stub fallback for tests while surfacing detailed init errors in logs.
+# - Criteria: logs include sandbox status; main() exits if adapter missing.
 
 
 def initialize_symbols() -> list[str]:
@@ -6342,7 +6366,19 @@ def main() -> None:
     logging.info("=== INITIALIZING BOT ===")
     logging.info("Timestamp: %s", datetime.now(timezone.utc))
     logging.info("Symbols: %s", symbols)
-    logging.info("Exchange sandbox mode: ENABLED")
+    sandbox_active = bool(SANDBOX_MODE and getattr(ADAPTER, "sandbox", False))
+    if sandbox_active:
+        logging.info("Exchange sandbox mode: ENABLED")
+    else:
+        logging.info("Exchange sandbox mode: DISABLED")
+
+    if not ADAPTER_READY:
+        logging.error(
+            "startup | exchange adapter unavailable; aborting sandbox run"
+        )
+        raise SystemExit(
+            "Exchange adapter unavailable; check sandbox connectivity or API keys."
+        )
 
     if not BUNDLE_PATH.exists():
         logging.warning(
