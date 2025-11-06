@@ -47,9 +47,42 @@ def build_feature_dataframe(df_ohlcv: pd.DataFrame, symbol: str, thr: float = 0.
     df["rsi_14"] = df["ret_1"].clip(lower=0).rolling(14).mean() / (
         df["ret_1"].abs().rolling(14).mean() + 1e-9
     )
+
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - df["close"].shift()).abs(),
+            (df["low"] - df["close"].shift()).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    tr14 = tr.rolling(14).mean()
+    plus_dm = (df["high"].diff()).clip(lower=0)
+    minus_dm = (-df["low"].diff()).clip(lower=0)
+    plus_di = 100 * plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / tr14.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / tr14.replace(0, np.nan)
+    dx = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
+    df["plus_di"] = plus_di
+    df["minus_di"] = minus_di
+    df["adx"] = dx.ewm(alpha=1 / 14, adjust=False).mean()
+
+    df["volume_sma_20"] = df["volume"].rolling(20).mean()
+    df["volume_ratio"] = df["volume"] / (df["volume_sma_20"] + 1e-9)
     # Target: 1 (long) если ret_5 > thr, 2 (short) если ret_5 < -thr, иначе 0
     target = np.where(df["ret_5"] > thr, 1, np.where(df["ret_5"] < -thr, 2, 0))
-    feats = df[["ret_1", "ret_5", "sma_10", "sma_50", "rsi_14"]].copy()
+    feats = df[
+        [
+            "ret_1",
+            "ret_5",
+            "sma_10",
+            "sma_50",
+            "rsi_14",
+            "adx",
+            "plus_di",
+            "minus_di",
+            "volume_ratio",
+        ]
+    ].copy()
     feats["symbol_cat"] = hash(symbol) % 17
     feats["target"] = target
     feats.dropna(inplace=True)
