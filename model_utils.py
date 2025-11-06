@@ -95,6 +95,21 @@ def load_global_bundle():
     return model, scaler, features, classes
 
 
+# Feature columns produced by :func:`build_recent_dataset_light`.
+RECENT_FEATURE_COLUMNS = [
+    "ret_1",
+    "ret_5",
+    "sma_10",
+    "sma_50",
+    "rsi_14",
+    "adx",
+    "plus_di",
+    "minus_di",
+    "volume_ratio",
+    "symbol_cat",
+]
+
+
 ADAPTER: ExchangeAdapter | None = None
 # Cache for the loaded global model.  The tuple stores ``(model, scaler, features)``
 # to avoid confusion with similarly named globals in :mod:`main`.
@@ -137,9 +152,16 @@ def build_recent_dataset_light(
 
     df = pd.DataFrame(
         data,
-        columns=["ts", "open", "high", "low", "close", "volume"],
+        columns=["timestamp", "open", "high", "low", "close", "volume"],
     )
-    df["ret"] = df["close"].pct_change()
+    df["ret_1"] = df["close"].pct_change()
+    df["ret_5"] = df["close"].pct_change(5)
+    df["sma_10"] = df["close"].rolling(10).mean()
+    df["sma_50"] = df["close"].rolling(50).mean()
+    df["rsi_14"] = df["ret_1"].clip(lower=0).rolling(14).mean() / (
+        df["ret_1"].abs().rolling(14).mean() + 1e-9
+    )
+
     tr = pd.concat(
         [
             df["high"] - df["low"],
@@ -148,25 +170,27 @@ def build_recent_dataset_light(
         ],
         axis=1,
     ).max(axis=1)
-    df["atr"] = tr.rolling(14).mean()
-
-    delta = df["close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df["rsi"] = 100 - (100 / (1 + rs))
-
+    tr14 = tr.rolling(14).mean()
     plus_dm = (df["high"].diff()).clip(lower=0)
     minus_dm = (-df["low"].diff()).clip(lower=0)
-    tr14 = tr.rolling(14).mean()
-    plus_di = 100 * plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / tr14
-    minus_di = 100 * minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / tr14
+    plus_di = 100 * plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / tr14.replace(
+        0, np.nan
+    )
+    minus_di = 100 * minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / tr14.replace(
+        0, np.nan
+    )
     dx = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
+    df["plus_di"] = plus_di
+    df["minus_di"] = minus_di
     df["adx"] = dx.ewm(alpha=1 / 14, adjust=False).mean()
 
-    return df[["ret", "atr", "rsi", "adx"]].dropna().reset_index(drop=True)
+    df["volume_sma_20"] = df["volume"].rolling(20).mean()
+    df["volume_ratio"] = df["volume"] / (df["volume_sma_20"] + 1e-9)
+    df["symbol_cat"] = hash(symbol) % 17
+
+    features_df = df[RECENT_FEATURE_COLUMNS].copy()
+    features_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return features_df.dropna().reset_index(drop=True)
 
 
 def build_recent_dataset(
@@ -180,7 +204,7 @@ def build_recent_dataset(
             raise ValueError("not enough data")
         features = list(df.columns)
         X = df.iloc[:-1].values
-        y = (df["ret"].shift(-1).iloc[:-1] > 0).astype(int).values
+        y = (df["ret_1"].shift(-1).iloc[:-1] > 0).astype(int).values
         try:
             from sklearn.preprocessing import StandardScaler
 
@@ -191,7 +215,7 @@ def build_recent_dataset(
         return X, y, scaler, features
     except Exception as e:
         logging.warning("model | build_recent_dataset failed: %s; using constant hold model", e)
-        X = np.zeros((1, 4), dtype=float)
+        X = np.zeros((1, len(RECENT_FEATURE_COLUMNS)), dtype=float)
         y = np.zeros((1,), dtype=int)
         try:
             from sklearn.preprocessing import StandardScaler
@@ -200,7 +224,7 @@ def build_recent_dataset(
             scaler.fit(X)
         except Exception:  # pragma: no cover - optional dependency
             scaler = None
-        features = ["ret", "atr", "rsi", "adx"]
+        features = RECENT_FEATURE_COLUMNS.copy()
         return X, y, scaler, features
 
 
@@ -390,13 +414,14 @@ def predict_with_fallback(symbol: str, timeframe: str = "5m", limit: int = 200) 
             from sklearn.linear_model import LogisticRegression
             from sklearn.preprocessing import StandardScaler
 
-            X = df[["ret", "atr", "rsi", "adx"]].iloc[:-1].values
-            y = (df["ret"].shift(-1).iloc[:-1] > 0).astype(int).values
+            feature_cols = list(df.columns)
+            X = df[feature_cols].iloc[:-1].values
+            y = (df["ret_1"].shift(-1).iloc[:-1] > 0).astype(int).values
             scaler = StandardScaler()
             X = scaler.fit_transform(X)
             model = LogisticRegression(max_iter=200)
             model.fit(X, y)
-            last = scaler.transform(df[["ret", "atr", "rsi", "adx"]].iloc[-1:].values)
+            last = scaler.transform(df[feature_cols].iloc[-1:].values)
             prob = model.predict_proba(last)[0][1]
             if prob > 0.51:
                 return "long"
