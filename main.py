@@ -2854,6 +2854,8 @@ def _adjust_qty_for_margin(
     while adjusted_qty > 0:
         required_margin = (adjusted_qty * price) / effective_leverage if price > 0 else float("inf")
         if required_margin <= available:
+            if adjusted_qty * price < 10:
+                return None, "below_min_notional"
             return adjusted_qty, None
         if attempts >= 2 or adjusted_qty <= max(min_qty, 0.0):
             break
@@ -2872,6 +2874,8 @@ def _adjust_qty_for_margin(
 
     required_margin = (adjusted_qty * price) / effective_leverage if price > 0 else float("inf")
     if required_margin <= available:
+        if adjusted_qty * price < 10:
+            return None, "below_min_notional"
         return adjusted_qty, None
     return None, "insufficient_balance"
 
