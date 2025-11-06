@@ -573,6 +573,7 @@ def fetch_multi_ohlcv(
     """
 
     dfs: dict[str, pd.DataFrame] = {}
+    raw_dfs: dict[str, pd.DataFrame] = {}
     for tf in timeframes:
         ohlcv = None
         for attempt in range(3):
@@ -599,12 +600,13 @@ def fetch_multi_ohlcv(
                 f"data | {symbol} | {tf} returned no candles",
             )
             continue
-        df = pd.DataFrame(
+        df_raw = pd.DataFrame(
             ohlcv,
             columns=["timestamp", "open", "high", "low", "close", "volume"],
         )
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        df = df.rename(columns=lambda c: f"{c}_{tf}")
+        df_raw["timestamp"] = pd.to_datetime(df_raw["timestamp"], unit="ms")
+        raw_dfs[tf] = df_raw
+        df = df_raw.rename(columns=lambda c: f"{c}_{tf}")
         dfs[tf] = df
     if not dfs:
         message = f"data | {symbol} | no OHLCV for required timeframes; skipping"
@@ -663,6 +665,11 @@ def fetch_multi_ohlcv(
         return None
 
     clear_no_data(symbol, "multi")
+
+    try:
+        result.attrs["sources"] = raw_dfs
+    except Exception:  # pragma: no cover - defensive attr assignment
+        pass
 
     return result
 
@@ -4840,6 +4847,23 @@ def run_bot():
             skip_summary["data"].append(symbol)
             continue
 
+        cached_ohlcv: dict[str, pd.DataFrame] = {}
+        if isinstance(preview, pd.DataFrame):
+            sources = preview.attrs.get("sources") if hasattr(preview, "attrs") else None
+            if isinstance(sources, dict):
+                cached_ohlcv = {tf: df.copy() for tf, df in sources.items() if df is not None}
+
+        def _cached_fetch_ohlcv(tf: str, limit: int) -> pd.DataFrame | None:
+            df_cached = cached_ohlcv.get(tf)
+            if df_cached is not None and not df_cached.empty:
+                if limit and len(df_cached) > limit:
+                    return df_cached.tail(limit).copy()
+                return df_cached.copy()
+            df_new = fetch_ohlcv(symbol, tf, limit=limit)
+            if df_new is not None and not df_new.empty:
+                cached_ohlcv[tf] = df_new.copy()
+            return df_new
+
         metrics = {}
         try:
             metrics = backtest(symbol)
@@ -4875,7 +4899,7 @@ def run_bot():
                 skip_summary["data"].append(symbol)
                 continue
 
-        df_for_chart = fetch_ohlcv(symbol, tf="15m", limit=300)
+        df_for_chart = _cached_fetch_ohlcv("15m", limit=300)
         pattern_info = {"pattern_name": "none", "source": "none", "confidence": 0.0}
         if df_for_chart is not None and not df_for_chart.empty:
             chart_path = f"chart_{symbol.replace('/', '')}_{int(time.time()*1000)}.png"
@@ -4941,14 +4965,14 @@ def run_bot():
                     and prev_side in ("LONG", "SHORT")
                 ):
                     opposite_side = "SHORT" if prev_side == "LONG" else "LONG"
-                    dataframes = {
-                        tf: fetch_ohlcv(symbol, tf, limit=100)
-                        for tf in ("5m", "15m", "30m", "1h")
-                    }
-                    for tf in ("4h",):
-                        df_tf = fetch_ohlcv(symbol, tf, limit=100)
+                    dataframes = {}
+                    for tf in ("5m", "15m", "30m", "1h"):
+                        df_tf = _cached_fetch_ohlcv(tf, limit=100)
                         if df_tf is not None and not df_tf.empty:
                             dataframes[tf] = df_tf
+                    df_4h = _cached_fetch_ohlcv("4h", limit=100)
+                    if df_4h is not None and not df_4h.empty:
+                        dataframes["4h"] = df_4h
                     # [ANCHOR:TREND_SAFE_CALLER]
                     try:
                         ok = confirm_trend(dataframes, opposite_side)
@@ -5180,6 +5204,8 @@ def run_bot():
 
         # Получаем тренд и режим торговли заранее, чтобы они логировались даже при пропуске
         df_trend = fetch_ohlcv(symbol, "1h", limit=250)
+        if df_trend is not None and not df_trend.empty and "1h" not in cached_ohlcv:
+            cached_ohlcv["1h"] = df_trend.copy()
         if df_trend is None or df_trend.empty:
             log_decision(
                 symbol,
@@ -5218,8 +5244,8 @@ def run_bot():
 
         # --- Prepare dataframes for trend confirmation ---
         trend_dfs: dict[str, pd.DataFrame] = {}
-        df_5m = fetch_ohlcv(symbol, "5m", limit=100)
-        df_15m = fetch_ohlcv(symbol, "15m", limit=100)
+        df_5m = _cached_fetch_ohlcv("5m", limit=100)
+        df_15m = _cached_fetch_ohlcv("15m", limit=100)
         if df_5m is None or df_15m is None:
             log_decision(
                 symbol,
@@ -5231,14 +5257,16 @@ def run_bot():
         trend_dfs["15m"] = df_15m
         trend_dfs["1h"] = df_trend
         for tf in ("30m", "4h"):
-            df_tf = fetch_ohlcv(symbol, tf, limit=100)
+            df_tf = _cached_fetch_ohlcv(tf, limit=100)
             if df_tf is not None and not df_tf.empty:
                 trend_dfs[tf] = df_tf
 
-        try:
-            multi_df = fetch_multi_ohlcv(symbol, timeframes, limit=300, warn=False)
-        except Exception:
-            multi_df = None
+        multi_df = preview if isinstance(preview, pd.DataFrame) and not preview.empty else None
+        if multi_df is None:
+            try:
+                multi_df = fetch_multi_ohlcv(symbol, timeframes, limit=300, warn=False)
+            except Exception:
+                multi_df = None
         if multi_df is None or multi_df.empty:
             log_decision(
                 symbol,
