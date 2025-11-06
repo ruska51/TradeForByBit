@@ -294,7 +294,14 @@ def _load_xgb_fallback(model_path: str, xgb_path: str, scaler_path: str) -> tupl
     if os.path.exists(model_path):
         try:
             meta = joblib.load(model_path)
-            return meta["model"], meta.get("scaler"), meta.get("features", [])
+            model = meta.get("model")
+            classes = meta.get("classes")
+            if model is not None and classes is not None:
+                try:
+                    model.classes_ = np.array(classes)
+                except Exception:  # pragma: no cover - advisory assignment
+                    pass
+            return model, meta.get("scaler"), meta.get("features", [])
         except Exception:
             pass
 
@@ -321,7 +328,20 @@ def _load_xgb_fallback(model_path: str, xgb_path: str, scaler_path: str) -> tupl
         model.fit(X, y)
         model.save_model(xgb_path)
 
-    joblib.dump({"model": model, "scaler": scaler, "features": features}, model_path)
+    classes = getattr(model, "classes_", np.array([0, 1, 2]))
+    try:
+        model.classes_ = np.array(classes)
+    except Exception:  # pragma: no cover - advisory assignment
+        pass
+    joblib.dump(
+        {
+            "model": model,
+            "scaler": scaler,
+            "features": features,
+            "classes": np.array(classes),
+        },
+        model_path,
+    )
     return model, scaler, features
 
 
