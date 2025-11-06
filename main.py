@@ -1399,16 +1399,16 @@ except Exception as e:  # pragma: no cover - import fallback
 def initialize_symbols() -> list[str]:
     """Return list of tradable pairs. Market scanning is currently disabled."""
     default = [
+        "BTC/USDT",
         "ETH/USDT",
         "SOL/USDT",
         "BNB/USDT",
         "SUI/USDT",
-        "TON/USDT",
         "APT/USDT",
-        "ARB/USDT",
-        "SEI/USDT",
         "OP/USDT",
         "DOGE/USDT",
+        "ADA/USDT",
+        "MATIC/USDT",
     ]
     # Удаляем возможные дубликаты, сохраняя порядок
     seen: set[str] = set()
@@ -1417,6 +1417,10 @@ def initialize_symbols() -> list[str]:
         if s not in seen:
             seen.add(s)
             unique.append(s)
+    # PATCH NOTES:
+    # - Removed недоступные на тестнете пары и добавили ликвидные фьючерсы (BTC, ADA, MATIC).
+    # - Безопасно: список проходит через filter_supported_symbols и исключит неподдерживаемые рынки.
+    # - Критерии: initialize_symbols возвращает список без TON/USDT, ARB/USDT, SEI/USDT; присутствует BTC/USDT.
     # Scanning for new symbols is temporarily disabled.
     return unique
 
