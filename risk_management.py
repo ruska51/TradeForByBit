@@ -81,6 +81,7 @@ class PairState:
     volume_factor: float = 1.0
     losing_streak: int = 0
     pending_qty: float = 0.0
+    leverage_ready: bool = False
 
 
 def load_state() -> Dict[str, PairState]:
@@ -92,6 +93,7 @@ def load_state() -> Dict[str, PairState]:
                 volume_factor=v.get("volume_factor", 1.0),
                 losing_streak=v.get("losing_streak", 0),
                 pending_qty=v.get("pending_qty", 0.0),
+                leverage_ready=v.get("leverage_ready", False),
             )
             for k, v in data.items()
         }
@@ -1164,6 +1166,7 @@ def load_risk_state(config: Dict, path: str = STATE_FILE):
                 volume_factor=v.get("volume_factor", 1.0),
                 losing_streak=v.get("losing_streak", 0),
                 pending_qty=v.get("pending_qty", 0.0),
+                leverage_ready=v.get("leverage_ready", False),
             )
             for k, v in pair_data.items()
         }
