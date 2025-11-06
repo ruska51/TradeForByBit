@@ -959,19 +959,24 @@ def has_open_position(exchange, symbol: str, category: str = "linear") -> tuple[
     normalize_category = normalize_bybit_category(category)
     if normalize_category == "swap":
         normalize_category = "linear"
-    request_cat = "linear" if normalize_category == "linear" else None
+    request_cat = (
+        normalize_category if normalize_category in {"linear", "inverse"} else None
+    )
 
     fetch_positions = getattr(exchange, "fetch_positions", None)
     if not callable(fetch_positions):
         return 0.0, 0.0
 
+    def _strip_suffix(value):
+        if isinstance(value, str) and ":" in value:
+            return value.split(":", 1)[0]
+        return value
+
     primary_symbol = _normalize_bybit_symbol(exchange, symbol, request_cat or category)
-    if not primary_symbol:
-        primary_symbol = symbol
+    primary_symbol = _strip_suffix(primary_symbol) or symbol
 
     alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
-    if not alt_symbol:
-        alt_symbol = symbol
+    alt_symbol = _strip_suffix(alt_symbol) or symbol
 
     def _invoke(arg):
         params = {"category": request_cat} if request_cat else None
@@ -1801,6 +1806,14 @@ def log_decision(
     detail: str | None = None,
 ) -> None:
     """Append a trade decision (entry/skip) to ``decision_log.csv``."""
+    detail_norm = detail or ""
+    key = (decision, reason, detail_norm)
+    last_key = _info_status[symbol].get("last_decision_key")
+    if last_key == key:
+        _info_status[symbol]["last_reason"] = reason
+        emit_summary(symbol, reason)
+        return
+
     write_header = not os.path.exists(path)
     with open(path, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -1813,6 +1826,7 @@ def log_decision(
     text = " | ".join(parts)
     get_logger().info(text)
     _info_status[symbol]["last_reason"] = reason
+    _info_status[symbol]["last_decision_key"] = key
     emit_summary(symbol, reason)
 
 

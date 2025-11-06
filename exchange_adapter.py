@@ -267,43 +267,29 @@ def to_sdk(symbol: str) -> str:
 def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     """Set leverage for Bybit linear/inverse derivatives using minimal, explicit params."""
 
-    # normalize leverage to int
     try:
         L = int(leverage)
     except Exception:
         L = int(float(leverage))
 
-    # category resolution
-    cat = detect_market_category(exchange, symbol) or "linear"
-    if cat == "swap":
-        cat = "linear"
-    if not cat:
-        cat = "linear"
-    cat = cat.lower()
-    if cat not in {"linear", "inverse"}:
-        cat = "linear"
+    cat = detect_market_category(exchange, symbol)
+    cat_norm = str(cat or "").lower()
+    if not cat_norm or cat_norm == "swap":
+        cat_norm = "linear"
+    if cat_norm not in {"linear", "inverse"}:
+        cat_norm = "linear"
 
-    # short symbol for CCXT (no settlement suffix)
-    try:
-        short_symbol = str(symbol).split(":", 1)[0]
-    except Exception:
-        short_symbol = symbol
-    if not short_symbol:
-        short_symbol = symbol
+    short_symbol = symbol.split(":", 1)[0] if isinstance(symbol, str) else symbol
 
-    # exact params required by Bybit linear
-    params = {"category": cat, "buyLeverage": L, "sellLeverage": L}
+    params = {"category": cat_norm, "buyLeverage": L, "sellLeverage": L}
 
-    # single CCXT call; no positionIdx, no extra probing
     try:
         return exchange.set_leverage(L, short_symbol, params)
+    except TypeError:
+        raise
     except Exception as exc:  # pragma: no cover - network errors
-        logging.warning(
-            "adapter | leverage | %s | soft skip: %s",
-            short_symbol,
-            exc,
-        )
-        return LEVERAGE_SKIPPED
+        logging.info("leverage | %s | soft-skip: %s", symbol, exc)
+        return None
 
 
 def validate_api(exchange) -> None:
@@ -393,6 +379,13 @@ class ExchangeAdapter:
                         "adapter | load_markets_safe succeeded but markets empty"
                     )
             self._verify_exchange_options()
+
+    def _ensure_no_data_store(self) -> dict[str, float]:
+        store = getattr(self, "_no_data_symbols", None)
+        if store is None:
+            store = {}
+            self._no_data_symbols = store
+        return store
 
     # ------------------------------------------------------------------
     def _default_params(
@@ -506,7 +499,8 @@ class ExchangeAdapter:
 
         ccxt_symbol = self._ccxt_symbol(symbol)
 
-        if symbol in self._no_data_symbols:
+        no_data = self._ensure_no_data_store()
+        if symbol in no_data:
             return None
         market: dict[str, Any] | None = None
         try:
@@ -858,11 +852,12 @@ class ExchangeAdapter:
         exchange = getattr(self, "x", None) or getattr(self, "exchange", None)
         detected_cat = detect_market_category(exchange, symbol) if exchange else None
         cat_norm = str(detected_cat or "").lower()
-        if cat_norm == "swap":
+        if not cat_norm or cat_norm == "swap":
             cat_norm = "linear"
-        request_cat = "linear" if cat_norm == "linear" else None
+        request_cat = cat_norm if cat_norm in {"linear", "inverse"} else None
         cat_label = request_cat or (cat_norm if cat_norm else "none")
         request_params: dict[str, Any] | None = {"category": request_cat} if request_cat else None
+        no_data = self._ensure_no_data_store()
 
         try:
             data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
@@ -871,7 +866,7 @@ class ExchangeAdapter:
                     "warning",
                     f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
                 )
-                self._no_data_symbols[symbol] = time.time()
+                no_data[symbol] = time.time()
                 return None
             url = getattr(self.x, "last_request_url", "unknown")
             status = getattr(self.x, "last_http_status_code", "unknown")
@@ -883,7 +878,7 @@ class ExchangeAdapter:
                 status,
             )
             self._store_ohlcv_cache(cache_key, data)
-            self._no_data_symbols.pop(symbol, None)
+            no_data.pop(symbol, None)
             return data
         except AttributeError:
             self._activate_ccxt()
@@ -910,7 +905,7 @@ class ExchangeAdapter:
                         "warning",
                         f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
                     )
-                    self._no_data_symbols[symbol] = time.time()
+                    no_data[symbol] = time.time()
                     return None
                 url = getattr(self.x, "last_request_url", "unknown")
                 status = getattr(self.x, "last_http_status_code", "unknown")
@@ -922,7 +917,7 @@ class ExchangeAdapter:
                     status,
                 )
                 self._store_ohlcv_cache(cache_key, data)
-                self._no_data_symbols.pop(symbol, None)
+                no_data.pop(symbol, None)
                 return data
             except Exception as exc:  # pragma: no cover - logging only
                 if self._is_empty_result_exception(exc):
@@ -930,7 +925,7 @@ class ExchangeAdapter:
                         "warning",
                         f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat_label} ({exc})",
                     )
-                    self._no_data_symbols[symbol] = time.time()
+                    no_data[symbol] = time.time()
                     return None
                 return self._handle_fetch_failure(
                     symbol,
@@ -947,7 +942,7 @@ class ExchangeAdapter:
                     "warning",
                     f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat_label} ({exc})",
                 )
-                self._no_data_symbols[symbol] = time.time()
+                no_data[symbol] = time.time()
                 return None
             if self._is_rate_limited(exc):
                 time.sleep(2)
@@ -961,7 +956,7 @@ class ExchangeAdapter:
                             "warning",
                             f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat_label} ({retry_exc})",
                         )
-                        self._no_data_symbols[symbol] = time.time()
+                        no_data[symbol] = time.time()
                         return None
                     return self._handle_fetch_failure(
                         symbol,
@@ -977,7 +972,7 @@ class ExchangeAdapter:
                         "warning",
                         f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
                     )
-                    self._no_data_symbols[symbol] = time.time()
+                    no_data[symbol] = time.time()
                     return None
                 url = getattr(self.x, "last_request_url", "unknown")
                 status = getattr(self.x, "last_http_status_code", "unknown")
@@ -989,7 +984,7 @@ class ExchangeAdapter:
                     status,
                 )
                 self._store_ohlcv_cache(cache_key, data)
-                self._no_data_symbols.pop(symbol, None)
+                no_data.pop(symbol, None)
                 return data
             return self._handle_fetch_failure(
                 symbol,
@@ -1090,6 +1085,7 @@ class ExchangeAdapter:
         )
 
         call_symbol = request_symbol or symbol
+        no_data = self._ensure_no_data_store()
 
         msg = str(exc).lower()
         if self.sandbox and ("timeframe" in msg or "unsupported" in msg):
@@ -1130,7 +1126,7 @@ class ExchangeAdapter:
                 params | ({"request_params": request_params} if request_params else {}),
             )
             self._store_ohlcv_cache((symbol, timeframe, int(limit or 0)), data)
-            self._no_data_symbols.pop(symbol, None)
+            no_data.pop(symbol, None)
             return data
 
         self._warn(
@@ -1138,7 +1134,7 @@ class ExchangeAdapter:
             f"{symbol}:{timeframe}",
             f"adapter | fetch_ohlcv giving up symbol={symbol} tf={timeframe} error={exc}",
         )
-        self._no_data_symbols[symbol] = time.time()
+        no_data[symbol] = time.time()
         return None
 
     # ------------------------------------------------------------------
@@ -1250,9 +1246,9 @@ class ExchangeAdapter:
 
         detected_cat = detect_market_category(exchange, first_symbol or "")
         cat_norm = str(detected_cat or "").lower()
-        if cat_norm == "swap":
+        if not cat_norm or cat_norm == "swap":
             cat_norm = "linear"
-        request_cat = "linear" if cat_norm == "linear" else None
+        request_cat = cat_norm if cat_norm in {"linear", "inverse"} else None
         cat_label = request_cat or (cat_norm if cat_norm else "none")
 
         call_params: dict[str, Any] = dict(params or {})
