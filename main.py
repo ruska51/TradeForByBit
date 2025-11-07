@@ -6378,6 +6378,21 @@ def run_bot():
 def run_bot_loop():
     logging.info("=== LIVE BOT START (TESTNET) ===")
     logging.info("[run_bot_loop] Loop starting...")
+    if any(arg in ("--retrain", "retrain") for arg in sys.argv[1:]):
+        logging.info("[run_bot_loop] Manual retrain requested via CLI flag")
+        try:
+            df_features, df_target, feature_cols = fetch_and_prepare_training_data(
+                ADAPTER, symbols, base_tf="15m", limit=400
+            )
+            global GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES
+            (
+                GLOBAL_MODEL,
+                GLOBAL_SCALER,
+                GLOBAL_FEATURES,
+                GLOBAL_CLASSES,
+            ) = _retrain_checked(df_features, df_target, feature_cols)
+        except Exception as e:
+            logging.error("[run_bot_loop] Manual retrain failed: %s", e, exc_info=True)
     last_analysis = time.time()
     analysis_interval = 60 * 60 * 3  # 3 hours
     try:
@@ -6453,6 +6468,11 @@ def main() -> None:
         cancel_stale_orders(sym)
 
     run_bot_loop()
+
+# PATCH NOTES:
+# - Added manual retrain flag and expanded feature engineering (EMA/CCI/OBV).
+# - Safe: relies on existing training pipeline with dropna guards.
+# - Checks: launch with --retrain; confirm bundle includes new feature columns.
 
 
 if __name__ == "__main__":

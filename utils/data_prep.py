@@ -48,6 +48,16 @@ def build_feature_dataframe(df_ohlcv: pd.DataFrame, symbol: str, thr: float = 0.
         df["ret_1"].abs().rolling(14).mean() + 1e-9
     )
 
+    df["ema_fast"] = df["close"].ewm(span=10, adjust=False).mean()
+    df["ema_slow"] = df["close"].ewm(span=50, adjust=False).mean()
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    sma_tp20 = typical.rolling(20).mean()
+    mean_dev = (typical - sma_tp20).abs().rolling(20).mean()
+    df["cci"] = (typical - sma_tp20) / (0.015 * (mean_dev.replace(0, np.nan)))
+    price_diff = df["close"].diff()
+    direction = np.where(price_diff > 0, 1, np.where(price_diff < 0, -1, 0))
+    df["obv"] = (direction * df["volume"].fillna(0)).cumsum()
+
     tr = pd.concat(
         [
             df["high"] - df["low"],
@@ -76,11 +86,15 @@ def build_feature_dataframe(df_ohlcv: pd.DataFrame, symbol: str, thr: float = 0.
             "ret_5",
             "sma_10",
             "sma_50",
+            "ema_fast",
+            "ema_slow",
             "rsi_14",
             "adx",
             "plus_di",
             "minus_di",
             "volume_ratio",
+            "cci",
+            "obv",
         ]
     ].copy()
     feats["symbol_cat"] = hash(symbol) % 17
