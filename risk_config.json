@@ -8,18 +8,17 @@
   "losing_streak_limit": 4,
   "max_daily_loss_per_symbol": 0.05,
   "cool_down_bars": 5,
-  "max_open_trades": 6,
+  "max_open_trades": 10,
   "time_stop_bars": 60,
   "VOL_WINDOW": 20,
   "VOL_RATIO_MAX": 10.0,
   "VOLUME_RATIO_MIN": 1.3,
   "reserve_symbols": [
-    "ADA/USDT",
-    "LTC/USDT",
-    "MATIC/USDT",
-    "LINK/USDT",
+    "APT/USDT",
+    "AVAX/USDT",
+    "DOGE/USDT",
+    "OP/USDT",
     "ATOM/USDT",
-    "NEAR/USDT",
     "AAVE/USDT",
     "ALGO/USDT"
   ]
