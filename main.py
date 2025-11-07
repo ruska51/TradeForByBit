@@ -3276,6 +3276,19 @@ def run_trade(
             log_once("warning", f"Failed to set TP for {symbol}: {exc}")
 
     qty = float(pos_abs_after or detected_qty or filled_qty)
+    try:
+        entry_price_logged = float(entry_price)
+    except (TypeError, ValueError):
+        entry_price_logged = float(price)
+    if not math.isfinite(entry_price_logged):
+        entry_price_logged = float(price or 0.0)
+    qty_logged = float(qty or 0.0)
+    logging.info(
+        "entry | %s | позиция открыта по цене %.4f, qty=%.3f",
+        symbol,
+        entry_price_logged,
+        qty_logged,
+    )
 
     current_bar_index = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -3650,6 +3663,19 @@ def attempt_direct_market_entry(
             log_once("warning", f"fallback trade | {symbol} | Failed to set TP: {exc}")
 
     qty = float(pos_abs_after or detected_qty or filled_qty)
+    try:
+        entry_price_logged = float(entry_price)
+    except (TypeError, ValueError):
+        entry_price_logged = float(last_price)
+    if not math.isfinite(entry_price_logged):
+        entry_price_logged = float(last_price or 0.0)
+    qty_logged = float(qty or 0.0)
+    logging.info(
+        "entry | %s | позиция открыта по цене %.4f, qty=%.3f",
+        symbol,
+        entry_price_logged,
+        qty_logged,
+    )
 
     now = datetime.now(timezone.utc)
     ctx_copy = {k: v for k, v in ctx.items() if v is not None}
@@ -5944,7 +5970,19 @@ def run_bot():
         if is_derivative_market:
             leverage_category = detect_market_category(exchange, symbol)
             if str(leverage_category).lower() == "linear":
-                safe_set_leverage(exchange, symbol, mode_lev)
+                try:
+                    if not safe_set_leverage(exchange, symbol, mode_lev):
+                        log_decision(symbol, "leverage_failed")
+                        continue
+                except Exception as exc:
+                    logging.error(
+                        "leverage | %s | unexpected set_leverage failure: %s",
+                        symbol,
+                        exc,
+                        exc_info=True,
+                    )
+                    log_decision(symbol, "leverage_exception")
+                    continue
             else:
                 logging.info(
                     "leverage | %s | skip: market %s not linear",

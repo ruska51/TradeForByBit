@@ -1943,6 +1943,12 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
 
             gross = (price - entry_price) * qty if side == "LONG" else (entry_price - price) * qty
             fee = commission * (entry_price + price) * qty
+            logging.info(
+                "exit | %s | позиция закрыта по цене %.4f, PNL=%.4f",
+                symbol,
+                _to_float(price),
+                _to_float(gross - fee),
+            )
             profit = gross - fee
 
             exit_hint = ctx.pop("exit_type_hint", None)
