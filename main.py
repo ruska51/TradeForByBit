@@ -670,8 +670,8 @@ def fetch_multi_ohlcv(
     return result
 
 
-def _health_check(symbols: list[str]) -> None:
-    """Verify model availability and basic data fetch before trading."""
+def _health_check(symbols: list[str]) -> list[str]:
+    """Verify model availability and data health; return symbols with issues."""
 
     fatal_issues: list[str] = []
     data_issues: list[str] = []
@@ -708,6 +708,7 @@ def _health_check(symbols: list[str]) -> None:
     if data_issues:
         msg = "health check degraded: data unavailable for " + ", ".join(data_issues)
         log_once("warning", msg, window_sec=300)
+    return [issue.split()[0] for issue in data_issues]
 
 # === Подгружаем обученную модель CNN ===
 # Если файл отсутствует, создаём небольшую обучающую выборку
@@ -4730,10 +4731,24 @@ def run_bot():
 
     skip_summary = {"model": [], "data": []}
     try:
-        _health_check(active_symbols)
+        issues = _health_check(active_symbols)
     except Exception as e:
         logging.warning("health | pre-run check failed: %s", e)
         return
+    if issues:
+        for sym in issues:
+            if sym in active_symbols:
+                active_symbols.remove(sym)
+                logging.info(
+                    f"[run_bot] Удаляем {sym} из списка из-за отсутствия данных"
+                )
+                if reserve_symbols:
+                    new_sym = reserve_symbols.pop(0)
+                    symbols.append(new_sym)
+                    active_symbols.append(new_sym)
+                    logging.info(
+                        f"[run_bot] Добавлена запасная пара: {new_sym}"
+                    )
     if active_symbols:
         test_sym = "ETH/USDT" if "ETH/USDT" in active_symbols else active_symbols[0]
 
