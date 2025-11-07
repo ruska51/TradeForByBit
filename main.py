@@ -2852,17 +2852,21 @@ def _adjust_qty_for_margin(
         if attempts >= 2 or adjusted_qty <= max(min_qty, 0.0):
             break
         attempts += 1
-        new_qty = max(min_qty, adjusted_qty / 2)
-        new_qty = float(exchange.amount_to_precision(symbol, new_qty))
-        if new_qty == adjusted_qty:
+        max_affordable = (available * effective_leverage / price) if price > 0 else 0.0
+        scaled_qty = max(min_qty, max_affordable * 0.9)
+        scaled_qty = float(exchange.amount_to_precision(symbol, scaled_qty))
+        if scaled_qty <= 0 or scaled_qty >= adjusted_qty:
             break
         log(
             logging.WARNING,
             "order",
             symbol,
-            f"reduced qty to {new_qty} due to insufficient balance (needs {required_margin:.4f} > has {available:.4f})",
+            (
+                f"reduced qty to {scaled_qty:.4f} due to insufficient balance "
+                f"(needs {required_margin:.2f} > has {available:.2f})"
+            ),
         )
-        adjusted_qty = new_qty
+        adjusted_qty = scaled_qty
 
     required_margin = (adjusted_qty * price) / effective_leverage if price > 0 else float("inf")
     if required_margin <= available:
@@ -3052,6 +3056,16 @@ def run_trade(
     )
     sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
     tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
+
+    price_limits = market.get("limits", {}).get("price", {}) if isinstance(market, dict) else {}
+    min_price_limit = float(price_limits.get("min") or 0.0)
+    safe_floor = max(min_price_limit, (tick_size or 0.0) if tick_size else 0.0, 1e-8)
+    if sl_price <= safe_floor:
+        fallback_sl = price * (1 - SL_PCT) if signal == "long" else price * (1 + SL_PCT)
+        fallback_sl = max(fallback_sl, safe_floor)
+        sl_price = float(exchange.price_to_precision(symbol, fallback_sl))
+        if sl_price <= safe_floor:
+            sl_price = float(exchange.price_to_precision(symbol, safe_floor))
 
     sizing_price = price
     if ticker is not None:
@@ -3534,6 +3548,21 @@ def attempt_direct_market_entry(
         tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
     except Exception:
         tp_price = float(tp_price_raw)
+
+    price_limits = (market.get("limits") or {}).get("price") if isinstance(market, dict) else None
+    min_price_limit = 0.0
+    if isinstance(price_limits, dict):
+        try:
+            min_price_limit = float(price_limits.get("min") or 0.0)
+        except (TypeError, ValueError):
+            min_price_limit = 0.0
+    safe_floor = max(min_price_limit, (tick_size or 0.0) if tick_size else 0.0, 1e-8)
+    if sl_price <= safe_floor:
+        fallback_sl = last_price * (1 - SL_PCT) if direction == "long" else last_price * (1 + SL_PCT)
+        fallback_sl = max(fallback_sl, safe_floor)
+        sl_price = float(exchange.price_to_precision(symbol, fallback_sl))
+        if sl_price <= safe_floor:
+            sl_price = float(exchange.price_to_precision(symbol, safe_floor))
 
     order_id = None
     try:
@@ -5346,7 +5375,7 @@ def run_bot():
         vol_series = vol_5m
         # [ANCHOR:VOLUME_FILTER]
         vol_ratio = safe_vol_ratio(vol_series, VOL_WINDOW, key=symbol)
-        vol_reason = volume_reason(vol_series, VOLUME_RATIO_ENTRY, VOL_WINDOW)  # 'vol_missing' | 'vol_low' | None
+        vol_reason = volume_reason(vol_series, 0.08, VOL_WINDOW)  # 'vol_missing' | 'vol_low' | None
         vol_ok = (vol_reason == "vol_missing") or (vol_ratio >= VOLUME_RATIO_ENTRY)
         vol_risk = 0.5 if vol_reason == "vol_missing" else 1.0
         ctx = {"vol_ratio": vol_ratio, "vol_reason": vol_reason}
@@ -5885,6 +5914,8 @@ def run_bot():
             logging.warning(
                 "low volume for %s | VOL_RATIO=%.2f", symbol, vol_ratio
             )
+            log_decision(symbol, "volume_low")
+            continue
 
         # === Подтверждения сигнала ===
         # [ANCHOR:VOL_CONFIRM]

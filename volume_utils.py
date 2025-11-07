@@ -21,7 +21,7 @@ def _safe_vol_ratio(series: pd.Series | None, window: int) -> float | None:
         avg = max(1e-9, float(mean_volume)) if np.isfinite(mean_volume) else 1e-9
         curr = float(series.iloc[-1])
         vol_ratio = curr / avg
-        vol_ratio = max(0.1, min(vol_ratio, VOL_RATIO_MAX))
+        vol_ratio = max(0.08, min(vol_ratio, VOL_RATIO_MAX))
         return vol_ratio
     except Exception:
         return None
