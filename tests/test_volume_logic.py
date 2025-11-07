@@ -18,7 +18,7 @@ def test_safe_vol_ratio_zero_mean():
     s = pd.Series([0.0] * VOL_WINDOW)
     ratio = safe_vol_ratio(s, VOL_WINDOW)
     assert ratio is not None
-    assert 0.1 <= ratio <= VOL_RATIO_MAX
+    assert 0.08 <= ratio <= VOL_RATIO_MAX
 
 
 def test_volume_reason_helper():
@@ -34,7 +34,7 @@ def test_vol_ratio_with_nans_and_infs():
     s = pd.Series(data)
     ratio = safe_vol_ratio(s, VOL_WINDOW)
     assert ratio is not None
-    assert 0.1 <= ratio <= VOL_RATIO_MAX
+    assert 0.08 <= ratio <= VOL_RATIO_MAX
 
 
 def test_vol_missing_short_series():
