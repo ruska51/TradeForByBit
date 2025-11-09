@@ -56,6 +56,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import itertools
 
+
+best_params_cache: dict[str, dict] = {}
+
 try:
     from xgboost import XGBClassifier
     import xgboost as xgb
