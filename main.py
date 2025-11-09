@@ -1019,7 +1019,7 @@ MIN_PROBA_FILTER = _env_float(
     "MIN_PROBA_FILTER", min(0.4, float(PROBA_FILTER))
 )
 # Стратегия допускает сделки только при умеренном тренде
-BASE_ADX_THRESHOLD = 15.0
+BASE_ADX_THRESHOLD = 20.0  # Повышен базовый порог ADX для трендовых фильтров
 ADX_THRESHOLD = _env_float("ADX_THRESHOLD", BASE_ADX_THRESHOLD)  # минимальный ADX для сделки
 MIN_ADX_THRESHOLD = _env_float(
     "MIN_ADX_THRESHOLD", min(12.0, float(ADX_THRESHOLD))
@@ -1137,7 +1137,6 @@ STRENGTH_THRESHOLD = 0.5
 VOLATILITY_5M_THRESHOLD = 0.01
 
 risk_config = load_config()
-risk_state, limiter, cool, stats = load_risk_state(risk_config)
 MAX_LOSS_ROI = risk_config.get("max_trade_loss_pct", MAX_LOSS_ROI)
 def _resolve_max_open_trades(config: dict) -> int:
     try:
@@ -1183,6 +1182,17 @@ DEFAULT_PARAMS = dict(
     RSI_OVERBOUGHT=RSI_OVERBOUGHT,
     RSI_OVERSOLD=RSI_OVERSOLD,
 )
+
+if not best_params_cache:
+    best_params_cache["GLOBAL"] = DEFAULT_PARAMS
+    try:
+        save_param_cache()
+    except Exception as e:
+        logging.warning(
+            "params | GLOBAL | failed to save default params: %s",
+            e,
+        )
+    logging.info("params | GLOBAL | Initialized best_params with default")
 
 
 @dataclass
@@ -1481,6 +1491,21 @@ BASE_SYMBOL_COUNT = len(symbols)
 reserve_symbols, _res_removed, _res_degraded = filter_supported_symbols(
     ADAPTER, risk_config.get("reserve_symbols", []), markets_cache
 )
+
+active_symbols = list(dict.fromkeys(symbols + reserve_symbols))
+if active_symbols:
+    risk_config["active_symbols"] = active_symbols
+
+risk_state, limiter, cool, stats = load_risk_state(risk_config)
+
+# Удаляем из состояния пары, отсутствующие в обновленном списке символов
+for sym in list(risk_state.keys()):
+    if sym not in symbols and sym not in reserve_symbols:
+        risk_state.pop(sym, None)
+        limiter.losses.pop(sym, None)
+        cool.last_loss.pop(sym, None)
+        stats.stats.pop(sym, None)
+        logging.info("risk_state | removed stale data for %s", sym)
 
 SYMBOL_CATEGORIES = {s: i for i, s in enumerate(symbols)}
 PATTERN_LABELS = {name: i for i, name in enumerate(pattern_classes)}
@@ -3033,6 +3058,7 @@ def run_trade(
     frees = balance_info.get("free") if isinstance(balance_info, dict) else None
     balance = float((totals or {}).get("USDT", 0.0))
     available_margin = float((frees or totals or {}).get("USDT", 0.0))
+    equity = balance
     market = exchange.market(symbol)
     precision = market.get("precision", {}).get("amount", 0)
     precision_step = 1 / (10**precision) if precision else 1.0
@@ -3056,6 +3082,12 @@ def run_trade(
     )
     sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
     tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
+    logging.debug(
+        "%s | calc SL=%.4f, TP=%.4f",
+        symbol,
+        sl_price,
+        tp_price,
+    )
 
     price_limits = market.get("limits", {}).get("price", {}) if isinstance(market, dict) else {}
     min_price_limit = float(price_limits.get("min") or 0.0)
@@ -3187,6 +3219,31 @@ def run_trade(
         )
         return False
 
+    leverage_int = max(leverage_int, 1)
+    required_margin = (qty_target * price) / leverage_int if price > 0 else float("inf")
+    if required_margin > equity * 0.97:
+        new_qty = qty_target * 0.5
+        logging.warning(
+            "entry | %s | required_margin %.2f > 97%% equity, qty halved to %.4f",
+            symbol,
+            required_margin,
+            new_qty,
+        )
+        try:
+            qty_target = float(exchange.amount_to_precision(symbol, new_qty))
+        except Exception:
+            qty_target = float(new_qty)
+        if qty_target <= 0:
+            log_decision(symbol, "qty_reduced_zero")
+            return False
+    logging.debug(
+        "%s | final qty_target=%.4f, price=%.4f, lev=%sx",
+        symbol,
+        qty_target,
+        price,
+        leverage_int,
+    )
+
     logging.info(
         colorize(
             f"trade | {symbol} | Opening {want_side.upper()} position | qty={qty_target} | price={price}",
@@ -3258,22 +3315,26 @@ def run_trade(
             log_once("warning", f"Failed to set SL for {symbol}: {exc}")
 
         try:
-            _, err = place_conditional_exit(
+            params = {"reduceOnly": True, "category": category}
+            _resp, err = safe_create_order(
                 ADAPTER.x,
                 symbol,
-                "buy" if want_long else "sell",
-                entry_price,
-                price,
-                tp_pct_eff,
-                category,
-                is_tp=True,
+                "limit",
+                "sell" if want_long else "buy",
+                pos_abs_after,
+                tp_price,
+                params=params,
             )
             if err:
-                log_once("warning", f"Failed to set TP for {symbol}: {err}")
-        except RuntimeError as exc:
-            log_once("warning", f"Failed to set TP for {symbol}: {exc}")
+                log_once("warning", f"Failed to set TP (limit) for {symbol}: {err}")
+            else:
+                logging.info(
+                    "exit | %s | Take-profit limit order placed at %.4f",
+                    symbol,
+                    tp_price,
+                )
         except Exception as exc:
-            log_once("warning", f"Failed to set TP for {symbol}: {exc}")
+            log_once("warning", f"Failed to create TP limit for {symbol}: {exc}")
 
     qty = float(pos_abs_after or detected_qty or filled_qty)
     try:
@@ -4362,11 +4423,28 @@ def ensure_exit_orders(
 
     has_stop = any("stop" in _order_type(o) for o in orders)
     has_tp = any(
-        "take_profit" in _order_type(o) or _order_type(o) == "tp" for o in orders
+        (
+            "take_profit" in _order_type(o)
+            or _order_type(o) == "tp"
+        )
+        or (
+            str(o.get("type") or "").lower() == "limit"
+            and str(o.get("side") or "").lower() == exit_side
+            and (
+                (
+                    isinstance(o.get("info"), dict)
+                    and bool(o.get("info", {}).get("reduceOnly"))
+                )
+                or bool(o.get("reduceOnly"))
+            )
+        )
+        for o in orders
     )
 
     need_sl = sl_price is not None and not has_stop
     need_tp = tp_price is not None and not has_tp
+    if is_bybit:
+        need_tp = False
     if not need_sl and not need_tp:
         return
 
@@ -5075,7 +5153,11 @@ def run_bot():
                         reverse_done = True
         cancel_stale_orders(symbol)
 
-        positions = fetch_positions_soft(symbol)
+        try:
+            positions = fetch_positions_soft(symbol)
+        except Exception as exc:
+            logging.error("position | %s | fetch_positions failed: %s", symbol, exc)
+            continue
         no_position = not any(float(p.get("contracts", 0)) > 0 for p in positions)
 
         closed_this_cycle = False
@@ -5249,12 +5331,20 @@ def run_bot():
             log_decision(symbol, "position_exists")
             continue
         # === Проверка открытых позиций и автоматическая фиксация прибыли ===
-        positions = fetch_positions_soft(symbol)
+        try:
+            positions = fetch_positions_soft(symbol)
+        except Exception as exc:
+            logging.error("position | %s | fetch_positions failed: %s", symbol, exc)
+            continue
 
         # После фиксации позиции бот сразу сможет открыть новую!
 
         # Получим список позиций повторно, чтобы не считать только что закрытую как открытую
-        positions = fetch_positions_soft(symbol)
+        try:
+            positions = fetch_positions_soft(symbol)
+        except Exception as exc:
+            logging.error("position | %s | fetch_positions failed: %s", symbol, exc)
+            continue
 
         open_pos = None
         for pos in positions:
@@ -5266,6 +5356,9 @@ def run_bot():
         if open_pos:
             log_decision(symbol, "position_exists")
             continue
+
+        if risk_state.get(symbol) is None:
+            risk_state[symbol] = PairState()  # Инициализируем состояние для нового символа
 
         if closed_this_cycle:
             log_decision(symbol, "recently_closed")
@@ -5974,6 +6067,8 @@ def run_bot():
                     if not safe_set_leverage(exchange, symbol, mode_lev):
                         log_decision(symbol, "leverage_failed")
                         continue
+                    risk_state.setdefault(symbol, PairState()).leverage_ready = True
+                    logging.info("leverage | %s | leverage_ready set", symbol)
                 except Exception as exc:
                     logging.error(
                         "leverage | %s | unexpected set_leverage failure: %s",
@@ -5984,7 +6079,7 @@ def run_bot():
                     log_decision(symbol, "leverage_exception")
                     continue
             else:
-                logging.info(
+                logging.warning(
                     "leverage | %s | skip: market %s not linear",
                     symbol,
                     leverage_category or "unknown",
@@ -6001,6 +6096,12 @@ def run_bot():
                 continue
             if signal_to_use == "short" and rsi_val < adj_rsi_oversold:
                 log_decision(symbol, "rsi_oversold")
+                continue
+            if signal_to_use == "long" and rsi_val <= 30:
+                log_decision(symbol, "rsi_low")
+                continue
+            if signal_to_use == "short" and rsi_val >= 70:
+                log_decision(symbol, "rsi_high")
                 continue
 
         # [ANCHOR:PATTERN_TREND_APPLY]
@@ -6182,17 +6283,29 @@ def run_bot():
         for symbol in symbols:
             if fallback_cooldown.get(symbol, 0) > current_bar:
                 continue
-            positions = fetch_positions_soft(symbol)
+            try:
+                positions = fetch_positions_soft(symbol)
+            except Exception as exc:
+                logging.error("position | %s | fetch_positions failed: %s", symbol, exc)
+                continue
             if any(float(p.get("contracts", 0)) > 0 for p in positions):
                 continue
             if len(open_trade_ctx) >= MAX_OPEN_TRADES:
                 _inc_event("open_trades_limit")
                 log_decision(symbol, "open_trades_limit")
                 continue
-            multi_df = fetch_multi_ohlcv(symbol, timeframes, limit=300, warn=False)
+            try:
+                multi_df = fetch_multi_ohlcv(symbol, timeframes, limit=300, warn=False)
+            except Exception as exc:
+                logging.error("data | %s | multi timeframe fetch error: %s", symbol, exc)
+                continue
             if multi_df is None or multi_df.empty:
                 continue
-            df_trend = fetch_ohlcv(symbol, "1h", limit=250)
+            try:
+                df_trend = fetch_ohlcv(symbol, "1h", limit=250)
+            except Exception as exc:
+                logging.error("data | %s | trend data fetch error: %s", symbol, exc)
+                continue
             if df_trend is None or df_trend.empty:
                 continue
             if "adx" not in df_trend.columns:
@@ -6266,9 +6379,11 @@ def run_bot():
             if is_derivative_market:
                 leverage_category = detect_market_category(exchange, symbol)
                 if str(leverage_category).lower() == "linear":
-                    safe_set_leverage(exchange, symbol, fallback_leverage)
+                    if safe_set_leverage(exchange, symbol, fallback_leverage):
+                        risk_state.setdefault(symbol, PairState()).leverage_ready = True
+                        logging.info("leverage | %s | leverage_ready set", symbol)
                 else:
-                    logging.info(
+                    logging.warning(
                         "leverage | %s | skip: market %s not linear",
                         symbol,
                         leverage_category or "unknown",
@@ -6367,6 +6482,11 @@ def run_bot():
                 exit_type = "TIME"
             elif exit_hint == "TP":
                 exit_type = "TP"
+            if exit_type == "MANUAL":
+                logging.error(
+                    "exit | %s | position closed by exchange (possible liquidation)",
+                    symbol,
+                )
 
             # 2) опциональный реверс ТОЛЬКО после SL и только один раз
             if not reverse_done and exit_type == "SL":
@@ -6416,6 +6536,10 @@ def run_bot():
 def run_bot_loop():
     logging.info("=== LIVE BOT START (TESTNET) ===")
     logging.info("[run_bot_loop] Loop starting...")
+    if not best_params_cache:
+        best_params_cache["GLOBAL"] = DEFAULT_PARAMS
+        save_param_cache()
+        logging.info("params | GLOBAL | best_params initialized with default")
     if any(arg in ("--retrain", "retrain") for arg in sys.argv[1:]):
         logging.info("[run_bot_loop] Manual retrain requested via CLI flag")
         try:

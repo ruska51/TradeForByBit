@@ -1190,6 +1190,14 @@ def load_risk_state(config: Dict, path: str = STATE_FILE):
         if "stats" in data:
             stats = StatsTracker(stats=data.get("stats", {}))
 
+    active_symbols = config.get("active_symbols") or []
+    active_set = {s for s in active_symbols if s}
+    if active_set:
+        pair_state = {k: v for k, v in pair_state.items() if k in active_set}
+        limiter.losses = {k: v for k, v in limiter.losses.items() if k in active_set}
+        cool.last_loss = {k: v for k, v in cool.last_loss.items() if k in active_set}
+        stats.stats = {k: v for k, v in stats.stats.items() if k in active_set}
+
     return pair_state, limiter, cool, stats
 
 

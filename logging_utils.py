@@ -2945,8 +2945,32 @@ def has_pending_entry(exchange, symbol: str, side: str, category: str = "linear"
 def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -> bool:
     """Set leverage with retry and structured logging."""
 
-    from exchange_adapter import LEVERAGE_SKIPPED, set_valid_leverage
+    from exchange_adapter import (
+        LEVERAGE_SKIPPED,
+        detect_market_category,
+        set_valid_leverage,
+    )
 
+    try:
+        market_cat = detect_market_category(exchange, symbol)
+    except Exception as exc:
+        log_once(
+            "warning",
+            f"leverage | {symbol} | market detection failed: {exc}",
+            window_sec=5.0,
+        )
+        market_cat = None
+    if market_cat is not None:
+        cat = str(market_cat).lower()
+        if cat == "swap":
+            cat = "linear"
+        if cat not in {"linear", "inverse"}:
+            log_once(
+                "warning",
+                f"leverage | {symbol} | skip: unsupported contract type {market_cat}",
+                window_sec=5.0,
+            )
+            return True
     for attempt in range(attempts):
         try:
             L = set_valid_leverage(exchange, symbol, leverage)
