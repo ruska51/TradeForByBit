@@ -1989,7 +1989,8 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
             )
             profit = gross - fee
 
-            exit_hint = ctx.pop("exit_type_hint", None)
+            exit_hint_raw = ctx.pop("exit_type_hint", None)
+            exit_hint = str(exit_hint_raw or "").upper()
             trail_active = bool(ctx.get("trailing_profit_used"))
 
             if otype == "STOP_MARKET":
@@ -2000,6 +2001,10 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
                 exit_type = "TIME"
             elif exit_hint == "TP":
                 exit_type = "TP"
+            elif exit_hint == "LIQUIDATION":
+                exit_type = "LIQUIDATION"
+            elif exit_hint == "EXTERNAL":
+                exit_type = "EXTERNAL"
             else:
                 exit_type = "MANUAL"
 
