@@ -678,7 +678,7 @@ class ExchangeAdapter:
 
         if self.futures:
             if self.exchange_id.startswith("bybit"):
-                options: dict[str, str] = {"defaultType": "linear"}
+                options: dict[str, str] = {"defaultType": "swap"}
             else:
                 options = {"defaultType": "future"}
         else:
@@ -715,7 +715,7 @@ class ExchangeAdapter:
                 ex = ctor({**cfg, "options": options})
                 if str(getattr(ex, "id", "") or "").lower() == "bybit":
                     current_options = dict(getattr(ex, "options", {}) or {})
-                    current_options["defaultType"] = "linear"
+                    current_options["defaultType"] = "swap"
                     ex.options = current_options
                 if hasattr(ex, "set_sandbox_mode"):
                     ex.set_sandbox_mode(self.sandbox)
@@ -941,12 +941,14 @@ class ExchangeAdapter:
         try:
             data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
             if not data:
-                log_once(
-                    "warning",
-                    f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
+                return self._handle_empty_ohlcv_result(
+                    symbol,
+                    timeframe,
+                    limit,
+                    cache_key,
+                    no_data,
+                    cat_label,
                 )
-                no_data[symbol] = time.time()
-                return None
             url = getattr(self.x, "last_request_url", "unknown")
             status = getattr(self.x, "last_http_status_code", "unknown")
             logging.debug(
@@ -980,12 +982,14 @@ class ExchangeAdapter:
             try:
                 data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
                 if not data:
-                    log_once(
-                        "warning",
-                        f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
+                    return self._handle_empty_ohlcv_result(
+                        symbol,
+                        timeframe,
+                        limit,
+                        cache_key,
+                        no_data,
+                        cat_label,
                     )
-                    no_data[symbol] = time.time()
-                    return None
                 url = getattr(self.x, "last_request_url", "unknown")
                 status = getattr(self.x, "last_http_status_code", "unknown")
                 logging.debug(
@@ -1047,12 +1051,14 @@ class ExchangeAdapter:
                         request_symbol=ccxt_symbol,
                     )
                 if not data:
-                    log_once(
-                        "warning",
-                        f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
+                    return self._handle_empty_ohlcv_result(
+                        symbol,
+                        timeframe,
+                        limit,
+                        cache_key,
+                        no_data,
+                        cat_label,
                     )
-                    no_data[symbol] = time.time()
-                    return None
                 url = getattr(self.x, "last_request_url", "unknown")
                 status = getattr(self.x, "last_http_status_code", "unknown")
                 logging.debug(
@@ -1088,6 +1094,121 @@ class ExchangeAdapter:
             snapshot = data
         cache = self._get_ohlcv_cache()
         cache[key] = (time.time(), snapshot)
+
+    def _handle_empty_ohlcv_result(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+        cache_key: tuple[str, str, int],
+        no_data: dict[str, float],
+        cat_label: str,
+    ) -> list[list] | None:
+        fallback = self._fetch_fallback_ohlcv(symbol, timeframe, limit)
+        if fallback:
+            self._store_ohlcv_cache(cache_key, fallback)
+            no_data.pop(symbol, None)
+            return fallback
+        log_once(
+            "warning",
+            f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
+        )
+        no_data[symbol] = time.time()
+        return None
+
+    def _fetch_fallback_ohlcv(
+        self, symbol: str, timeframe: str, limit: int
+    ) -> list[list] | None:
+        exchange = self._get_fallback_ohlcv_exchange()
+        if not exchange:
+            return None
+
+        fallback_symbol = symbol.split(":", 1)[0]
+        if "/" not in fallback_symbol and len(fallback_symbol) > 4:
+            try:
+                fallback_symbol = to_ccxt(fallback_symbol)
+            except Exception:
+                pass
+
+        try:
+            candles = exchange.fetch_ohlcv(
+                fallback_symbol, timeframe=timeframe, limit=limit
+            )
+        except Exception as exc:  # pragma: no cover - logging only
+            log_once(
+                "warning",
+                (
+                    "adapter | fetch_ohlcv fallback failed "
+                    f"exchange=binance symbol={fallback_symbol} "
+                    f"timeframe={timeframe}: {exc}"
+                ),
+                window_sec=60,
+            )
+            return None
+
+        if candles:
+            log_once(
+                "info",
+                (
+                    "adapter | fetch_ohlcv fallback success "
+                    f"exchange=binance symbol={fallback_symbol} "
+                    f"timeframe={timeframe} limit={limit}"
+                ),
+                window_sec=60,
+            )
+            return candles
+
+        return None
+
+    def _get_fallback_ohlcv_exchange(self):
+        exchange = getattr(self, "_fallback_ohlcv_exchange", None)
+        if exchange is False:
+            return None
+        if exchange is not None:
+            return exchange
+
+        global _ccxt
+        if _ccxt is None:
+            try:
+                _ccxt = importlib.import_module("ccxt")  # type: ignore
+            except Exception as exc:  # pragma: no cover - logging only
+                log_once(
+                    "warning",
+                    f"adapter | fallback ccxt import failed: {exc}",
+                    window_sec=60,
+                )
+                setattr(self, "_fallback_ohlcv_exchange", False)
+                return None
+
+        ctor = getattr(_ccxt, "binance", None)
+        if not callable(ctor):
+            log_once(
+                "warning",
+                "adapter | fallback exchange binance unavailable in ccxt",
+                window_sec=60,
+            )
+            setattr(self, "_fallback_ohlcv_exchange", False)
+            return None
+
+        try:
+            exchange = ctor({"enableRateLimit": True})
+            loader = getattr(exchange, "load_markets", None)
+            if callable(loader):
+                try:
+                    loader(False)
+                except Exception:
+                    pass
+        except Exception as exc:  # pragma: no cover - logging only
+            log_once(
+                "warning",
+                f"adapter | fallback exchange binance init failed: {exc}",
+                window_sec=60,
+            )
+            setattr(self, "_fallback_ohlcv_exchange", False)
+            return None
+
+        setattr(self, "_fallback_ohlcv_exchange", exchange)
+        return exchange
 
     @staticmethod
     def _is_rate_limited(exc: Exception) -> bool:
