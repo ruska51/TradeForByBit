@@ -1253,8 +1253,12 @@ def get_symbol_params(symbol: str) -> StrategyParams:
 def save_param_cache(params: dict, filepath: str = PARAM_CACHE_FILE) -> None:
     """Persist provided best parameter settings to disk as JSON."""
     try:
-        with open(filepath, "w") as f:
-            json.dump(params, f)
+        tmp_path = f"{filepath}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(params, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, filepath)
         logging.info("Saved best parameters to %s", filepath)
     except Exception as e:
         logging.error("Failed to save parameters to %s: %s", filepath, e)
@@ -2533,6 +2537,27 @@ def register_trade_result(symbol: str, profit: float, log_path: str) -> None:
     bar_index = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
     if profit < 0:
         cool.register_loss(symbol, bar_index)
+    pair = risk_state.setdefault(symbol, PairState())
+    min_winrate = risk_config.get("min_winrate_for_increase", 0.6)
+    increase_step = risk_config.get("increase_step", 0.2)
+    max_increase = risk_config.get("max_increase_factor", 2.0)
+    decrease_step = risk_config.get("decrease_step", 0.2)
+    losing_limit = risk_config.get("losing_streak_limit", 4)
+    if profit > 0:
+        pair.losing_streak = 0
+        pair.cooldown_active = False
+        win_rate = stats.win_rate(symbol)
+        if win_rate is not None and win_rate >= min_winrate and pair.volume_factor < max_increase:
+            pair.volume_factor = min(max_increase, pair.volume_factor + increase_step)
+    elif profit < 0:
+        pair.losing_streak += 1
+        pair.cooldown_active = True
+        pair.volume_factor = max(0.1, pair.volume_factor - decrease_step)
+        if losing_limit > 0 and pair.losing_streak >= losing_limit:
+            pair.volume_factor = 0.1
+    if pair.daily_loss_locked and profit > 0:
+        pair.daily_loss_locked = False
+    risk_state[symbol] = pair
     # [ANCHOR:SAVE_RISK_STATE_AFTER_TRADE]
     try:
         save_risk_state(risk_state, limiter, cool, stats)
@@ -2545,6 +2570,13 @@ def register_trade_result(symbol: str, profit: float, log_path: str) -> None:
         risk_state = adjust_state_by_stats(risk_state, updated, risk_config)
         save_pair_report(updated)
         save_risk_state(risk_state, limiter, cool, stats)
+
+# PATCH NOTES:
+# Changes: tightened risk_state updates (volume, streaks, cooldown/daily flags) and made JSON saves atomic.
+# Changes: persist leverage_ready toggles when leverage configured.
+# Safety: follows existing config thresholds and uses os.replace for crash-safe writes.
+# Acceptance: win raises volume when winrate >= config, loss increments streak & cooldown flag.
+# Acceptance: restart after manual edit keeps risk_state.json intact.
 
 
 ## log_exit_from_order imported from logging_utils
@@ -5210,7 +5242,34 @@ def run_bot():
                         ok = False
                     bar_index = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
                     equity = float(stats.stats.get(symbol, {}).get("equity", 0.0))
-                    if ok and limiter.can_trade(symbol, equity) and cool.can_trade(symbol, bar_index):
+                    pair_flags = risk_state.setdefault(symbol, PairState())
+                    can_daily = limiter.can_trade(symbol, equity)
+                    can_cool = cool.can_trade(symbol, bar_index)
+                    if not can_daily and not pair_flags.daily_loss_locked:
+                        pair_flags.daily_loss_locked = True
+                        try:
+                            save_risk_state(risk_state, limiter, cool, stats)
+                        except Exception as e:
+                            logging.exception("save_risk_state failed: %s", e)
+                    elif can_daily and pair_flags.daily_loss_locked:
+                        pair_flags.daily_loss_locked = False
+                        try:
+                            save_risk_state(risk_state, limiter, cool, stats)
+                        except Exception as e:
+                            logging.exception("save_risk_state failed: %s", e)
+                    if not can_cool and not pair_flags.cooldown_active:
+                        pair_flags.cooldown_active = True
+                        try:
+                            save_risk_state(risk_state, limiter, cool, stats)
+                        except Exception as e:
+                            logging.exception("save_risk_state failed: %s", e)
+                    elif can_cool and pair_flags.cooldown_active:
+                        pair_flags.cooldown_active = False
+                        try:
+                            save_risk_state(risk_state, limiter, cool, stats)
+                        except Exception as e:
+                            logging.exception("save_risk_state failed: %s", e)
+                    if ok and can_daily and can_cool:
                         open_reverse_position_with_reduced_risk(
                             symbol,
                             opposite_side,
@@ -6192,7 +6251,13 @@ def run_bot():
                     if not safe_set_leverage(exchange, symbol, mode_lev):
                         log_decision(symbol, "leverage_failed")
                         continue
-                    risk_state.setdefault(symbol, PairState()).leverage_ready = True
+                    pair_flags = risk_state.setdefault(symbol, PairState())
+                    if not pair_flags.leverage_ready:
+                        pair_flags.leverage_ready = True
+                        try:
+                            save_risk_state(risk_state, limiter, cool, stats)
+                        except Exception as e:
+                            logging.exception("save_risk_state failed: %s", e)
                     logging.info("leverage | %s | leverage_ready set", symbol)
                 except Exception as exc:
                     logging.error(
@@ -6299,14 +6364,39 @@ def run_bot():
         balance_info = safe_fetch_balance(exchange, {"type": "future"})
         equity = float((balance_info.get("total") or {}).get("USDT", 0.0))
         bar_index = int(datetime.now(timezone.utc).timestamp() // (5 * 60))
+        pair_flags = risk_state.setdefault(symbol, PairState())
         if not limiter.can_trade(symbol, equity):
             _inc_event("daily_loss_limit")
             log_decision(symbol, "daily_loss_limit")
+            if not pair_flags.daily_loss_locked:
+                pair_flags.daily_loss_locked = True
+                try:
+                    save_risk_state(risk_state, limiter, cool, stats)
+                except Exception as e:
+                    logging.exception("save_risk_state failed: %s", e)
             continue
+        if pair_flags.daily_loss_locked:
+            pair_flags.daily_loss_locked = False
+            try:
+                save_risk_state(risk_state, limiter, cool, stats)
+            except Exception as e:
+                logging.exception("save_risk_state failed: %s", e)
         if not cool.can_trade(symbol, bar_index):
             _inc_event("cool_down")
             log_decision(symbol, "cool_down")
+            if not pair_flags.cooldown_active:
+                pair_flags.cooldown_active = True
+                try:
+                    save_risk_state(risk_state, limiter, cool, stats)
+                except Exception as e:
+                    logging.exception("save_risk_state failed: %s", e)
             continue
+        if pair_flags.cooldown_active:
+            pair_flags.cooldown_active = False
+            try:
+                save_risk_state(risk_state, limiter, cool, stats)
+            except Exception as e:
+                logging.exception("save_risk_state failed: %s", e)
         if not best_entry_moment(
             symbol,
             signal_to_use,
@@ -6505,7 +6595,13 @@ def run_bot():
                 leverage_category = detect_market_category(exchange, symbol)
                 if str(leverage_category).lower() == "linear":
                     if safe_set_leverage(exchange, symbol, fallback_leverage):
-                        risk_state.setdefault(symbol, PairState()).leverage_ready = True
+                        pair_flags = risk_state.setdefault(symbol, PairState())
+                        if not pair_flags.leverage_ready:
+                            pair_flags.leverage_ready = True
+                            try:
+                                save_risk_state(risk_state, limiter, cool, stats)
+                            except Exception as e:
+                                logging.exception("save_risk_state failed: %s", e)
                         logging.info("leverage | %s | leverage_ready set", symbol)
                 else:
                     logging.warning(

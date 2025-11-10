@@ -98,9 +98,24 @@ async def run_trade(
         log(logging.INFO, "trade", symbol, "trend not confirmed")
         return
 
+    pair = pair_state.setdefault(symbol, risk_management.PairState())
     if not cool.can_trade(symbol, start_index):
         log(logging.INFO, "trade", symbol, "cooldown active")
+        if not pair.cooldown_active:
+            pair.cooldown_active = True
+            pair_state[symbol] = pair
+            try:
+                risk_management.save_risk_state(pair_state, limiter, cool, stats)
+            except Exception as exc:
+                logging.exception("save_risk_state failed: %s", exc)
         return
+    if pair.cooldown_active:
+        pair.cooldown_active = False
+        pair_state[symbol] = pair
+        try:
+            risk_management.save_risk_state(pair_state, limiter, cool, stats)
+        except Exception as exc:
+            logging.exception("save_risk_state failed: %s", exc)
 
     exchange = _make_exchange()
     try:
@@ -145,7 +160,22 @@ async def run_trade(
         equity = balance["total"].get("USDT", 0.0)
         if not limiter.can_trade(symbol, equity):
             log(logging.INFO, "trade", symbol, "daily loss limit reached")
+            if not pair.daily_loss_locked:
+                pair.daily_loss_locked = True
+                pair_state[symbol] = pair
+                try:
+                    risk_management.save_risk_state(pair_state, limiter, cool, stats)
+                except Exception as exc:
+                    logging.exception("save_risk_state failed: %s", exc)
             return
+
+        if pair.daily_loss_locked:
+            pair.daily_loss_locked = False
+            pair_state[symbol] = pair
+            try:
+                risk_management.save_risk_state(pair_state, limiter, cool, stats)
+            except Exception as exc:
+                logging.exception("save_risk_state failed: %s", exc)
 
         pair = pair_state.get(symbol, risk_management.PairState())
         base_risk = config.get("max_trade_loss_pct", 0.01)
