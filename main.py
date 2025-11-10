@@ -545,7 +545,7 @@ def run_trade_analysis(csv_file: str = "trades_log.csv", n_trials: int = 50, ran
     best_params_cache["GLOBAL"] = best
     DEFAULT_PARAMS.update(best)
     apply_params(best)
-    save_param_cache()
+    save_param_cache(best_params_cache)
     memory_manager.add_event(
         "optimize",
         {
@@ -1188,13 +1188,7 @@ DEFAULT_PARAMS = dict(
 
 if not best_params_cache:
     best_params_cache["GLOBAL"] = DEFAULT_PARAMS
-    try:
-        save_param_cache()
-    except Exception as e:
-        logging.warning(
-            "params | GLOBAL | failed to save default params: %s",
-            e,
-        )
+    save_param_cache(best_params_cache)
     logging.info("params | GLOBAL | Initialized best_params with default")
 
 
@@ -1257,13 +1251,14 @@ def get_symbol_params(symbol: str) -> StrategyParams:
     return StrategyParams.from_dict(data)
 
 
-def save_param_cache():
-    """Persist best parameter settings to disk."""
+def save_param_cache(params: dict, filepath: str = PARAM_CACHE_FILE) -> None:
+    """Persist provided best parameter settings to disk as JSON."""
     try:
-        with open(PARAM_CACHE_FILE, "w") as f:
-            json.dump(best_params_cache, f)
+        with open(filepath, "w") as f:
+            json.dump(params, f)
+        logging.info("Saved best parameters to %s", filepath)
     except Exception as e:
-        logging.error(f"Failed to save param cache: {e}")
+        logging.error("Failed to save parameters to %s: %s", filepath, e)
 
 
 def save_optuna_study(study: optuna.study.Study, path: str = OPTUNA_STUDY_FILE) -> None:
@@ -3879,7 +3874,7 @@ def param_grid_search(symbols=["ETH/USDT", "SOL/USDT", "BNB/USDT", "SUI/USDT", "
         first_params = next(iter(best_result.values()))
         apply_params({k: v for k, v in first_params.items() if k != "profit"})
         DEFAULT_PARAMS.update({k: v for k, v in first_params.items() if k != "profit"})
-        save_param_cache()
+        save_param_cache(best_params_cache)
     return best_result
 
 
@@ -6541,7 +6536,7 @@ def run_bot_loop():
     logging.info("[run_bot_loop] Loop starting...")
     if not best_params_cache:
         best_params_cache["GLOBAL"] = DEFAULT_PARAMS
-        save_param_cache()
+        save_param_cache(best_params_cache)
         logging.info("params | GLOBAL | best_params initialized with default")
     if any(arg in ("--retrain", "retrain") for arg in sys.argv[1:]):
         logging.info("[run_bot_loop] Manual retrain requested via CLI flag")
