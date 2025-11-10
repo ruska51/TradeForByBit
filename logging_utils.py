@@ -251,26 +251,40 @@ def _bybit_trigger_for_exit(
     *,
     is_tp: bool,
     price_to_precision,
-) -> tuple[str, float]:
+) -> tuple[int, float]:
     """Return (direction, triggerPrice). Round price with price_to_precision."""
     s = side_open.lower()
-    up = "ascending"
-    dn = "descending"
+    up = 1
+    dn = 2
+    min_price = 1e-8
     if s == "buy":  # long
         if is_tp:
             direction = up
-            raw = max(entry_price * (1 + pct), last * 1.001)
+            raw_candidates = [
+                c for c in (entry_price * (1 + pct), last * 1.001) if c is not None
+            ]
+            raw = max(raw_candidates) if raw_candidates else min_price
         else:
             direction = dn
-            raw = min(entry_price * (1 - pct), last * 0.999)
+            candidates = [entry_price * (1 - pct), last * 0.999]
+            positives = [c for c in candidates if c is not None and c > min_price]
+            fallback = [c for c in (last * 0.999, entry_price * 0.95) if c is not None]
+            raw = min(positives) if positives else max(fallback or [min_price])
     else:  # sell/short
         if is_tp:
             direction = dn
-            raw = min(entry_price * (1 - pct), last * 0.999)
+            candidates = [entry_price * (1 - pct), last * 0.999]
+            positives = [c for c in candidates if c is not None and c > min_price]
+            fallback = [c for c in (last * 0.999, entry_price * 0.5) if c is not None]
+            raw = min(positives) if positives else max(fallback or [min_price])
         else:
             direction = up
-            raw = max(entry_price * (1 + pct), last * 1.001)
+            raw_candidates = [
+                c for c in (entry_price * (1 + pct), last * 1.001) if c is not None
+            ]
+            raw = max(raw_candidates) if raw_candidates else min_price
 
+    raw = max(raw, min_price)
     trig = float(price_to_precision(raw))
     return direction, trig
 

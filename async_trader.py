@@ -122,8 +122,26 @@ async def run_trade(
             side.lower(),
             tick_size=tick_size,
         )
+        min_tick = tick_size if tick_size and tick_size > 0 else 1e-6
+        if side.upper() == "SHORT":
+            if sl_price >= price * 1.9:
+                log_once(
+                    "warning",
+                    f"trade | {symbol} | skip: short stop %.4f too far above entry %.4f"
+                    % (sl_price, price),
+                    window_sec=30.0,
+                )
+                return
+            if tp_price <= min_tick:
+                log_once(
+                    "warning",
+                    f"trade | {symbol} | skip: short take-profit %.4f below minimum %.6f"
+                    % (tp_price, min_tick),
+                    window_sec=30.0,
+                )
+                return
 
-        balance = await asyncio.to_thread(safe_fetch_balance, exchange)
+        balance = await asyncio.to_thread(safe_fetch_balance, exchange, {"type": "future"})
         equity = balance["total"].get("USDT", 0.0)
         if not limiter.can_trade(symbol, equity):
             log(logging.INFO, "trade", symbol, "daily loss limit reached")
@@ -156,6 +174,14 @@ async def run_trade(
         pair_state[symbol] = pair
         sl_price = float(exchange.price_to_precision(symbol, sl_price))
         tp_price = float(exchange.price_to_precision(symbol, tp_price))
+        if side.upper() == "SHORT" and tp_price <= min_tick:
+            log_once(
+                "warning",
+                f"trade | {symbol} | skip: precision rounded TP %.4f below minimum %.6f"
+                % (tp_price, min_tick),
+                window_sec=30.0,
+            )
+            return
 
         side_ccxt = "buy" if side == "LONG" else "sell"
         order_id, err = await asyncio.to_thread(
@@ -177,15 +203,17 @@ async def run_trade(
 
         exit_side = "sell" if side == "LONG" else "buy"
 
+        def _trigger_direction(*, is_tp: bool) -> int:
+            if side.upper() == "LONG":
+                return 1 if is_tp else 2
+            return 2 if is_tp else 1
+
         async def _place_stop_order(stop_value: float) -> str | None:
             trigger = float(exchange.price_to_precision(symbol, stop_value))
             params = {
                 "category": "linear",
-                "orderType": "Market",
                 "triggerPrice": trigger,
-                "triggerDirection": "descending"
-                if side_ccxt == "buy"
-                else "ascending",
+                "triggerDirection": _trigger_direction(is_tp=False),
                 "triggerBy": "LastPrice",
                 "reduceOnly": True,
                 "closeOnTrigger": True,
@@ -195,7 +223,7 @@ async def run_trade(
                 response = await asyncio.to_thread(
                     exchange.create_order,
                     symbol,
-                    "market",
+                    "STOP_MARKET",
                     exit_side,
                     qty,
                     None,
@@ -215,20 +243,24 @@ async def run_trade(
             return order_id
 
         async def _place_take_profit_order(target_value: float) -> str | None:
-            limit_price = float(exchange.price_to_precision(symbol, target_value))
+            trigger = float(exchange.price_to_precision(symbol, target_value))
             params = {
                 "category": "linear",
+                "triggerPrice": trigger,
+                "triggerDirection": _trigger_direction(is_tp=True),
+                "triggerBy": "LastPrice",
                 "reduceOnly": True,
+                "closeOnTrigger": True,
                 "tpSlMode": "Full",
             }
             try:
                 response = await asyncio.to_thread(
                     exchange.create_order,
                     symbol,
-                    "limit",
+                    "TAKE_PROFIT_MARKET",
                     exit_side,
                     qty,
-                    limit_price,
+                    None,
                     params,
                 )
             except Exception as exc:
@@ -241,7 +273,7 @@ async def run_trade(
             order_id = None
             if isinstance(response, dict):
                 order_id = response.get("id") or response.get("orderId")
-            log(logging.INFO, "order", symbol, f"target set @ {limit_price:.5f}")
+            log(logging.INFO, "order", symbol, f"target set @ {trigger:.5f}")
             return order_id
 
         async def _replace_stop_order(stop_value: float, current_id: str | None) -> str | None:

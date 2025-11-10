@@ -126,6 +126,7 @@ For a stop-loss the bot submits a ``STOP_MARKET`` order without a price value:
 ```python
 params_sl = {
     "triggerPrice": sl_price,
+    "triggerDirection": 2,  # price must fall to hit the stop for a long
     "reduceOnly": True,
     "closeOnTrigger": True,
     "slOrderType": "Market",
@@ -140,6 +141,7 @@ structure:
 ```python
 params_tp = {
     "triggerPrice": tp_price,
+    "triggerDirection": 1,  # price must rise to hit the take-profit for a long
     "reduceOnly": True,
     "closeOnTrigger": True,
     "tpOrderType": "Market",
