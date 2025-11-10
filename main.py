@@ -3403,6 +3403,8 @@ def run_trade(
     ctx["tp_mult"] = float(tp_adj)
     ctx["sl_pct"] = float(sl_pct)
     ctx["atr_pct"] = float(atr_pct)
+    ctx.setdefault("last_seen_position_ts", None)
+    ctx.setdefault("last_mark_price", None)
     open_trade_ctx[symbol] = ctx
     memory_manager.add_trade_open(ctx)
     # [ANCHOR:ENTRY_LOGGING_CALLSITE]
@@ -3818,6 +3820,8 @@ def attempt_direct_market_entry(
         }
     )
 
+    ctx_copy.setdefault("last_seen_position_ts", None)
+    ctx_copy.setdefault("last_mark_price", None)
     open_trade_ctx[symbol] = ctx_copy
     memory_manager.add_trade_open(ctx_copy)
     trade_id = log_entry(symbol, ctx_copy, trade_log_path)
@@ -4682,6 +4686,8 @@ def ensure_exit_orders(
 
     if placed_any:
         ctx["qty"] = float(qty_value)
+        ctx.setdefault("last_seen_position_ts", None)
+        ctx.setdefault("last_mark_price", None)
         open_trade_ctx[symbol] = ctx
         _last_exit_qty[symbol] = pos_qty
         msg_parts: list[str] = []
@@ -5222,6 +5228,57 @@ def run_bot():
         no_position = not any(float(p.get("contracts", 0)) > 0 for p in positions)
 
         closed_this_cycle = False
+        if no_position:
+            ctx_missing = open_trade_ctx.get(symbol)
+            last_seen_ts = ctx_missing.get("last_seen_position_ts") if ctx_missing else None
+            if ctx_missing and last_seen_ts:
+                try:
+                    last_seen_val = float(last_seen_ts)
+                except (TypeError, ValueError):
+                    last_seen_val = 0.0
+                now_ts = time.time()
+                if last_seen_val > 0 and (now_ts - last_seen_val) >= 5.0:
+                    cat = detect_market_category(exchange, symbol) or "linear"
+                    try:
+                        exit_price = float(ctx_missing.get("last_mark_price") or 0.0)
+                    except (TypeError, ValueError):
+                        exit_price = 0.0
+                    if exit_price <= 0:
+                        fetched_price = get_last_price(exchange, symbol, str(cat))
+                        try:
+                            exit_price = float(fetched_price or 0.0)
+                        except (TypeError, ValueError):
+                            exit_price = 0.0
+                    if exit_price <= 0:
+                        exit_price = float(ctx_missing.get("entry_price") or 0.0)
+
+                    ctx_missing["exit_type_hint"] = "EXTERNAL"
+                    synthetic_order = {
+                        "id": f"external-{ctx_missing.get('trade_id', symbol)}-{int(now_ts)}",
+                        "type": "MARKET",
+                        "price": exit_price,
+                        "info": {
+                            "type": "EXTERNAL",
+                            "prev_side": ctx_missing.get("side"),
+                        },
+                    }
+                    handled = log_exit_from_order(
+                        symbol, synthetic_order, 0.0, trade_log_path
+                    )
+                    if handled:
+                        logging.error(
+                            "exit | %s | position missing on exchange -> logged external close",
+                            symbol,
+                        )
+                        rebuild_reports_on_exit()
+                        try:
+                            save_risk_state(risk_state, limiter, cool, stats)
+                        except Exception as e:
+                            logging.exception("save_risk_state failed: %s", e)
+                        closed_this_cycle = True
+                    else:
+                        ctx_missing.pop("exit_type_hint", None)
+
         for pos in positions:
             if float(pos.get("contracts", 0)) > 0:
                 entry_price = float(pos.get("entryPrice", 0))
@@ -5257,6 +5314,11 @@ def run_bot():
                     ctx["sl_price"] = float(sl_price_ctx)
                 if tp_price_ctx is not None:
                     ctx["tp_price"] = float(tp_price_ctx)
+                ctx.setdefault("last_mark_price", None)
+                ctx.setdefault("last_seen_position_ts", None)
+                if math.isfinite(last_price) and last_price > 0:
+                    ctx["last_mark_price"] = float(last_price)
+                ctx["last_seen_position_ts"] = time.time()
                 open_trade_ctx[symbol] = ctx
                 ensure_exit_orders(
                     ADAPTER,
@@ -5939,6 +6001,8 @@ def run_bot():
                                                             "sl_price": float(sl_price) if sl_price is not None else None,
                                                             "tp_price": float(tp_price) if tp_price is not None else None,
                                                         }
+                                                        entry_ctx.setdefault("last_seen_position_ts", None)
+                                                        entry_ctx.setdefault("last_mark_price", None)
                                                         open_trade_ctx[symbol] = entry_ctx
                                                         memory_manager.add_trade_open(entry_ctx)
                                                         trade_id = log_entry(symbol, entry_ctx, trade_log_path)
