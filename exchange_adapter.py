@@ -264,6 +264,50 @@ def to_sdk(symbol: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _bybit_leverage_candidates(exchange, symbol: str) -> list[str]:
+    """Return possible Bybit symbols for leverage configuration.
+
+    Assumptions:
+    - ``symbol`` is a CCXT unified symbol.
+    - ``exchange`` exposes ``market`` metadata when available.
+    - USDT settled contracts require the ``:USDT`` suffix.
+    """
+
+    candidates: list[str] = []
+    market_obj: dict[str, Any] | None = None
+
+    try:
+        market_data = exchange.market(symbol)
+        if isinstance(market_data, dict) and market_data:
+            market_obj = market_data
+    except Exception:
+        market_obj = None
+
+    for key in ("symbol", "id"):
+        if market_obj and isinstance(market_obj.get(key), str):
+            value = market_obj[key]
+            if value and value not in candidates:
+                candidates.append(value)
+
+    if isinstance(symbol, str) and symbol and symbol not in candidates:
+        candidates.append(symbol)
+
+    enriched: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in enriched:
+            enriched.append(candidate)
+        if (
+            candidate
+            and "/" in candidate
+            and ":" not in candidate
+            and candidate.split("/", 1)[1].upper() == "USDT"
+        ):
+            with_suffix = f"{candidate}:USDT"
+            if with_suffix not in enriched:
+                enriched.append(with_suffix)
+    return enriched or candidates
+
+
 def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     """Set leverage for Bybit linear/inverse derivatives using minimal, explicit params."""
 
@@ -279,22 +323,48 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     if cat_norm not in {"linear", "inverse"}:
         cat_norm = "linear"
 
-    short_symbol = symbol.split(":", 1)[0] if isinstance(symbol, str) else symbol
+    exchange_id = str(getattr(exchange, "id", "") or "").lower()
+    if exchange_id == "bybit":
+        symbol_candidates = _bybit_leverage_candidates(exchange, symbol)
+    else:
+        symbol_candidates = [symbol]
 
     params = {"category": cat_norm, "buyLeverage": L, "sellLeverage": L}
 
-    try:
-        return exchange.set_leverage(L, short_symbol, params)
-    except TypeError:
-        raise
-    except Exception as exc:  # pragma: no cover - network errors
-        message = str(exc)
-        lowered = message.lower()
-        if any(token in lowered for token in ("soft", "cross", "not modify")):
-            log_once("info", f"leverage | {symbol} | skipped ({exc})", window_sec=30.0)
-            return LEVERAGE_SKIPPED
-        log_once("warning", f"leverage | {symbol} | failed: {exc}", window_sec=30.0)
-        return None
+    last_exc: Exception | None = None
+    for idx, candidate in enumerate(symbol_candidates):
+        target_symbol = candidate if isinstance(candidate, str) else str(candidate)
+        if not target_symbol:
+            continue
+        try:
+            return exchange.set_leverage(L, target_symbol, params)
+        except TypeError:
+            raise
+        except Exception as exc:  # pragma: no cover - network errors
+            last_exc = exc
+            lowered = str(exc).lower()
+            if any(token in lowered for token in ("soft", "cross", "not modify")):
+                log_once("info", f"leverage | {symbol} | skipped ({exc})", window_sec=30.0)
+                return LEVERAGE_SKIPPED
+            retry_tokens = (
+                "only support linear and inverse",
+                "linear contract",
+                "invalid symbol",
+                "symbol invalid",
+                "not linear",
+            )
+            if exchange_id == "bybit" and idx < len(symbol_candidates) - 1:
+                if any(token in lowered for token in retry_tokens):
+                    continue
+            break
+
+    if last_exc is not None:
+        log_once(
+            "warning",
+            f"leverage | {symbol} | failed: {last_exc}",
+            window_sec=30.0,
+        )
+    return None
 
 
 def validate_api(exchange) -> None:
@@ -608,7 +678,7 @@ class ExchangeAdapter:
 
         if self.futures:
             if self.exchange_id.startswith("bybit"):
-                options: dict[str, str] = {"defaultType": "swap"}
+                options: dict[str, str] = {"defaultType": "linear"}
             else:
                 options = {"defaultType": "future"}
         else:
@@ -643,6 +713,10 @@ class ExchangeAdapter:
             tried.append(name)
             try:
                 ex = ctor({**cfg, "options": options})
+                if str(getattr(ex, "id", "") or "").lower() == "bybit":
+                    current_options = dict(getattr(ex, "options", {}) or {})
+                    current_options["defaultType"] = "linear"
+                    ex.options = current_options
                 if hasattr(ex, "set_sandbox_mode"):
                     ex.set_sandbox_mode(self.sandbox)
 
