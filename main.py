@@ -1172,6 +1172,26 @@ OPTUNA_RANGES = {
     "rsi_oversold": (20, 40),
 }
 
+# Файл для хранения лучших параметров (итоги grid search)
+PARAM_CACHE_FILE = os.path.join(os.path.dirname(__file__), "best_params.json")
+# File for persisting Optuna optimization studies
+OPTUNA_STUDY_FILE = os.path.join(os.path.dirname(__file__), "optuna_study.pkl")
+
+
+def save_param_cache(params: dict, filepath: str = PARAM_CACHE_FILE) -> None:
+    """Persist provided best parameter settings to disk as JSON."""
+    try:
+        tmp_path = f"{filepath}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(params, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, filepath)
+        logging.info("Saved best parameters to %s", filepath)
+    except Exception as e:
+        logging.error("Failed to save parameters to %s: %s", filepath, e)
+
+
 # Сохраняем параметры по умолчанию и словарь оптимальных параметров
 DEFAULT_PARAMS = dict(
     THRESHOLD=THRESHOLD,
@@ -1189,6 +1209,11 @@ if not best_params_cache:
     best_params_cache["GLOBAL"] = DEFAULT_PARAMS
     save_param_cache(best_params_cache)
     logging.info("params | GLOBAL | Initialized best_params with default")
+
+# PATCH NOTES:
+# - cache helpers hoisted before first use to prevent NameError on startup.
+# - Paths/constants unchanged, ensuring safe reuse and persistence behavior.
+# - Acceptance: module import completes, defaults written to best_params.json.
 
 
 @dataclass
@@ -1219,12 +1244,6 @@ class StrategyParams:
         )
 
 
-# Файл для хранения лучших параметров (итоги grid search)
-PARAM_CACHE_FILE = os.path.join(os.path.dirname(__file__), "best_params.json")
-# File for persisting Optuna optimization studies
-OPTUNA_STUDY_FILE = os.path.join(os.path.dirname(__file__), "optuna_study.pkl")
-
-
 def load_param_cache() -> dict:
     """Load cached parameter grid search results from disk."""
     if os.path.exists(PARAM_CACHE_FILE):
@@ -1248,20 +1267,6 @@ def get_symbol_params(symbol: str) -> StrategyParams:
     if data is None:
         data = best_params_cache.get("GLOBAL", DEFAULT_PARAMS)
     return StrategyParams.from_dict(data)
-
-
-def save_param_cache(params: dict, filepath: str = PARAM_CACHE_FILE) -> None:
-    """Persist provided best parameter settings to disk as JSON."""
-    try:
-        tmp_path = f"{filepath}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(params, handle, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, filepath)
-        logging.info("Saved best parameters to %s", filepath)
-    except Exception as e:
-        logging.error("Failed to save parameters to %s: %s", filepath, e)
 
 
 def save_optuna_study(study: optuna.study.Study, path: str = OPTUNA_STUDY_FILE) -> None:
