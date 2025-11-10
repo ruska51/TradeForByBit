@@ -236,9 +236,18 @@ def calc_sl_tp(
         sl_price = price * (1 + sl_pct)
         tp_price = price * (1 - tp_pct)
 
+    min_tick = tick_size if tick_size and tick_size > 0 else 1e-6
+
     if tick_size:
         sl_price = round(tick_size * round(sl_price / tick_size), 8)
         tp_price = round(tick_size * round(tp_price / tick_size), 8)
+
+    if sl_price <= 0:
+        sl_price = min_tick
+    if tp_price <= 0:
+        tp_price = min_tick
+    if side_lower == "short" and tp_price < min_tick:
+        tp_price = min_tick
 
     return float(tp_price), float(sl_price), float(sl_pct)
 

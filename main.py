@@ -162,14 +162,13 @@ from pattern_detector import (
 )
 
 # Bybit requires explicit trigger direction values when placing conditional
-# orders.  The exchange expects the ``triggerDirection`` argument to be the
-# string ``"ascending"`` when the trigger fires as the price moves up, and
-# ``"descending"`` when it fires while the price moves down.  Keeping the
-# mapping in one place prevents drift between the trading helpers and the
-# official API semantics.
+# orders.  The exchange expects the ``triggerDirection`` argument to be ``1``
+# when the trigger fires as the price moves up, and ``2`` when it fires while
+# the price moves down.  Keeping the mapping in one place prevents drift
+# between the trading helpers and the official API semantics.
 BYBIT_TRIGGER_DIRECTIONS = {
-    "rising": "ascending",
-    "falling": "descending",
+    "rising": 1,
+    "falling": 2,
 }
 
 # Классификация паттернов по направлению
@@ -3078,8 +3077,40 @@ def run_trade(
         "long" if signal == "long" else "short",
         tick_size=tick_size,
     )
+    min_tick = tick_size if tick_size and tick_size > 0 else 1e-6
+    if signal == "short":
+        if sl_price_raw >= price * 1.9:
+            log_decision(
+                symbol,
+                "tp_sl_invalid",
+                detail=(
+                    f"entry | {symbol} | skip: short stop {sl_price_raw:.6f} too high for "
+                    f"entry {price:.6f}"
+                ),
+            )
+            return False
+        if tp_price_raw <= min_tick:
+            log_decision(
+                symbol,
+                "tp_sl_invalid",
+                detail=(
+                    f"entry | {symbol} | skip: short take-profit {tp_price_raw:.6f} below minimum "
+                    f"{min_tick:.6f}"
+                ),
+            )
+            return False
     sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
     tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
+    if signal == "short" and tp_price <= min_tick:
+        log_decision(
+            symbol,
+            "tp_sl_invalid",
+            detail=(
+                f"entry | {symbol} | skip: precision rounded TP {tp_price:.6f} below minimum "
+                f"{min_tick:.6f}"
+            ),
+        )
+        return False
     logging.debug(
         "%s | calc SL=%.4f, TP=%.4f",
         symbol,
@@ -3611,6 +3642,28 @@ def attempt_direct_market_entry(
         "long" if direction == "long" else "short",
         tick_size=tick_size,
     )
+    min_tick = tick_size if tick_size and tick_size > 0 else 1e-6
+    if direction == "short":
+        if sl_price_raw >= last_price * 1.9:
+            log_decision(
+                symbol,
+                "tp_sl_invalid",
+                detail=(
+                    f"fallback trade | {symbol} | skip: short stop {sl_price_raw:.6f} too high for "
+                    f"entry {last_price:.6f}"
+                ),
+            )
+            return False
+        if tp_price_raw <= min_tick:
+            log_decision(
+                symbol,
+                "tp_sl_invalid",
+                detail=(
+                    f"fallback trade | {symbol} | skip: short take-profit {tp_price_raw:.6f} below minimum "
+                    f"{min_tick:.6f}"
+                ),
+            )
+            return False
 
     try:
         sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
@@ -3620,6 +3673,16 @@ def attempt_direct_market_entry(
         tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
     except Exception:
         tp_price = float(tp_price_raw)
+    if direction == "short" and tp_price <= min_tick:
+        log_decision(
+            symbol,
+            "tp_sl_invalid",
+            detail=(
+                f"fallback trade | {symbol} | skip: precision rounded TP {tp_price:.6f} below minimum "
+                f"{min_tick:.6f}"
+            ),
+        )
+        return False
 
     price_limits = (market.get("limits") or {}).get("price") if isinstance(market, dict) else None
     min_price_limit = 0.0

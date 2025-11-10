@@ -536,7 +536,7 @@ def test_place_conditional_exit_normalized(caplog):
     assert params["tpSlMode"] == "Full"
     assert params["triggerBy"] == "LastPrice"
     assert params["orderType"] == "Market"
-    assert params["triggerDirection"] == "descending"
+    assert params["triggerDirection"] == 2
 
 
 def test_safe_create_order_loads_markets_before_symbol_normalization():
