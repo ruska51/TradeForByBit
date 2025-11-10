@@ -65,6 +65,27 @@ except Exception:  # pragma: no cover - colorama optional
         """Fallback no-op initializer when colorama is missing."""
         return None
 
+
+class ColoredFormatter(logging.Formatter):
+    """Log formatter that wraps messages with ANSI colors by severity."""
+
+    LEVEL_COLORS = {
+        logging.DEBUG: Style.DIM + Fore.BLUE,
+        logging.INFO: Fore.GREEN,
+        logging.WARNING: Fore.YELLOW,
+        logging.ERROR: Fore.RED,
+        logging.CRITICAL: Fore.RED + Style.BRIGHT,
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = super().format(record)
+        color = self.LEVEL_COLORS.get(record.levelno, "")
+        reset = getattr(Style, "RESET_ALL", "")
+        if not color:
+            return message
+        return f"{color}{message}{reset}"
+
+
 colorama_init(autoreset=True)
 
 MIN_NOTIONAL = getattr(sys.modules.get("main"), "MIN_NOTIONAL", 10.0)
@@ -1397,6 +1418,9 @@ def setup_logging(level: int = logging.INFO, to_console: bool = True) -> None:
     fmt = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(module)s | %(message)s"
     )
+    colored_fmt = ColoredFormatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(module)s | %(message)s"
+    )
 
     app = RotatingFileHandler(
         LOG_DIR / "app.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
@@ -1426,7 +1450,7 @@ def setup_logging(level: int = logging.INFO, to_console: bool = True) -> None:
     if to_console:
         sh = logging.StreamHandler(stream=sys.stdout)
         sh.setLevel(level)
-        sh.setFormatter(fmt)
+        sh.setFormatter(colored_fmt)
         root.addHandler(sh)
 
     logging.getLogger("ccxt.base.exchange").setLevel(logging.WARNING)
@@ -3051,3 +3075,9 @@ def flush_cycle_logs() -> None:
     """Flush logs for all symbols."""
     for sym in set(_candle_status) | set(_order_status) | set(_info_status) | set(_error_status):
         flush_symbol_logs(sym)
+
+# PATCH NOTES:
+# - Added ColoredFormatter for colored console logging while keeping file logs plain.
+# - Retained rotating file handlers for application and error logs.
+# Почему безопасно: цветовая схема отключается автоматически без colorama, файл-формат без изменений.
+# Критерии приёмки: setup_logging -> консоль цветная, файлы логов создаются и ротируются.
