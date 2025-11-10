@@ -82,6 +82,19 @@ class PairState:
     losing_streak: int = 0
     pending_qty: float = 0.0
     leverage_ready: bool = False
+    daily_loss_locked: bool = False
+    cooldown_active: bool = False
+
+
+def _atomic_write_json(path: str, payload: dict) -> None:
+    """Atomically persist *payload* to *path* as JSON."""
+
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, path)
 
 
 def load_state() -> Dict[str, PairState]:
@@ -94,6 +107,8 @@ def load_state() -> Dict[str, PairState]:
                 losing_streak=v.get("losing_streak", 0),
                 pending_qty=v.get("pending_qty", 0.0),
                 leverage_ready=v.get("leverage_ready", False),
+                daily_loss_locked=v.get("daily_loss_locked", False),
+                cooldown_active=v.get("cooldown_active", False),
             )
             for k, v in data.items()
         }
@@ -102,8 +117,7 @@ def load_state() -> Dict[str, PairState]:
 
 def save_state(state: Dict[str, PairState]) -> None:
     data = {k: asdict(v) for k, v in state.items()}
-    with open(STATE_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
+    _atomic_write_json(STATE_FILE, data)
 
 
 def update_pair_stats(log_path: str = 'trades_log.csv', lookback: int = 10) -> dict:
@@ -1176,6 +1190,8 @@ def load_risk_state(config: Dict, path: str = STATE_FILE):
                 losing_streak=v.get("losing_streak", 0),
                 pending_qty=v.get("pending_qty", 0.0),
                 leverage_ready=v.get("leverage_ready", False),
+                daily_loss_locked=v.get("daily_loss_locked", False),
+                cooldown_active=v.get("cooldown_active", False),
             )
             for k, v in pair_data.items()
         }
@@ -1233,7 +1249,6 @@ def save_risk_state(
         "stats": stats.stats,
     }
 
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    _atomic_write_json(path, data)
 
 
