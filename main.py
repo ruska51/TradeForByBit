@@ -1192,6 +1192,22 @@ def save_param_cache(params: dict, filepath: str = PARAM_CACHE_FILE) -> None:
         logging.error("Failed to save parameters to %s: %s", filepath, e)
 
 
+def load_param_cache(filepath: str = PARAM_CACHE_FILE) -> dict:
+    """Load cached parameter grid search results from disk."""
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as handle:
+                params = json.load(handle)
+            logging.info("Loaded cached parameters from %s", filepath)
+            return params
+        except Exception as e:
+            logging.error("Failed to load param cache from %s: %s", filepath, e)
+    return {}
+
+
+best_params_cache = load_param_cache()
+
+
 # Сохраняем параметры по умолчанию и словарь оптимальных параметров
 DEFAULT_PARAMS = dict(
     THRESHOLD=THRESHOLD,
@@ -1211,9 +1227,9 @@ if not best_params_cache:
     logging.info("params | GLOBAL | Initialized best_params with default")
 
 # PATCH NOTES:
-# - cache helpers hoisted before first use to prevent NameError on startup.
-# - Paths/constants unchanged, ensuring safe reuse and persistence behavior.
-# - Acceptance: module import completes, defaults written to best_params.json.
+# - Persistent param cache now loaded before default initialization.
+# - Disk writes remain atomic; defaults saved only when cache missing.
+# - Acceptance: first run creates cache, next run reuses cached params.
 
 
 @dataclass
@@ -1242,25 +1258,6 @@ class StrategyParams:
             RSI_OVERBOUGHT=d.get("RSI_OVERBOUGHT", RSI_OVERBOUGHT),
             RSI_OVERSOLD=d.get("RSI_OVERSOLD", RSI_OVERSOLD),
         )
-
-
-def load_param_cache() -> dict:
-    """Load cached parameter grid search results from disk."""
-    if os.path.exists(PARAM_CACHE_FILE):
-        try:
-            with open(PARAM_CACHE_FILE, "r") as f:
-                params = json.load(f)
-            logging.info("Loaded cached parameters")
-            return params
-        except Exception as e:
-            logging.error(f"Failed to load param cache: {e}")
-    return {}
-
-
-# Словарь результатов оптимизации (загружается один раз при старте)
-best_params_cache = load_param_cache()
-
-
 def get_symbol_params(symbol: str) -> StrategyParams:
     """Return parameters for a symbol as a dataclass."""
     data = best_params_cache.get(symbol)
