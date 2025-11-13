@@ -529,14 +529,34 @@ def test_place_conditional_exit_normalized(caplog):
     assert err is None
     assert ex.calls, "Expected create_order to be invoked"
     otype, side, qty, price, params = ex.calls[-1]
-    assert otype == "market"
+    assert otype == "STOP_MARKET"
     assert side == "sell"
     assert qty == pytest.approx(1.0)
     assert price is None
     assert params["tpSlMode"] == "Full"
     assert params["triggerBy"] == "LastPrice"
-    assert params["orderType"] == "Market"
+    assert params["triggerPrice"] == pytest.approx(980.0, rel=1e-4)
     assert params["triggerDirection"] == 2
+
+    order_id_tp, err_tp = place_conditional_exit(
+        ex,
+        "ETH/USDT",
+        "buy",
+        1000.0,
+        1000.0,
+        0.02,
+        "linear",
+        is_tp=True,
+    )
+    assert order_id_tp == "3"
+    assert err_tp is None
+    otype_tp, side_tp, qty_tp, price_tp, params_tp = ex.calls[-1]
+    assert otype_tp == "TAKE_PROFIT_MARKET"
+    assert side_tp == "sell"
+    assert qty_tp == pytest.approx(1.0)
+    assert price_tp is None
+    assert params_tp["triggerDirection"] == 1
+    assert params_tp["triggerPrice"] == pytest.approx(1020.0, rel=1e-4)
 
 
 def test_safe_create_order_loads_markets_before_symbol_normalization():

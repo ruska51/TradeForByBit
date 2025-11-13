@@ -2837,10 +2837,61 @@ def place_conditional_exit(
     )
 
     trig, _ = _price_qty_to_precision(exchange, norm_symbol, price=trig, amount=None)
+
+    def _min_tick() -> float:
+        market = None
+        try:
+            market = exchange.market(norm_symbol)
+        except Exception:
+            market = None
+        precision = (market or {}).get("precision") or {}
+        try:
+            price_prec = int(precision.get("price") or 0)
+        except Exception:
+            price_prec = 0
+        if price_prec:
+            try:
+                return float(1 / (10 ** price_prec))
+            except Exception:
+                return 0.0
+        info = (market or {}).get("info") or {}
+        if isinstance(info, dict):
+            try:
+                tick = float(
+                    (info.get("priceFilter") or {}).get("tickSize")
+                    or (info.get("price_filter") or {}).get("tick_size")
+                    or 0.0
+                )
+            except Exception:
+                tick = 0.0
+            return tick if tick > 0 else 0.0
+        return 0.0
+
     try:
         trig_val = float(trig)
     except (TypeError, ValueError):
         trig_val = float(entry_val or last_val)
+
+    tick_floor = _min_tick()
+    if tick_floor > 0 and trig_val < tick_floor:
+        try:
+            trig_val = float(exchange.price_to_precision(norm_symbol, tick_floor))
+        except Exception:
+            trig_val = tick_floor
+        trig, _ = _price_qty_to_precision(
+            exchange, norm_symbol, price=trig_val, amount=None
+        )
+        try:
+            trig_val = float(trig)
+        except (TypeError, ValueError):
+            trig_val = tick_floor
+    if trig_val <= 0:
+        label = "take-profit" if is_tp else "stop-loss"
+        message = (
+            f"exit | {symbol} | skip: {label} trigger {trig_val:.8f} invalid"
+        )
+        log_once("warning", message, window_sec=10.0)
+        return None, "exit skipped: trigger non-positive"
 
     amount = _round_qty(exchange, norm_symbol, qty_abs_val)
     try:
@@ -2898,7 +2949,6 @@ def place_conditional_exit(
 
     params = {
         "category": cat,
-        "orderType": "Market",
         "triggerPrice": float(trig_val),
         "triggerDirection": direction,
         "triggerBy": "LastPrice",
@@ -2908,9 +2958,10 @@ def place_conditional_exit(
     }
     params = _clean_params(params)
 
+    order_type = "TAKE_PROFIT_MARKET" if is_tp else "STOP_MARKET"
     try:
         resp = exchange.create_order(
-            norm_symbol, "market", exit_side, amount_val, None, params
+            norm_symbol, order_type, exit_side, amount_val, None, params
         )
     except Exception as exc:
         return None, str(exc)
