@@ -1423,7 +1423,10 @@ def setup_logging(level: int = logging.INFO, to_console: bool = True) -> None:
     )
 
     app = RotatingFileHandler(
-        LOG_DIR / "app.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
+        LOG_DIR / "app.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
     )
     app.setLevel(level)
     app.setFormatter(fmt)
@@ -3194,6 +3197,6 @@ def flush_cycle_logs() -> None:
 
 # PATCH NOTES:
 # - Added ColoredFormatter for colored console logging while keeping file logs plain.
-# - Retained rotating file handlers for application and error logs.
+# - Increased app.log retention to five rotated files and kept errors log rotating.
 # Почему безопасно: цветовая схема отключается автоматически без colorama, файл-формат без изменений.
 # Критерии приёмки: setup_logging -> консоль цветная, файлы логов создаются и ротируются.
