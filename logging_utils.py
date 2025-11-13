@@ -3,6 +3,7 @@ import csv
 import math
 import os
 import logging
+import statistics
 import time
 import sys
 from datetime import datetime, timezone
@@ -1518,6 +1519,28 @@ LOG_EXIT_FIELDS = [
     "order_id",
 ]
 
+PROFIT_REPORT_HEADER = [
+    "timestamp",
+    "symbol",
+    "pnl_net",
+    "cum_pnl",
+    "winrate",
+    "avg_win",
+    "avg_loss",
+    "sharpe",
+    "max_dd",
+]
+
+EQUITY_CURVE_HEADER = ["timestamp", "equity"]
+
+PAIR_REPORT_HEADER = [
+    "symbol",
+    "winrate",
+    "avg_profit",
+    "losing_streak",
+    "timestamp",
+]
+
 
 def _rotate_legacy_file(path_obj: Path, label: str = "legacy") -> Path:
     """Rename existing file to a ``*_{label}`` variant avoiding overwrites."""
@@ -1626,6 +1649,306 @@ def _to_float(x, default=0.0):
         return float(x)
     except Exception:
         return float(default)
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    """Return a timezone aware ``datetime`` parsed from *value* if possible."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            return datetime.fromtimestamp(float(text), tz=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+
+def _format_iso(dt: datetime | None) -> str:
+    """Return ISO timestamp with millisecond precision for *dt* (UTC)."""
+
+    if isinstance(dt, datetime):
+        return (
+            dt.astimezone(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+    return _now_utc_iso()
+
+
+def _ensure_report_file(path: str | None, header: list[str]) -> Path | None:
+    """Create *path* with *header* when missing and ensure schema."""
+
+    if not path:
+        return None
+    path_obj = Path(path)
+    try:
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+    if not path_obj.exists() or path_obj.stat().st_size == 0:
+        with open(path_obj, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(header)
+    else:
+        ensure_report_schema(str(path_obj), header)
+    return path_obj
+
+
+def _count_data_rows(path_obj: Path | None) -> int:
+    if path_obj is None or not path_obj.exists():
+        return 0
+    try:
+        with open(path_obj, "r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader, None)
+            return sum(1 for row in reader if any(cell.strip() for cell in row))
+    except OSError:
+        return 0
+
+
+def _load_trades_for_reports(trade_log_path: str) -> list[dict]:
+    path_obj = Path(trade_log_path)
+    if not path_obj.exists():
+        return []
+    trades: list[dict] = []
+    try:
+        with open(path_obj, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if not row:
+                    continue
+                exit_raw = (
+                    row.get("timestamp_exit")
+                    or row.get("timestamp_close")
+                    or row.get("timestamp")
+                    or ""
+                )
+                exit_dt = _parse_timestamp(exit_raw)
+                if exit_dt is None:
+                    continue
+                entry_raw = (
+                    row.get("timestamp_entry")
+                    or row.get("entry_time")
+                    or row.get("timestamp_open")
+                    or ""
+                )
+                trades.append(
+                    {
+                        "trade_id": row.get("trade_id") or "",
+                        "entry_dt": _parse_timestamp(entry_raw),
+                        "entry_ts": entry_raw,
+                        "exit_dt": exit_dt,
+                        "exit_ts": exit_raw,
+                        "symbol": row.get("symbol") or "",
+                        "side": row.get("side") or "",
+                        "entry_price": _to_float(row.get("entry_price")),
+                        "exit_price": _to_float(row.get("exit_price")),
+                        "qty": _to_float(row.get("qty")),
+                        "pnl": _to_float(row.get("pnl_net", row.get("profit"))),
+                        "exit_type": row.get("exit_type") or "",
+                    }
+                )
+    except OSError:
+        return []
+
+    trades.sort(key=lambda t: (t["exit_dt"], t["trade_id"]))
+    return trades
+
+
+def _append_profit_report(trades: list[dict], path: str | None) -> None:
+    if not trades or not path:
+        return
+    path_obj = _ensure_report_file(path, PROFIT_REPORT_HEADER)
+    if path_obj is None:
+        return
+    existing = _count_data_rows(path_obj)
+    if existing >= len(trades):
+        return
+
+    pnls = [float(t["pnl"]) for t in trades]
+    timestamps = [t["exit_dt"] for t in trades]
+    symbols = [t["symbol"] for t in trades]
+
+    wins = sum(1 for p in pnls if p > 0)
+    total_trades = len(trades)
+    cum_pnl = 0.0
+    equities: list[float] = []
+    for pnl in pnls:
+        cum_pnl += pnl
+        equities.append(cum_pnl)
+
+    avg_win = sum(p for p in pnls if p > 0) / wins if wins else 0.0
+    loss_vals = [p for p in pnls if p <= 0]
+    avg_loss = sum(loss_vals) / len(loss_vals) if loss_vals else 0.0
+    winrate = wins / total_trades if total_trades else 0.0
+
+    daily_totals: dict = defaultdict(float)
+    for dt, pnl in zip(timestamps, pnls):
+        if isinstance(dt, datetime):
+            daily_totals[dt.date()] += pnl
+    sharpe = 0.0
+    if len(daily_totals) > 1:
+        vals = list(daily_totals.values())
+        std = statistics.pstdev(vals)
+        if std > 0:
+            sharpe = (statistics.mean(vals) / std) * math.sqrt(len(vals))
+
+    max_dd = 0.0
+    peak = float("-inf")
+    for eq in equities:
+        if eq > peak:
+            peak = eq
+        drawdown = eq - peak
+        if drawdown < max_dd:
+            max_dd = drawdown
+
+    last_idx = len(trades) - 1
+    row = {
+        "timestamp": _format_iso(timestamps[last_idx]),
+        "symbol": symbols[last_idx],
+        "pnl_net": pnls[last_idx],
+        "cum_pnl": equities[-1] if equities else 0.0,
+        "winrate": winrate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "sharpe": sharpe,
+        "max_dd": max_dd,
+    }
+
+    with open(path_obj, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=PROFIT_REPORT_HEADER)
+        if f.tell() == 0:
+            writer.writeheader()
+        writer.writerow(row)
+        f.flush()
+
+
+def _append_equity_curve(
+    trades: list[dict], path: str | None, initial_equity: float = 0.0
+) -> None:
+    if not trades or not path:
+        return
+    path_obj = _ensure_report_file(path, EQUITY_CURVE_HEADER)
+    if path_obj is None:
+        return
+    existing = _count_data_rows(path_obj)
+    if existing >= len(trades):
+        return
+
+    total = initial_equity
+    for trade in trades:
+        total += float(trade["pnl"])
+
+    with open(path_obj, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=EQUITY_CURVE_HEADER)
+        if f.tell() == 0:
+            writer.writeheader()
+        writer.writerow(
+            {
+                "timestamp": _format_iso(trades[-1]["exit_dt"]),
+                "equity": total,
+            }
+        )
+        f.flush()
+
+
+def _update_pair_report(trades: list[dict], path: str | None, symbol: str) -> None:
+    if not trades or not path or not symbol:
+        return
+    path_obj = _ensure_report_file(path, PAIR_REPORT_HEADER)
+    if path_obj is None:
+        return
+
+    relevant = [t for t in trades if t.get("symbol") == symbol]
+    if not relevant:
+        return
+    relevant.sort(key=lambda t: t["exit_dt"])
+
+    total = len(relevant)
+    wins = sum(1 for t in relevant if float(t["pnl"]) > 0)
+    avg_profit = sum(float(t["pnl"]) for t in relevant) / total if total else 0.0
+    winrate = wins / total if total else 0.0
+
+    streak = 0
+    for trade in relevant:
+        if float(trade["pnl"]) <= 0:
+            streak += 1
+        else:
+            streak = 0
+    losing_streak = streak
+
+    updated_row = {
+        "symbol": symbol,
+        "winrate": winrate,
+        "avg_profit": avg_profit,
+        "losing_streak": losing_streak,
+        "timestamp": _format_iso(relevant[-1]["exit_dt"]),
+    }
+
+    existing_rows: list[dict] = []
+    try:
+        with open(path_obj, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if not row:
+                    continue
+                existing_rows.append(row)
+    except OSError:
+        existing_rows = []
+
+    seen = False
+    output_rows: list[dict] = []
+    for row in existing_rows:
+        if (row.get("symbol") or "") == symbol:
+            output_rows.append(updated_row)
+            seen = True
+        else:
+            output_rows.append({k: row.get(k, "") for k in PAIR_REPORT_HEADER})
+    if not seen:
+        output_rows.append(updated_row)
+
+    with open(path_obj, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=PAIR_REPORT_HEADER)
+        writer.writeheader()
+        for row in output_rows:
+            writer.writerow(row)
+        f.flush()
+
+
+def update_trade_reports(
+    row: dict,
+    *,
+    trade_log_path: str,
+    profit_report_path: str | None,
+    pair_report_path: str | None,
+    equity_curve_path: str | None,
+    initial_equity: float = 0.0,
+) -> None:
+    """Update derived CSV reports after logging a closed trade."""
+
+    trades = _load_trades_for_reports(trade_log_path)
+    if not trades:
+        return
+
+    try:
+        _append_profit_report(trades, profit_report_path)
+    except Exception:
+        logging.exception("update_trade_reports | profit_report failed")
+    try:
+        _append_equity_curve(trades, equity_curve_path, initial_equity)
+    except Exception:
+        logging.exception("update_trade_reports | equity_curve failed")
+    try:
+        symbol = str(row.get("symbol") or "")
+        _update_pair_report(trades, pair_report_path, symbol)
+    except Exception:
+        logging.exception("update_trade_reports | pair_report failed")
 
 # [ANCHOR:LOG_ENTRY_NORMALIZER]
 def normalize_entry_ctx(ctx: dict | None) -> dict:
@@ -2036,6 +2359,7 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
             with open(trade_log_path, "a", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=TRADES_CSV_HEADER)
                 w.writerow(row)
+                f.flush()
 
             _LOGGED_EXIT_IDS[trade_id] = now_ts
 
@@ -2043,6 +2367,22 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
             memory_manager.add_trade_close({**ctx, **row})
         except Exception:  # pragma: no cover - defensive
             logging.exception("add_trade_close failed")
+
+        profit_path = getattr(main_mod, "profit_report_path", None)
+        pair_path = getattr(main_mod, "pair_report_path", None)
+        equity_path = getattr(main_mod, "equity_curve_path", None)
+        initial_equity = float(getattr(main_mod, "initial_equity", 0.0) or 0.0)
+        try:
+            update_trade_reports(
+                row,
+                trade_log_path=trade_log_path,
+                profit_report_path=profit_path,
+                pair_report_path=pair_path,
+                equity_curve_path=equity_path,
+                initial_equity=initial_equity,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logging.exception("update_trade_reports failed")
         if register_trade_result:
             try:
                 register_trade_result(symbol, profit, trade_log_path)
