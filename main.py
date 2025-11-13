@@ -113,7 +113,6 @@ from logging_utils import (
     record_backtest,
     record_pattern,
     record_error,
-    safe_create_order,
     place_conditional_exit,
     enter_ensure_filled,
     wait_position_after_entry,
@@ -3378,26 +3377,46 @@ def run_trade(
             log_once("warning", f"Failed to set SL for {symbol}: {exc}")
 
         try:
-            params = {"reduceOnly": True, "category": category}
-            _resp, err = safe_create_order(
+            order_id, err = place_conditional_exit(
                 ADAPTER.x,
                 symbol,
-                "limit",
-                "sell" if want_long else "buy",
-                pos_abs_after,
-                tp_price,
-                params=params,
+                "buy" if want_long else "sell",
+                entry_price,
+                price,
+                tp_pct_eff,
+                category,
+                is_tp=True,
             )
-            if err:
-                log_once("warning", f"Failed to set TP (limit) for {symbol}: {err}")
-            else:
+        except RuntimeError as exc:
+            err_lower = str(exc).lower()
+            if not (
+                err_lower.startswith("exit skipped")
+                or err_lower.startswith("exit postponed")
+                or "нет позиции" in err_lower
+            ):
+                log_once(
+                    "warning",
+                    f"Failed to set TP (conditional) for {symbol}: {exc}",
+                )
+        except Exception as exc:
+            log_once(
+                "warning", f"Failed to set TP (conditional) for {symbol}: {exc}"
+            )
+        else:
+            if err and not (
+                str(err).lower().startswith("exit skipped")
+                or str(err).lower().startswith("exit postponed")
+            ):
+                log_once(
+                    "warning",
+                    f"Failed to set TP (conditional) for {symbol}: {err}",
+                )
+            elif order_id:
                 logging.info(
-                    "exit | %s | Take-profit limit order placed at %.4f",
+                    "exit | %s | Take-profit conditional order placed at %.4f",
                     symbol,
                     tp_price,
                 )
-        except Exception as exc:
-            log_once("warning", f"Failed to create TP limit for {symbol}: {exc}")
 
     qty = float(pos_abs_after or detected_qty or filled_qty)
     try:
@@ -4542,8 +4561,6 @@ def ensure_exit_orders(
 
     need_sl = sl_price is not None and not has_stop
     need_tp = tp_price is not None and not has_tp
-    if is_bybit:
-        need_tp = False
     if not need_sl and not need_tp:
         return
 

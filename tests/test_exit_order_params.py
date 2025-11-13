@@ -126,6 +126,7 @@ def main_module(monkeypatch):
             return self._markets
 
     dummy_adapter_module.ExchangeAdapter = DummyExchangeAdapter
+    dummy_adapter_module.AdapterInitError = type("AdapterInitError", (Exception,), {})
     dummy_adapter_module.AdapterOHLCVUnavailable = type(
         "AdapterOHLCVUnavailable", (Exception,), {}
     )
