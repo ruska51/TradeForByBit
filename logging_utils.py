@@ -2994,6 +2994,35 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
         set_valid_leverage,
     )
 
+    exchange_id = str(getattr(exchange, "id", "") or "").lower()
+
+    def _legacy_leverage_symbols(sym: str) -> list[str]:
+        """Return leverage symbol candidates for direct CCXT calls."""
+
+        if not isinstance(sym, str):
+            return [sym]
+
+        cleaned = sym.strip()
+        if not cleaned:
+            return []
+
+        order: list[str] = []
+        if exchange_id == "bybit":
+            if cleaned.endswith("/USDT") and ":USDT" not in cleaned:
+                order.append(f"{cleaned}:USDT")
+            order.append(cleaned)
+            if cleaned.endswith("/USDT") and ":USDT" not in cleaned:
+                order.append(f"{cleaned}:USDT")
+        else:
+            order.append(cleaned)
+
+        result: list[str] = []
+        for candidate in order or [cleaned]:
+            if candidate and candidate not in result:
+                result.append(candidate)
+
+        return result or [cleaned]
+
     try:
         market_cat = detect_market_category(exchange, symbol)
     except Exception as exc:
@@ -3018,28 +3047,59 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
         try:
             L = set_valid_leverage(exchange, symbol, leverage)
         except TypeError:
-            try:
-                L = exchange.set_leverage(leverage, symbol)
-            except Exception as exc:
-                L = None
-                if attempt >= attempts - 1:
-                    log_once(
-                        "warning",
-                        f"leverage | {symbol} | Legacy set_leverage call failed: {exc}",
-                    )
-            else:
-                if L:
-                    log(logging.INFO, "leverage", symbol, f"Leverage set to {leverage}x")
-                    return True
-                if attempt < attempts - 1:
-                    time.sleep(2)
-                    continue
-                message = f"leverage | {symbol} | Failed to set leverage {leverage} (legacy)"
-                log_once("warning", message, window_sec=5.0)
-                tag = "leverage_failed_soft"
-                if tag not in _order_status[symbol]:
-                    _order_status[symbol].append(tag)
-                return False
+            L = None
+            legacy_symbols = _legacy_leverage_symbols(symbol)
+            last_error: Exception | None = None
+            for idx, legacy_symbol in enumerate(legacy_symbols):
+                try:
+                    L = exchange.set_leverage(leverage, legacy_symbol)
+                except Exception as exc:
+                    last_error = exc
+                    message = str(exc).lower()
+                    if (
+                        exchange_id == "bybit"
+                        and "only support linear and inverse market" in message
+                        and idx < len(legacy_symbols) - 1
+                    ):
+                        logging.warning(
+                            "leverage | %s | set_leverage failed for %s: %s. Retrying with alternate symbol.",
+                            symbol,
+                            legacy_symbol,
+                            exc,
+                        )
+                        continue
+                    if idx < len(legacy_symbols) - 1:
+                        continue
+                    L = None
+                    break
+                else:
+                    if L:
+                        log(
+                            logging.INFO,
+                            "leverage",
+                            symbol,
+                            f"Leverage set to {leverage}x",
+                        )
+                        return True
+            if L:
+                log(
+                    logging.INFO,
+                    "leverage",
+                    symbol,
+                    f"Leverage set to {leverage}x",
+                )
+                return True
+            if attempt < attempts - 1:
+                time.sleep(2)
+                continue
+            message = f"leverage | {symbol} | Failed to set leverage {leverage} (legacy)"
+            if last_error is not None:
+                message = f"{message}: {last_error}"
+            log_once("error", message, window_sec=30.0)
+            tag = "leverage_failed_soft"
+            if tag not in _order_status[symbol]:
+                _order_status[symbol].append(tag)
+            return False
         if L is LEVERAGE_SKIPPED:
             log(logging.INFO, "leverage", symbol, "Leverage setup skipped")
             return True

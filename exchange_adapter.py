@@ -678,7 +678,7 @@ class ExchangeAdapter:
 
         if self.futures:
             if self.exchange_id.startswith("bybit"):
-                options: dict[str, str] = {"defaultType": "swap"}
+                options: dict[str, str] = {"defaultType": "future"}
             else:
                 options = {"defaultType": "future"}
         else:
@@ -715,7 +715,7 @@ class ExchangeAdapter:
                 ex = ctor({**cfg, "options": options})
                 if str(getattr(ex, "id", "") or "").lower() == "bybit":
                     current_options = dict(getattr(ex, "options", {}) or {})
-                    current_options["defaultType"] = "swap"
+                    current_options["defaultType"] = "future"
                     ex.options = current_options
                 if hasattr(ex, "set_sandbox_mode"):
                     ex.set_sandbox_mode(self.sandbox)
