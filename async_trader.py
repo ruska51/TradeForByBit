@@ -141,6 +141,16 @@ async def run_trade(
             tick_size=tick_size,
         )
         min_tick = tick_size if tick_size and tick_size > 0 else 1e-6
+        tp_price = max(tp_price, min_tick)
+        sl_price = max(sl_price, min_tick)
+        try:
+            tp_price = float(exchange.price_to_precision(symbol, tp_price))
+        except Exception:
+            tp_price = float(tp_price)
+        try:
+            sl_price = float(exchange.price_to_precision(symbol, sl_price))
+        except Exception:
+            sl_price = float(sl_price)
         if side.upper() == "SHORT":
             if sl_price >= price * 1.9:
                 log_once(
@@ -158,6 +168,19 @@ async def run_trade(
                     window_sec=30.0,
                 )
                 return
+            if price > 0:
+                drop_ratio = tp_price / price
+                if drop_ratio <= 0.1:
+                    drop_pct = (1 - drop_ratio) * 100
+                    log_once(
+                        "warning",
+                        (
+                            "trade | %s | skip: short take-profit %.4f implies drop %.1f%%"
+                            % (symbol, tp_price, drop_pct)
+                        ),
+                        window_sec=30.0,
+                    )
+                    return
 
         balance = await asyncio.to_thread(safe_fetch_balance, exchange, {"type": "future"})
         equity = balance["total"].get("USDT", 0.0)
@@ -205,8 +228,6 @@ async def run_trade(
             return
         pair.pending_qty = 0.0
         pair_state[symbol] = pair
-        sl_price = float(exchange.price_to_precision(symbol, sl_price))
-        tp_price = float(exchange.price_to_precision(symbol, tp_price))
         if side.upper() == "SHORT" and tp_price <= min_tick:
             log_once(
                 "warning",
