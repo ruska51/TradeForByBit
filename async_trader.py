@@ -57,13 +57,16 @@ _GLOBAL_MODEL, _GLOBAL_SCALER, _GLOBAL_FEATURES, _GLOBAL_CLASSES = load_global_b
 def _make_exchange():
     params = {
         "enableRateLimit": True,
-        "options": {"defaultType": "swap"},
+        "options": {"defaultType": "linear"},
     }
     if API_KEY:
         params["apiKey"] = API_KEY
     if API_SECRET:
         params["secret"] = API_SECRET
     exchange = ccxt.bybit(params)
+    current_options = dict(getattr(exchange, "options", {}) or {})
+    current_options["defaultType"] = "linear"
+    exchange.options = current_options
     if hasattr(exchange, "set_sandbox_mode"):
         exchange.set_sandbox_mode(SANDBOX_MODE)
     return exchange
@@ -574,10 +577,17 @@ async def process_symbol(
             finally:
                 if hasattr(ex, "close"):
                     await asyncio.to_thread(ex.close)
-            if not success:
-                log(logging.INFO, "leverage", symbol, "skip leverage change, using cross")
-            pair.leverage_ready = True
-            pair_state[symbol] = pair
+            if success:
+                pair.leverage_ready = True
+                pair_state[symbol] = pair
+            else:
+                log(
+                    logging.WARNING,
+                    "leverage",
+                    symbol,
+                    "Failed to set leverage; skipping trade",
+                )
+                return
         tp_mult = config.get("tp_mult", 2.0)
         if side == "LONG" and pattern_info["pattern_name"] == "bull_flag":
             tp_mult = 3.0

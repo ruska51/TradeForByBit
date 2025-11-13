@@ -6696,7 +6696,10 @@ def run_bot():
             if is_derivative_market:
                 leverage_category = detect_market_category(exchange, symbol)
                 if str(leverage_category).lower() == "linear":
-                    if safe_set_leverage(exchange, symbol, fallback_leverage):
+                    leverage_success = safe_set_leverage(
+                        exchange, symbol, fallback_leverage
+                    )
+                    if leverage_success:
                         pair_flags = risk_state.setdefault(symbol, PairState())
                         if not pair_flags.leverage_ready:
                             pair_flags.leverage_ready = True
@@ -6705,6 +6708,14 @@ def run_bot():
                             except Exception as e:
                                 logging.exception("save_risk_state failed: %s", e)
                         logging.info("leverage | %s | leverage_ready set", symbol)
+                    else:
+                        log_decision(symbol, "leverage_failed")
+                        log_once(
+                            "warning",
+                            f"leverage | {symbol} | fallback leverage setup failed",
+                            window_sec=30.0,
+                        )
+                        continue
                 else:
                     logging.warning(
                         "leverage | %s | skip: market %s not linear",

@@ -33,7 +33,7 @@ def _get_adapter() -> ExchangeAdapter:
 def _exchange_params(enable_rate_limit: bool = True) -> tuple[dict, bool]:
     adapter = _get_adapter()
     params: dict = {"enableRateLimit": enable_rate_limit}
-    params["options"] = {"defaultType": "swap"}
+    params["options"] = {"defaultType": "linear"}
     for key in ("apiKey", "secret"):
         value = adapter.config.get(key)
         if value:
@@ -48,6 +48,9 @@ def scan_markets(volume_threshold: float = 100_000,
     """Return a list of symbols that pass liquidity and performance filters."""
     params, sandbox = _exchange_params(enable_rate_limit=False)
     exchange = ccxt.bybit(params)
+    current_options = dict(getattr(exchange, "options", {}) or {})
+    current_options["defaultType"] = "linear"
+    exchange.options = current_options
     if hasattr(exchange, "set_sandbox_mode"):
         exchange.set_sandbox_mode(sandbox)
     try:
@@ -107,11 +110,17 @@ async def scan_usdt_symbols(volume_threshold: float = 100_000,
     params, sandbox = _exchange_params()
     if HAS_PRO:
         exchange = ccxtpro.bybit(params)
+        current_options = dict(getattr(exchange, "options", {}) or {})
+        current_options["defaultType"] = "linear"
+        exchange.options = current_options
         if hasattr(exchange, "set_sandbox_mode"):
             exchange.set_sandbox_mode(sandbox)
         markets = await exchange.fetch_markets()
     else:
         exchange = ccxt.bybit(params)
+        current_options = dict(getattr(exchange, "options", {}) or {})
+        current_options["defaultType"] = "linear"
+        exchange.options = current_options
         if hasattr(exchange, "set_sandbox_mode"):
             exchange.set_sandbox_mode(sandbox)
         markets = await asyncio.to_thread(exchange.fetch_markets)
