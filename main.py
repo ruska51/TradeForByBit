@@ -1501,13 +1501,21 @@ if active_symbols:
 risk_state, limiter, cool, stats = load_risk_state(risk_config)
 
 # Удаляем из состояния пары, отсутствующие в обновленном списке символов
+state_pruned = False
 for sym in list(risk_state.keys()):
     if sym not in symbols and sym not in reserve_symbols:
         risk_state.pop(sym, None)
         limiter.losses.pop(sym, None)
         cool.last_loss.pop(sym, None)
         stats.stats.pop(sym, None)
+        state_pruned = True
         logging.info("risk_state | removed stale data for %s", sym)
+
+if state_pruned:
+    try:
+        save_risk_state(risk_state, limiter, cool, stats)
+    except Exception as e:
+        logging.exception("save_risk_state failed: %s", e)
 
 SYMBOL_CATEGORIES = {s: i for i, s in enumerate(symbols)}
 PATTERN_LABELS = {name: i for i, name in enumerate(pattern_classes)}
@@ -2597,16 +2605,24 @@ def register_trade_result(symbol: str, profit: float, log_path: str) -> None:
     if profit > 0:
         pair.losing_streak = 0
         pair.cooldown_active = False
+        pair.last_loss_bar = None
         win_rate = stats.win_rate(symbol)
         if win_rate is not None and win_rate >= min_winrate and pair.volume_factor < max_increase:
             pair.volume_factor = min(max_increase, pair.volume_factor + increase_step)
     elif profit < 0:
         pair.losing_streak += 1
         pair.cooldown_active = True
+        pair.last_loss_bar = bar_index
         pair.volume_factor = max(0.1, pair.volume_factor - decrease_step)
         if losing_limit > 0 and pair.losing_streak >= losing_limit:
             pair.volume_factor = 0.1
     if pair.daily_loss_locked and profit > 0:
+        pair.daily_loss_locked = False
+    equity_after_trade = float(stats.stats.get(symbol, {}).get("equity", 0.0))
+    can_trade_now = limiter.can_trade(symbol, equity_after_trade)
+    if profit < 0 and not can_trade_now:
+        pair.daily_loss_locked = True
+    elif can_trade_now and pair.daily_loss_locked:
         pair.daily_loss_locked = False
     risk_state[symbol] = pair
     # [ANCHOR:SAVE_RISK_STATE_AFTER_TRADE]
@@ -2628,6 +2644,11 @@ def register_trade_result(symbol: str, profit: float, log_path: str) -> None:
 # Safety: reuses existing context data, honours configured report schemas and defaults
 #         to symbol-local directories when needed.
 # Acceptance: TP/SL/liquidation populate trades_log/profit_report/pair_report/equity_curve with fresh rows per exit.
+
+# PATCH NOTES (state persistence):
+# Changes: persist risk_state adjustments immediately, track last_loss_bar and pause symbols after daily loss limits.
+# Safety: relies on atomic JSON writes and existing limiter/cooldown managers.
+# Acceptance: edit risk_state.json and restart, simulate win/loss to observe disk updates without corruption.
 
 
 ## log_exit_from_order imported from logging_utils

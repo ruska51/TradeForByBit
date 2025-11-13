@@ -84,6 +84,7 @@ class PairState:
     leverage_ready: bool = False
     daily_loss_locked: bool = False
     cooldown_active: bool = False
+    last_loss_bar: int | None = None
 
 
 def _atomic_write_json(path: str, payload: dict) -> None:
@@ -109,6 +110,7 @@ def load_state() -> Dict[str, PairState]:
                 leverage_ready=v.get("leverage_ready", False),
                 daily_loss_locked=v.get("daily_loss_locked", False),
                 cooldown_active=v.get("cooldown_active", False),
+                last_loss_bar=v.get("last_loss_bar"),
             )
             for k, v in data.items()
         }
@@ -1192,6 +1194,7 @@ def load_risk_state(config: Dict, path: str = STATE_FILE):
                 leverage_ready=v.get("leverage_ready", False),
                 daily_loss_locked=v.get("daily_loss_locked", False),
                 cooldown_active=v.get("cooldown_active", False),
+                last_loss_bar=v.get("last_loss_bar"),
             )
             for k, v in pair_data.items()
         }
