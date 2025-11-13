@@ -68,23 +68,27 @@ except Exception:  # pragma: no cover - colorama optional
 
 
 class ColoredFormatter(logging.Formatter):
-    """Log formatter that wraps messages with ANSI colors by severity."""
+    """Log formatter that wraps level names with ANSI colors by severity."""
 
     LEVEL_COLORS = {
-        logging.DEBUG: Style.DIM + Fore.BLUE,
         logging.INFO: Fore.GREEN,
         logging.WARNING: Fore.YELLOW,
         logging.ERROR: Fore.RED,
-        logging.CRITICAL: Fore.RED + Style.BRIGHT,
+        logging.CRITICAL: Fore.RED,
     }
 
     def format(self, record: logging.LogRecord) -> str:
-        message = super().format(record)
+        original_levelname = record.levelname
         color = self.LEVEL_COLORS.get(record.levelno, "")
         reset = getattr(Style, "RESET_ALL", "")
-        if not color:
-            return message
-        return f"{color}{message}{reset}"
+        if color and reset:
+            record.levelname = f"{color}{original_levelname}{reset}"
+        elif color:
+            record.levelname = f"{color}{original_levelname}"
+        try:
+            return super().format(record)
+        finally:
+            record.levelname = original_levelname
 
 
 colorama_init(autoreset=True)
@@ -3536,7 +3540,7 @@ def flush_cycle_logs() -> None:
         flush_symbol_logs(sym)
 
 # PATCH NOTES:
-# - setup_logger выдаёт цветной stdout через ColoredFormatter и ротирует файл логов.
-# - Докстринг уточняет совместимость параметров err_file/redirect_streams.
-# Почему безопасно: при отсутствии colorama остаётся прежний формат, файловый лог plain-text.
-# Критерии приёмки: stdout цветной, bot.log ротируется в bot.log.1+ без ANSI-последовательностей.
+# - ColoredFormatter окрашивает имя уровня (INFO/WARNING/ERROR/CRITICAL) при выводе в stdout.
+# - setup_logger использует RotatingFileHandler для app.log без ANSI-кодов.
+# Почему безопасно: без colorama уровень остаётся неизменным, файловый лог plain-text.
+# Критерии приёмки: консольный INFO зелёный, WARNING жёлтый, ERROR/CRITICAL красные; app.log ротируется в app.log.N.
