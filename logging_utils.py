@@ -1511,6 +1511,7 @@ LOG_EXIT_FIELDS = [
     "exit_price",
     "qty",
     "profit",
+    "pnl_net",
     "profit_pct",
     "exit_type",
     "entry_time",

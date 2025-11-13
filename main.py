@@ -2524,6 +2524,7 @@ def log_trade(
         "exit_price": float(exit_price),
         "qty": float(volume),
         "profit": float(profit),
+        "pnl_net": float(profit),
         "profit_pct": float(profit_pct),
         "exit_type": exit_type,
         "entry_time": entry_time_str,
@@ -2653,6 +2654,7 @@ def register_trade_result(symbol: str, profit: float, log_path: str) -> None:
 # PATCH NOTES:
 # Changes: trade close logging now flushes writes and updates profit/pair/equity CSVs
 #          incrementally, including liquidation detection when positions vanish.
+#          Trades log rows now include ``pnl_net`` for downstream reports.
 # Safety: reuses existing context data, honours configured report schemas and defaults
 #         to symbol-local directories when needed.
 # Acceptance: TP/SL/liquidation populate trades_log/profit_report/pair_report/equity_curve with fresh rows per exit.
