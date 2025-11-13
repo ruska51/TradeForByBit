@@ -2516,8 +2516,22 @@ def log_trade(
         "order_id": ctx.get("order_id", ""),
     }
 
-    df = pd.DataFrame([row], columns=logging_utils.LOG_EXIT_FIELDS)
-    df.to_csv(log_path, mode="a", header=write_header, index=False)
+    path_obj = Path(log_path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    header = logging_utils.LOG_EXIT_FIELDS
+    with open(path_obj, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        if write_header or f.tell() == 0:
+            writer.writeheader()
+        normalized = {}
+        for key in header:
+            value = row.get(key, "")
+            if isinstance(value, bool):
+                normalized[key] = int(value)
+            else:
+                normalized[key] = value
+        writer.writerow(normalized)
+        f.flush()
     symbol_activity[symbol] = timestamp
 
     if ctx:
@@ -2527,6 +2541,42 @@ def log_trade(
             "exit_type": exit_type,
         }
         memory_manager.add_trade_close(ctx)
+
+    global_trade_path = globals().get("trade_log_path") or os.path.join(
+        os.path.dirname(__file__), "trades_log.csv"
+    )
+    base_dir = path_obj.parent
+
+    if Path(str(path_obj)).resolve() != Path(str(global_trade_path)).resolve():
+        profit_path = str(base_dir / "profit_report.csv")
+        pair_path = str(base_dir / "pair_report.csv")
+        equity_path = str(base_dir / "equity_curve.csv")
+    else:
+        profit_path = str(
+            globals().get("profit_report_path")
+            or Path(global_trade_path).with_name("profit_report.csv")
+        )
+        pair_path = str(
+            globals().get("pair_report_path")
+            or Path(global_trade_path).with_name("pair_report.csv")
+        )
+        equity_path = str(
+            globals().get("equity_curve_path")
+            or Path(global_trade_path).with_name("equity_curve.csv")
+        )
+    initial_equity = float(globals().get("initial_equity", 0.0) or 0.0)
+
+    try:
+        logging_utils.update_trade_reports(
+            row,
+            trade_log_path=str(path_obj),
+            profit_report_path=profit_path,
+            pair_report_path=pair_path,
+            equity_curve_path=equity_path,
+            initial_equity=initial_equity,
+        )
+    except Exception:
+        logging.exception("update_trade_reports failed")
 
 
 def register_trade_result(symbol: str, profit: float, log_path: str) -> None:
@@ -2573,11 +2623,11 @@ def register_trade_result(symbol: str, profit: float, log_path: str) -> None:
         save_risk_state(risk_state, limiter, cool, stats)
 
 # PATCH NOTES:
-# Changes: tightened risk_state updates (volume, streaks, cooldown/daily flags) and made JSON saves atomic.
-# Changes: persist leverage_ready toggles when leverage configured.
-# Safety: follows existing config thresholds and uses os.replace for crash-safe writes.
-# Acceptance: win raises volume when winrate >= config, loss increments streak & cooldown flag.
-# Acceptance: restart after manual edit keeps risk_state.json intact.
+# Changes: trade close logging now flushes writes and updates profit/pair/equity CSVs
+#          incrementally, including liquidation detection when positions vanish.
+# Safety: reuses existing context data, honours configured report schemas and defaults
+#         to symbol-local directories when needed.
+# Acceptance: TP/SL/liquidation populate trades_log/profit_report/pair_report/equity_curve with fresh rows per exit.
 
 
 ## log_exit_from_order imported from logging_utils
@@ -5330,13 +5380,13 @@ def run_bot():
                     if exit_price <= 0:
                         exit_price = float(ctx_missing.get("entry_price") or 0.0)
 
-                    ctx_missing["exit_type_hint"] = "EXTERNAL"
+                    ctx_missing["exit_type_hint"] = "LIQUIDATION"
                     synthetic_order = {
                         "id": f"external-{ctx_missing.get('trade_id', symbol)}-{int(now_ts)}",
                         "type": "MARKET",
                         "price": exit_price,
                         "info": {
-                            "type": "EXTERNAL",
+                            "type": "LIQUIDATION",
                             "prev_side": ctx_missing.get("side"),
                         },
                     }
@@ -5345,7 +5395,7 @@ def run_bot():
                     )
                     if handled:
                         logging.error(
-                            "exit | %s | position missing on exchange -> logged external close",
+                            "exit | %s | position missing on exchange -> logged liquidation",
                             symbol,
                         )
                         rebuild_reports_on_exit()
