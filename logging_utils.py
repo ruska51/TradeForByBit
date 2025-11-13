@@ -1716,62 +1716,62 @@ def setup_logger(
     err_file: str | None = None,
     redirect_streams: bool = False,
 ) -> None:
-    """Configure root logger with color support and file logging.
+    """Configure the root logger with colored stdout and rotating file output.
 
     Parameters
     ----------
     log_file:
-        Path to the file where all log messages should be written. Defaults to
-        ``bot.log`` in the current working directory.
+        Destination for plain-text logs. A rotating handler keeps up to five
+        archived files capped at ~5 MB each. Pass ``""``/``None`` to skip
+        file logging.
     err_file:
-        Deprecated. Retained for backward compatibility but ignored.
+        Deprecated. Retained for signature compatibility and ignored.
     redirect_streams:
-        Deprecated. Stream redirection is disabled; the root logger always
-        outputs to ``sys.stdout`` and the log file simultaneously.
+        Deprecated. Present for compatibility only and ignored.
     """
-    try:
-        from colorlog import ColoredFormatter
-    except Exception:  # pragma: no cover - colorlog optional
-        import sys
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s | %(levelname)s | %(module)s | %(message)s"
-            )
-        )
-    else:
-        import sys
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(
-            ColoredFormatter(
-                "%(log_color)s%(asctime)s | %(levelname)s | %(message)s",
-                log_colors={
-                    'DEBUG': 'cyan',
-                    'INFO': 'white',
-                    'WARNING': 'yellow',
-                    'ERROR': 'red',
-                    'CRITICAL': 'bold_red',
-                },
-            )
-        )
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(module)s | %(message)s",
+    )
+    colored_formatter = ColoredFormatter(
+        "%(asctime)s | %(levelname)s | %(module)s | %(message)s",
+    )
 
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    handlers: list[logging.Handler] = [handler]
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(colored_formatter)
+
+    handlers: list[logging.Handler] = [stream_handler]
 
     if log_file:
         log_dir = os.path.dirname(log_file)
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
-        formatter = logging.Formatter(
-            "%(asctime)s | %(levelname)s | %(module)s | %(message)s",
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
         )
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
         handlers.append(file_handler)
 
-    logger.handlers = handlers
+    for existing in list(logger.handlers):
+        name = existing.__class__.__name__
+        if name == "LogCaptureHandler" or hasattr(existing, "records"):
+            continue
+        logger.removeHandler(existing)
+        try:
+            existing.close()
+        except Exception:
+            pass
+
+    for handler in handlers:
+        logger.addHandler(handler)
 
 
 _LAST_GENERIC_LOGS: dict[str, float] = {}
@@ -3196,7 +3196,7 @@ def flush_cycle_logs() -> None:
         flush_symbol_logs(sym)
 
 # PATCH NOTES:
-# - Added ColoredFormatter for colored console logging while keeping file logs plain.
-# - Increased app.log retention to five rotated files and kept errors log rotating.
-# Почему безопасно: цветовая схема отключается автоматически без colorama, файл-формат без изменений.
-# Критерии приёмки: setup_logging -> консоль цветная, файлы логов создаются и ротируются.
+# - setup_logger выдаёт цветной stdout через ColoredFormatter и ротирует файл логов.
+# - Докстринг уточняет совместимость параметров err_file/redirect_streams.
+# Почему безопасно: при отсутствии colorama остаётся прежний формат, файловый лог plain-text.
+# Критерии приёмки: stdout цветной, bot.log ротируется в bot.log.1+ без ANSI-последовательностей.
