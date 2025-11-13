@@ -1160,6 +1160,30 @@ class ExchangeAdapter:
 
         return None
 
+    def _maybe_fetch_multi_fallback(
+        self, symbol: str, timeframe: str, limit: int
+    ) -> list[list] | None:
+        """Throttle Binance fallback requests for multi-timeframe fetches."""
+
+        store = getattr(self, "_multi_fallback_skip", None)
+        if store is None:
+            store = {}
+            setattr(self, "_multi_fallback_skip", store)
+
+        key = (symbol, timeframe, int(limit or 0))
+        now = time.time()
+        skip_until = store.get(key)
+        if isinstance(skip_until, (int, float)) and skip_until > now:
+            return None
+
+        data = self._fetch_fallback_ohlcv(symbol, timeframe, limit)
+        if data:
+            store.pop(key, None)
+            return data
+
+        store[key] = now + 300.0
+        return None
+
     def _get_fallback_ohlcv_exchange(self):
         exchange = getattr(self, "_fallback_ohlcv_exchange", None)
         if exchange is False:
@@ -1346,17 +1370,36 @@ class ExchangeAdapter:
         failed: list[str] = []
         statuses: list[str] = []
         for tf in timeframes:
+            fallback_data: list[list] | None = None
             try:
                 data = self.fetch_ohlcv(symbol, tf, limit=limit)
-                if data:
-                    results[tf] = data
-                    statuses.append(f"{tf}:ok")
+            except AdapterOHLCVUnavailable:
+                data = None
+                fallback_data = self._maybe_fetch_multi_fallback(symbol, tf, limit)
+            except Exception:
+                fallback_data = self._maybe_fetch_multi_fallback(symbol, tf, limit)
+                if fallback_data:
+                    results[tf] = fallback_data
+                    statuses.append(f"{tf}:fallback")
                 else:
                     failed.append(tf)
-                    statuses.append(f"{tf}:empty")
-            except Exception:
+                    statuses.append(f"{tf}:fail")
+                continue
+
+            if data:
+                results[tf] = data
+                statuses.append(f"{tf}:ok")
+                continue
+
+            if fallback_data is None:
+                fallback_data = self._maybe_fetch_multi_fallback(symbol, tf, limit)
+
+            if fallback_data:
+                results[tf] = fallback_data
+                statuses.append(f"{tf}:fallback")
+            else:
                 failed.append(tf)
-                statuses.append(f"{tf}:fail")
+                statuses.append(f"{tf}:empty")
         logging.info("adapter | %s | fetched %s", symbol, ", ".join(statuses))
         if failed:
             logging.warning("adapter | %s | failed %s", symbol, ",".join(failed))
