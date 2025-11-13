@@ -1220,15 +1220,27 @@ DEFAULT_PARAMS = dict(
     RSI_OVERSOLD=RSI_OVERSOLD,
 )
 
-if not best_params_cache:
+cached_global = best_params_cache.get("GLOBAL")
+if cached_global:
+    normalized = normalize_param_keys(cached_global)
+    for key in list(DEFAULT_PARAMS):
+        value = normalized.get(key)
+        if value is None:
+            continue
+        if isinstance(value, float) and math.isnan(value):
+            continue
+        DEFAULT_PARAMS[key] = value
+        globals()[key] = value
+    best_params_cache["GLOBAL"] = {k: DEFAULT_PARAMS[k] for k in DEFAULT_PARAMS}
+else:
     best_params_cache["GLOBAL"] = DEFAULT_PARAMS
     save_param_cache(best_params_cache)
     logging.info("params | GLOBAL | Initialized best_params with default")
 
 # PATCH NOTES:
-# - Persistent param cache now loaded before default initialization.
-# - Disk writes remain atomic; defaults saved only when cache missing.
-# - Acceptance: first run creates cache, next run reuses cached params.
+# Changed: load + normalize cached GLOBAL params into runtime defaults on startup.
+# Safe: keep atomic JSON writes; skip None/NaN to avoid corrupting globals.
+# Check: first boot saves defaults, next boot loads and applies cached values.
 
 
 @dataclass
