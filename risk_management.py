@@ -12,6 +12,7 @@ import os
 import logging
 import math
 import sys
+import shutil
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone, timedelta
 from typing import Callable, Dict, Optional
@@ -1181,10 +1182,32 @@ def load_risk_state(config: Dict, path: str = STATE_FILE):
     cool = CoolDownManager(cool_down_bars)
     stats = StatsTracker()
 
+    data: Dict = {}
     if os.path.exists(path):
-        with open(path) as f:
-            data = json.load(f)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            logging.error("risk_state | failed to load %s: %s", path, exc)
+            backup_path = f"{path}.bak"
+            try:
+                shutil.copy(path, backup_path)
+                logging.info("risk_state | backup saved to %s", backup_path)
+            except Exception as backup_exc:
+                logging.warning(
+                    "risk_state | failed to back up %s: %s", path, backup_exc
+                )
+            try:
+                save_risk_state(pair_state, limiter, cool, stats, path=path)
+            except Exception as save_exc:
+                logging.error(
+                    "risk_state | failed to reset state file %s: %s", path, save_exc
+                )
+            else:
+                logging.info("risk_state | reset state persisted to %s", path)
+            data = {}
 
+    if data:
         pair_data = data.get("pairs", data)
         pair_state = {
             k: PairState(
@@ -1254,4 +1277,9 @@ def save_risk_state(
 
     _atomic_write_json(path, data)
 
+
+# PATCH NOTES (risk persistence resilience):
+# Changes: guard risk_state.json loading with backup/reset fallback on JSON errors.
+# Safety: default state persists atomically and the previous file is copied to .bak.
+# Acceptance: corrupt risk_state.json -> bot logs recovery, rewrites clean state and continues.
 
