@@ -675,6 +675,14 @@ def test_ensure_trades_csv_header_creates(tmp_path):
     assert header == TRADES_CSV_HEADER
 
 
+def test_ensure_trades_csv_header_creates_parent(tmp_path):
+    path = tmp_path / "nested" / "dir" / "trades.csv"
+    ensure_trades_csv_header(str(path))
+    with open(path) as f:
+        header = f.readline().strip().split(",")
+    assert header == TRADES_CSV_HEADER
+
+
 def test_ensure_report_schema_resets(tmp_path):
     path = tmp_path / "pair_report.csv"
     with open(path, "w", newline="") as f:
@@ -689,6 +697,15 @@ def test_ensure_report_schema_resets(tmp_path):
     backup_new = tmp_path / "pair_report_misaligned.csv"
     backup_legacy = tmp_path / "pair_report_legacy.csv"
     assert backup_new.exists() or backup_legacy.exists()
+
+
+def test_ensure_report_schema_creates(tmp_path):
+    path = tmp_path / "nested" / "profit_report.csv"
+    ensure_report_schema(str(path), ["timestamp", "equity"])
+
+    with open(path) as f:
+        header = f.readline().strip().split(",")
+    assert header == ["timestamp", "equity"]
 
 
 def test_setup_logger_writes_file(tmp_path):

@@ -1573,6 +1573,12 @@ def ensure_trades_csv_header(path: str) -> None:
     header = TRADES_CSV_HEADER
     path_obj = Path(path)
 
+    try:
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logging.error("ensure_trades_csv_header | mkdir failed: %s", exc)
+        return
+
     if path_obj.exists():
         with open(path_obj, "r", newline="", encoding="utf-8") as f:
             lines = f.readlines()
@@ -1600,7 +1606,15 @@ def ensure_report_schema(path: str, expected_header: list[str]) -> None:
     """Reset *path* when the CSV header does not match ``expected_header``."""
 
     path_obj = Path(path)
+    try:
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logging.error("ensure_report_schema | mkdir failed: %s", exc)
+        return
+
     if not path_obj.exists():
+        with open(path_obj, "w", newline="", encoding="utf-8") as f:
+            f.write(",".join(expected_header) + "\n")
         return
     try:
         with open(path_obj, "r", encoding="utf-8") as f:
