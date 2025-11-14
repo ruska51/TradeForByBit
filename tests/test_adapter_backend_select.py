@@ -5,7 +5,7 @@ import exchange_adapter
 from exchange_adapter import ExchangeAdapter
 
 
-def test_backend_falls_back_to_ccxt(monkeypatch):
+def test_backend_forces_ccxt(monkeypatch):
     attempts = {"n": 0}
 
     real_import = builtins.__import__
@@ -25,5 +25,5 @@ def test_backend_falls_back_to_ccxt(monkeypatch):
 
     assert ad1.backend == "ccxt"
     assert ad2.backend == "ccxt"
-    # only one import attempt despite two instances
-    assert attempts["n"] == 1
+    # binance import should never be attempted
+    assert attempts["n"] == 0

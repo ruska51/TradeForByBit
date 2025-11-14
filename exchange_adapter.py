@@ -217,7 +217,6 @@ def detect_market_category(exchange, symbol: str) -> str | None:
 # ``ccxt`` is imported lazily so tests can monkeypatch the module before the
 # adapter attempts to use it.  The variable is populated on first use.
 _ccxt = None
-_binance_import_attempted = False
 
 
 # ---------------------------------------------------------------------------
@@ -649,18 +648,17 @@ class ExchangeAdapter:
     def _detect_backend(self) -> None:
         """Select backend based on configuration and availability."""
 
-        global _binance_import_attempted
-        choice = (self.config.get("EXCHANGE_BACKEND") or os.getenv("EXCHANGE_BACKEND", "ccxt")).lower()
-        if choice == "auto" and not _binance_import_attempted:
-            _binance_import_attempted = True
-            try:
-                __import__("binance")  # type: ignore
-                self.backend = "binance_sdk"
-                return
-            except Exception:
-                pass
-        elif choice not in {"ccxt", "auto"}:
+        choice_raw = self.config.get("EXCHANGE_BACKEND")
+        if choice_raw is None:
+            choice_raw = os.getenv("EXCHANGE_BACKEND", "ccxt")
+        choice = str(choice_raw or "ccxt").lower()
+        if choice not in {"ccxt", "auto"}:
             logging.warning("adapter | unsupported backend %s; using ccxt", choice)
+        # PATCH NOTES:
+        # - Force ccxt backend to prevent accidental Binance connections.
+        # - Sandbox + futures mode now always use Bybit testnet via ccxt.
+        # - Criteria: backend remains 'ccxt' even if EXCHANGE_BACKEND=auto.
+        self.backend = "ccxt"
         self._activate_ccxt()
 
     # ------------------------------------------------------------------
