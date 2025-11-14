@@ -321,7 +321,7 @@ ensure_report_schema(
 
 # кэш и сервисные структуры
 if "ohlcv_cache" not in globals():
-    ohlcv_cache = {}  # {(symbol, tf): (ts, df)}
+    ohlcv_cache = {}  # {(symbol, tf): (ts, df, cached_len)}
 if "_processed_order_ids" not in globals():
     _processed_order_ids = set()
 if "pair_state" not in globals():
@@ -1769,12 +1769,32 @@ CACHE_TTL_SEC = 300
 def cached_fetch_ohlcv(symbol: str, tf: str, limit: int = 200):
     key = (symbol, tf)
     now = time.time()
-    ts_df = ohlcv_cache.get(key)
-    if ts_df and now - ts_df[0] < CACHE_TTL_SEC:
-        return ts_df[1]
-    df = _fetch_ohlcv(symbol, tf, limit=limit)
+    cached = ohlcv_cache.get(key)
+    if cached:
+        cached_ts = cached[0]
+        cached_df = cached[1]
+        cached_len = cached[2] if len(cached) > 2 else (
+            len(cached_df) if cached_df is not None else 0
+        )
+        if cached_ts and now - cached_ts < CACHE_TTL_SEC and cached_df is not None:
+            needed = max(int(limit or 0), 0)
+            if not needed or cached_len >= needed:
+                if needed and cached_len > needed:
+                    return cached_df.tail(needed).copy()
+                return cached_df
+    target_limit = int(limit or 0)
+    if cached:
+        cached_len = cached[2] if len(cached) > 2 else (
+            len(cached[1]) if cached and cached[1] is not None else 0
+        )
+        target_limit = max(target_limit, cached_len)
+    if target_limit <= 0:
+        target_limit = limit or 200
+    df = _fetch_ohlcv(symbol, tf, limit=target_limit)
     if df is not None and not df.empty:
-        ohlcv_cache[key] = (now, df)
+        ohlcv_cache[key] = (now, df, len(df))
+        if limit and len(df) > limit:
+            return df.tail(limit).copy()
     return df
 
 
@@ -5220,13 +5240,22 @@ def run_bot():
 
         def _cached_fetch_ohlcv(tf: str, limit: int) -> pd.DataFrame | None:
             df_cached = cached_ohlcv.get(tf)
-            if df_cached is not None and not df_cached.empty:
-                if limit and len(df_cached) > limit:
-                    return df_cached.tail(limit).copy()
+            cached_len = len(df_cached) if df_cached is not None else 0
+            need = int(limit or 0)
+            if df_cached is not None and not df_cached.empty and (
+                not need or cached_len >= need
+            ):
+                if need and cached_len > need:
+                    return df_cached.tail(need).copy()
                 return df_cached.copy()
-            df_new = fetch_ohlcv(symbol, tf, limit=limit)
+            target_limit = need if need else cached_len
+            if target_limit <= 0:
+                target_limit = need or limit or 100
+            df_new = fetch_ohlcv(symbol, tf, limit=target_limit)
             if df_new is not None and not df_new.empty:
                 cached_ohlcv[tf] = df_new.copy()
+                if need and len(df_new) > need:
+                    return df_new.tail(need).copy()
             return df_new
 
         metrics = {}
@@ -6831,8 +6860,12 @@ def run_bot():
                     opposite_side = "SHORT" if prev_side == "LONG" else "LONG"
 
                     # confirm_trend на 5m/15m/30m/1h (+4h если доступен)
-                    dataframes = {tf: fetch_ohlcv(symbol, tf, limit=100) for tf in ("5m", "15m", "30m", "1h")}
-                    df_4h = fetch_ohlcv(symbol, "4h", limit=100)
+                    dataframes = {}
+                    for tf in ("5m", "15m", "30m", "1h"):
+                        df_tf = _cached_fetch_ohlcv(tf, limit=100)
+                        if df_tf is not None and not getattr(df_tf, "empty", False):
+                            dataframes[tf] = df_tf
+                    df_4h = _cached_fetch_ohlcv("4h", limit=100)
                     if df_4h is not None and not getattr(df_4h, "empty", False):
                         dataframes["4h"] = df_4h
 
