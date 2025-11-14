@@ -255,92 +255,78 @@ async def run_trade(
             f"{side} {qty:.4f} @ {price:.5f} | SL={sl_price:.5f} TP={tp_price:.5f}",
         )
 
-        exit_side = "sell" if side == "LONG" else "buy"
+        order_category = "linear"
+        current_stop_price: float | None = None
+        current_target_price: float | None = None
 
-        def _trigger_direction(*, is_tp: bool) -> int:
-            if side.upper() == "LONG":
-                return 1 if is_tp else 2
-            return 2 if is_tp else 1
+        async def _apply_trading_stop(
+            *, new_stop: float | None = None, new_target: float | None = None
+        ) -> bool:
+            nonlocal current_stop_price, current_target_price
+            updated = False
+            if new_stop is not None:
+                current_stop_price = new_stop
+                updated = True
+            if new_target is not None:
+                current_target_price = new_target
+                updated = True
+            if not updated and current_stop_price is None and current_target_price is None:
+                return False
 
-        async def _place_stop_order(stop_value: float) -> str | None:
-            trigger = float(exchange.price_to_precision(symbol, stop_value))
             params = {
-                "category": "linear",
-                "triggerPrice": trigger,
-                "triggerDirection": _trigger_direction(is_tp=False),
-                "triggerBy": "LastPrice",
-                "reduceOnly": True,
-                "closeOnTrigger": True,
+                "category": order_category,
                 "tpSlMode": "Full",
+                "triggerBy": "LastPrice",
             }
+            kwargs: Dict[str, float] = {}
+            if current_stop_price is not None:
+                stop_precise = float(
+                    exchange.price_to_precision(symbol, current_stop_price)
+                )
+                kwargs["stopLossPrice"] = stop_precise
+            else:
+                stop_precise = None
+            if current_target_price is not None:
+                target_precise = float(
+                    exchange.price_to_precision(symbol, current_target_price)
+                )
+                kwargs["takeProfitPrice"] = target_precise
+            else:
+                target_precise = None
+
+            if not kwargs:
+                return False
+
             try:
-                response = await asyncio.to_thread(
-                    exchange.create_order,
+                await asyncio.to_thread(
+                    exchange.set_trading_stop,
                     symbol,
-                    "STOP_MARKET",
-                    exit_side,
-                    qty,
-                    None,
-                    params,
+                    **kwargs,
+                    params=params,
                 )
             except Exception as exc:
                 log_once(
                     "warning",
-                    f"order | {symbol} | stop setup failed: {exc}",
+                    f"order | {symbol} | trading stop update failed: {exc}",
                     window_sec=10.0,
                 )
-                return None
-            order_id = None
-            if isinstance(response, dict):
-                order_id = response.get("id") or response.get("orderId")
-            log(logging.INFO, "order", symbol, f"stop set @ {trigger:.5f}")
-            return order_id
+                return False
 
-        async def _place_take_profit_order(target_value: float) -> str | None:
-            trigger = float(exchange.price_to_precision(symbol, target_value))
-            params = {
-                "category": "linear",
-                "triggerPrice": trigger,
-                "triggerDirection": _trigger_direction(is_tp=True),
-                "triggerBy": "LastPrice",
-                "reduceOnly": True,
-                "closeOnTrigger": True,
-                "tpSlMode": "Full",
-            }
-            try:
-                response = await asyncio.to_thread(
-                    exchange.create_order,
-                    symbol,
-                    "TAKE_PROFIT_MARKET",
-                    exit_side,
-                    qty,
-                    None,
-                    params,
-                )
-            except Exception as exc:
-                log_once(
-                    "warning",
-                    f"order | {symbol} | target setup failed: {exc}",
-                    window_sec=10.0,
-                )
-                return None
-            order_id = None
-            if isinstance(response, dict):
-                order_id = response.get("id") or response.get("orderId")
-            log(logging.INFO, "order", symbol, f"target set @ {trigger:.5f}")
-            return order_id
+            if new_stop is not None and stop_precise is not None:
+                log(logging.INFO, "order", symbol, f"stop set @ {stop_precise:.5f}")
+            if new_target is not None and target_precise is not None:
+                log(logging.INFO, "order", symbol, f"target set @ {target_precise:.5f}")
+            return True
 
-        async def _replace_stop_order(stop_value: float, current_id: str | None) -> str | None:
-            if current_id:
-                try:
-                    await asyncio.to_thread(
-                        exchange.cancel_order,
-                        current_id,
-                        symbol,
-                        {"category": "linear"},
-                    )
-                except Exception:
-                    pass
+        async def _place_stop_order(stop_value: float) -> float | None:
+            success = await _apply_trading_stop(new_stop=stop_value)
+            return stop_value if success else None
+
+        async def _place_take_profit_order(target_value: float) -> float | None:
+            success = await _apply_trading_stop(new_target=target_value)
+            return target_value if success else None
+
+        async def _replace_stop_order(stop_value: float, _: float | None) -> float | None:
             return await _place_stop_order(stop_value)
 
         sl_order_id = None

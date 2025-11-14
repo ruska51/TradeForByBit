@@ -3392,6 +3392,7 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
 
     from exchange_adapter import (
         LEVERAGE_SKIPPED,
+        _ccxt_symbol,
         detect_market_category,
         set_valid_leverage,
     )
@@ -3410,11 +3411,12 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
 
         order: list[str] = []
         if exchange_id == "bybit":
-            if cleaned.endswith("/USDT") and ":USDT" not in cleaned:
-                order.append(f"{cleaned}:USDT")
+            short = _ccxt_symbol(cleaned)
+            if cleaned.endswith("/USDT") and short:
+                order.append(f"{short}:USDT")
+            if short and short not in {cleaned, f"{short}:USDT"}:
+                order.append(short)
             order.append(cleaned)
-            if cleaned.endswith("/USDT") and ":USDT" not in cleaned:
-                order.append(f"{cleaned}:USDT")
         else:
             order.append(cleaned)
 
