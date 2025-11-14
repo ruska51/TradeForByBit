@@ -71,7 +71,7 @@ class ColoredFormatter(logging.Formatter):
     """Log formatter that wraps level names with ANSI colors by severity."""
 
     LEVEL_COLORS = {
-        logging.INFO: Fore.GREEN,
+        logging.INFO: Fore.WHITE,
         logging.WARNING: Fore.YELLOW,
         logging.ERROR: Fore.RED,
         logging.CRITICAL: Fore.RED,
@@ -2030,6 +2030,8 @@ MAX_PERCENT_DIFF = 0.0015
 COLOR_MAP = {
     'training': Fore.CYAN,
     'open': Fore.GREEN,
+    'open_short': Fore.MAGENTA,
+    'close': Fore.BLUE,
 }
 
 
@@ -2312,12 +2314,13 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
 
             gross = (price - entry_price) * qty if side == "LONG" else (entry_price - price) * qty
             fee = commission * (entry_price + price) * qty
-            logging.info(
-                "exit | %s | позиция закрыта по цене %.4f, PNL=%.4f",
-                symbol,
-                _to_float(price),
-                _to_float(gross - fee),
+            price_val = _to_float(price)
+            profit_val = _to_float(gross - fee)
+            msg_close = (
+                f"exit | {symbol} | позиция закрыта по цене {price_val:.4f}, "
+                f"PNL={profit_val:.4f}"
             )
+            logging.info(colorize(msg_close, "close"))
             profit = gross - fee
 
             exit_hint_raw = ctx.pop("exit_type_hint", None)
