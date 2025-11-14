@@ -462,6 +462,11 @@ class ExchangeAdapter:
             self._no_data_symbols = store
         return store
 
+    def _next_no_data_retry(self) -> float:
+        """Return unix timestamp for the next OHLCV retry after a miss."""
+
+        return time.time() + 24 * 60 * 60
+
     # ------------------------------------------------------------------
     def _default_params(
         self,
@@ -575,8 +580,12 @@ class ExchangeAdapter:
         ccxt_symbol = self._ccxt_symbol(symbol)
 
         no_data = self._ensure_no_data_store()
-        if symbol in no_data:
-            return None
+        retry_at = no_data.get(symbol)
+        if retry_at:
+            now = time.time()
+            if retry_at > now:
+                return None
+            no_data.pop(symbol, None)
         market: dict[str, Any] | None = None
         try:
             market_obj = ex.market(ccxt_symbol)
@@ -901,6 +910,13 @@ class ExchangeAdapter:
         if cached and now - cached[0] < 60:
             return [row[:] for row in cached[1]]
 
+        no_data = self._ensure_no_data_store()
+        retry_at = no_data.get(symbol)
+        if retry_at:
+            if retry_at > now:
+                return None
+            no_data.pop(symbol, None)
+
         markets = getattr(getattr(self, "x", None), "markets", None)
         if not markets:
             if not self.load_markets_safe():
@@ -936,7 +952,6 @@ class ExchangeAdapter:
         request_cat = cat_norm if cat_norm in {"linear", "inverse"} else None
         cat_label = request_cat or (cat_norm if cat_norm else "none")
         request_params: dict[str, Any] | None = {"category": request_cat} if request_cat else None
-        no_data = self._ensure_no_data_store()
 
         try:
             data = self._fetch_ohlcv_call(ccxt_symbol, timeframe, limit, request_params)
@@ -1008,7 +1023,7 @@ class ExchangeAdapter:
                         "warning",
                         f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat_label} ({exc})",
                     )
-                    no_data[symbol] = time.time()
+                    no_data[symbol] = self._next_no_data_retry()
                     return None
                 return self._handle_fetch_failure(
                     symbol,
@@ -1025,7 +1040,7 @@ class ExchangeAdapter:
                     "warning",
                     f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat_label} ({exc})",
                 )
-                no_data[symbol] = time.time()
+                no_data[symbol] = self._next_no_data_retry()
                 return None
             if self._is_rate_limited(exc):
                 time.sleep(2)
@@ -1039,7 +1054,7 @@ class ExchangeAdapter:
                             "warning",
                             f"adapter | fetch_ohlcv failed: {symbol} {timeframe} cat={cat_label} ({retry_exc})",
                         )
-                        no_data[symbol] = time.time()
+                        no_data[symbol] = self._next_no_data_retry()
                         return None
                     return self._handle_fetch_failure(
                         symbol,
@@ -1113,7 +1128,7 @@ class ExchangeAdapter:
             "warning",
             f"adapter | fetch_ohlcv empty: {symbol} {timeframe} cat={cat_label}",
         )
-        no_data[symbol] = time.time()
+        no_data[symbol] = self._next_no_data_retry()
         return None
 
     def _fetch_fallback_ohlcv(
@@ -1147,14 +1162,11 @@ class ExchangeAdapter:
             return None
 
         if candles:
-            log_once(
-                "info",
-                (
-                    "adapter | fetch_ohlcv fallback success "
-                    f"exchange=binance symbol={fallback_symbol} "
-                    f"timeframe={timeframe} limit={limit}"
-                ),
-                window_sec=60,
+            logging.info(
+                "Fetched %s candles for %s %s from Binance.",
+                len(candles),
+                symbol,
+                timeframe,
             )
             return candles
 
@@ -1358,7 +1370,7 @@ class ExchangeAdapter:
             f"{symbol}:{timeframe}",
             f"adapter | fetch_ohlcv giving up symbol={symbol} tf={timeframe} error={exc}",
         )
-        no_data[symbol] = time.time()
+        no_data[symbol] = self._next_no_data_retry()
         return None
 
     # ------------------------------------------------------------------
