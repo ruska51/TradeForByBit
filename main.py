@@ -3391,12 +3391,12 @@ def run_trade(
         leverage_int,
     )
 
-    logging.info(
-        colorize(
-            f"trade | {symbol} | Opening {want_side.upper()} position | qty={qty_target} | price={price}",
-            "open",
-        )
+    open_msg = (
+        f"trade | {symbol} | Opening {want_side.upper()} position | "
+        f"qty={qty_target} | price={price}"
     )
+    open_color_key = "open_short" if str(want_side).lower() in {"sell", "short"} else "open"
+    logging.info(colorize(open_msg, open_color_key))
     order_id = None
     try:
         filled_qty = enter_ensure_filled(
