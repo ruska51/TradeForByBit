@@ -2785,8 +2785,8 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
     if atr_ratio >= 0.01 and vol_ratio >= 1.2:
         mode = "scalp"
         params = {
-            "sl_mult": 2.0,
-            "tp_mult": 4.0,
+            "sl_mult": 1.0,
+            "tp_mult": 2.0,
             "lev": 40,
             "horizon": 6,
             "trailing_start": 0.004,
@@ -2796,8 +2796,8 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
     elif atr_ratio < 0.01:
         mode = "swing"
         params = {
-            "sl_mult": 2.5,
-            "tp_mult": 5.0,
+            "sl_mult": 3.0,
+            "tp_mult": 6.0,
             "lev": 10,
             "horizon": 25,
             "partial_tp": 0.5,
@@ -2806,8 +2806,8 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
     else:
         mode = "intraday"
         params = {
-            "sl_mult": 2.2,
-            "tp_mult": 4.5,
+            "sl_mult": 2.0,
+            "tp_mult": 4.0,
             "lev": 20,
             "horizon": 10,
             "partial_tp": 0.4,

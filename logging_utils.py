@@ -3316,11 +3316,14 @@ def place_conditional_exit(
         "category": cat,
         "triggerPrice": float(trig_val),
         "triggerDirection": direction,
-        "triggerBy": "LastPrice",
         "reduceOnly": True,
         "closeOnTrigger": True,
-        "tpSlMode": "Full",
     }
+
+    if is_tp:
+        params.update({"tpOrderType": "Market", "tpTriggerBy": "LastPrice"})
+    else:
+        params.update({"slOrderType": "Market", "slTriggerBy": "LastPrice"})
     params = _clean_params(params)
 
     order_type = "TAKE_PROFIT_MARKET" if is_tp else "STOP_MARKET"
