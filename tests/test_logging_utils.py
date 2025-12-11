@@ -533,8 +533,8 @@ def test_place_conditional_exit_normalized(caplog):
     assert side == "sell"
     assert qty == pytest.approx(1.0)
     assert price is None
-    assert params["tpSlMode"] == "Full"
-    assert params["triggerBy"] == "LastPrice"
+    assert params["slOrderType"] == "Market"
+    assert params["slTriggerBy"] == "LastPrice"
     assert params["triggerPrice"] == pytest.approx(980.0, rel=1e-4)
     assert params["triggerDirection"] == 2
 
@@ -555,6 +555,8 @@ def test_place_conditional_exit_normalized(caplog):
     assert side_tp == "sell"
     assert qty_tp == pytest.approx(1.0)
     assert price_tp is None
+    assert params_tp["tpOrderType"] == "Market"
+    assert params_tp["tpTriggerBy"] == "LastPrice"
     assert params_tp["triggerDirection"] == 1
     assert params_tp["triggerPrice"] == pytest.approx(1020.0, rel=1e-4)
 
