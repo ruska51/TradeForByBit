@@ -1051,6 +1051,7 @@ class StatsTracker:
     stats: Dict[str, Dict[str, float | int | str | list | bool | None]] = field(
         default_factory=dict
     )
+    losing_streak_limit: int = 4
 
     def on_trade_close(
         self, symbol: str, profit: float, timestamp: datetime | None = None
@@ -1068,6 +1069,7 @@ class StatsTracker:
                 "max_drawdown": 0.0,
                 "loss_streak": 0,
                 "loss_streak_start": None,
+                "hard_loss_streak": 0,
                 "banned_until": None,
                 "reduced_risk": False,
             },
@@ -1080,10 +1082,12 @@ class StatsTracker:
             s["losses"] = s.get("losses", 0)
             s["loss_streak"] = 0
             s["loss_streak_start"] = None
+            s["hard_loss_streak"] = 0
             s["banned_until"] = None
             s["reduced_risk"] = False
         else:
             s["losses"] = s.get("losses", 0) + 1
+            s["hard_loss_streak"] = s.get("hard_loss_streak", 0) + 1
             start = s.get("loss_streak_start")
             if not start:
                 s["loss_streak_start"] = now.isoformat()
@@ -1100,6 +1104,9 @@ class StatsTracker:
                 and now - datetime.fromisoformat(s["loss_streak_start"]) <= timedelta(minutes=60)
             ):
                 # [ANCHOR:SYMBOL_BAN_RULE]
+                s["banned_until"] = (now + timedelta(minutes=60)).isoformat()
+            limit = max(0, int(self.losing_streak_limit or 0))
+            if limit and s["hard_loss_streak"] >= limit:
                 s["banned_until"] = (now + timedelta(minutes=60)).isoformat()
         s["peak"] = max(s["peak"], s["equity"])
         dd = s["equity"] - s["peak"]
@@ -1163,6 +1170,12 @@ class StatsTracker:
         return s["max_drawdown"]
 
 
+# PATCH NOTES (loss streak enforcement):
+# Changes: track hard_loss_streak and use config losing_streak_limit to ban symbols for an hour after repeated losses.
+# Safety: defaults preserved; missing counters are initialized on first update.
+# Acceptance: four consecutive losses set banned_until; a win resets hard_loss_streak.
+
+
 
 def load_risk_state(config: Dict, path: str = STATE_FILE):
     """Load extended risk state including pair info and risk managers.
@@ -1180,7 +1193,7 @@ def load_risk_state(config: Dict, path: str = STATE_FILE):
     pair_state: Dict[str, PairState] = {}
     limiter = DailyLossLimiter(max_daily_loss_per_symbol)
     cool = CoolDownManager(cool_down_bars)
-    stats = StatsTracker()
+    stats = StatsTracker(losing_streak_limit=config.get("losing_streak_limit", 4))
 
     data: Dict = {}
     if os.path.exists(path):
@@ -1239,7 +1252,10 @@ def load_risk_state(config: Dict, path: str = STATE_FILE):
             )
 
         if "stats" in data:
-            stats = StatsTracker(stats=data.get("stats", {}))
+            stats = StatsTracker(
+                stats=data.get("stats", {}),
+                losing_streak_limit=config.get("losing_streak_limit", 4),
+            )
 
     active_symbols = config.get("active_symbols") or []
     active_set = {s for s in active_symbols if s}
