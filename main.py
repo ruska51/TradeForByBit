@@ -4859,13 +4859,143 @@ def ensure_exit_orders(
         )
 
 def update_stop_loss(symbol: str, new_sl: float) -> None:
-    """Update stop-loss order for *symbol* to *new_sl*.
+    """Replace reduce-only stop-loss with a new trigger price.
 
-    This simplified implementation logs the update request. In a full trading
-    system this would edit or replace the existing stop order on the
-    exchange.
+    Assumes a derivative position is open on ``symbol``. The function cancels
+    existing stop orders for the opposite side and places a new STOP_MARKET
+    order at ``new_sl`` using LastPrice trigger.
     """
-    logging.info(f"order | {symbol} | update_stop_loss -> {new_sl:.6f}")
+
+    exchange = getattr(ADAPTER, "x", None)
+    if not exchange:
+        return
+
+    cat = detect_market_category(exchange, symbol) or "linear"
+    if cat in {"", "swap", "spot"}:
+        cat = "linear"
+
+    norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+
+    try:
+        trig_prec = float(exchange.price_to_precision(norm_symbol, new_sl))
+    except Exception:
+        trig_prec = float(new_sl)
+
+    trig_prec, _ = _price_qty_to_precision(exchange, norm_symbol, price=trig_prec, amount=None)
+    try:
+        trigger_price = float(trig_prec)
+    except (TypeError, ValueError):
+        trigger_price = 0.0
+
+    if trigger_price <= 0:
+        log_once(
+            "warning",
+            f"order | {symbol} | stop-loss update skipped: trigger {trigger_price} invalid",
+            window_sec=30.0,
+        )
+        return
+
+    qty_signed, qty_abs = has_open_position(exchange, symbol, cat)
+    try:
+        qty_val = float(qty_abs)
+    except (TypeError, ValueError):
+        qty_val = 0.0
+
+    if qty_val <= 0:
+        return
+
+    exit_side = "sell" if qty_signed > 0 else "buy" if qty_signed < 0 else None
+    if exit_side is None:
+        return
+
+    amount = _round_qty(exchange, norm_symbol, qty_val)
+    try:
+        amount_val = float(amount)
+    except (TypeError, ValueError):
+        amount_val = float(qty_val)
+
+    if amount_val <= 0:
+        return
+
+    params = {"category": cat, "orderFilter": "StopOrder"}
+    fetch_open_orders = getattr(exchange, "fetch_open_orders", None)
+    if not callable(fetch_open_orders):
+        fetch_open_orders = getattr(exchange, "fetchOpenOrders", None)
+
+    open_stops: list[dict] = []
+    if callable(fetch_open_orders):
+        try:
+            open_stops = fetch_open_orders(norm_symbol, params=params) or []
+        except Exception as exc:
+            log_once(
+                "warning",
+                f"order | {symbol} | fetch open stops failed: {exc}",
+                window_sec=60.0,
+            )
+            open_stops = []
+
+    def _is_reduce_only(order: dict) -> bool:
+        val = order.get("reduceOnly")
+        info = order.get("info") if isinstance(order.get("info"), dict) else {}
+        if val is None:
+            val = info.get("reduceOnly")
+        if isinstance(val, str):
+            return val.strip().lower() in {"true", "1", "yes"}
+        return bool(val)
+
+    def _order_side(order: dict) -> str:
+        info = order.get("info") if isinstance(order.get("info"), dict) else {}
+        for key in ("side", "positionSide"):
+            cand = order.get(key) or info.get(key)
+            if cand:
+                return str(cand).lower()
+        return ""
+
+    for stop in open_stops:
+        if not isinstance(stop, dict):
+            continue
+        order_side = _order_side(stop)
+        if order_side != exit_side:
+            continue
+        if not _is_reduce_only(stop):
+            continue
+        order_id = stop.get("id") or stop.get("orderId")
+        if not order_id:
+            continue
+        try:
+            exchange.cancel_order(order_id, norm_symbol, {"category": cat})
+        except Exception:
+            continue
+
+    trigger_direction = BYBIT_TRIGGER_DIRECTIONS["falling" if qty_signed > 0 else "rising"]
+    sl_params = {
+        "category": cat,
+        "triggerPrice": trigger_price,
+        "triggerDirection": trigger_direction,
+        "reduceOnly": True,
+        "closeOnTrigger": True,
+        "slOrderType": "Market",
+        "slTriggerBy": "LastPrice",
+    }
+
+    try:
+        exchange.create_order(
+            norm_symbol,
+            "STOP_MARKET",
+            exit_side,
+            amount_val,
+            None,
+            sl_params,
+        )
+    except Exception as exc:
+        log_once(
+            "warning",
+            f"order | {symbol} | stop-loss update failed: {exc}",
+            window_sec=30.0,
+        )
+        return
+
+    logging.info(f"order | {symbol} | stop-loss updated -> {trigger_price:.6f}")
 
 
 def detect_pattern_from_chart(image_path):
