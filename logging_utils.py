@@ -2443,6 +2443,12 @@ def clear_no_data(symbol: str, scope: str) -> None:
         details.pop(scope, None)
 
 
+def has_no_data(symbol: str, scope: str) -> bool:
+    """Return ``True`` when ``record_no_data`` contains ``scope`` for ``symbol``."""
+
+    return scope in (_no_data_status.get(symbol) or {})
+
+
 def record_backtest(symbol: str, pct: float) -> None:
     """Store backtest return percentage for a symbol."""
     _info_status[symbol]["backtest"] = f"{pct*100:+.2f}%"
