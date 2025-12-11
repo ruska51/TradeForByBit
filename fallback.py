@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 import logging
-from logging_utils import log
+from logging_utils import log, log_once
 from risk_management import confirm_trend
 
 from exchange_adapter import ExchangeAdapter
@@ -56,23 +56,34 @@ def fallback_signal(
         log(logging.ERROR, "fallback", symbol, f"fetch failed: {e}")
         return "hold"
 
-    frames = {k: pd.DataFrame(v, columns=["ts", "open", "high", "low", "close", "volume"]) for k, v in data.items()}
+    frames = {
+        k: pd.DataFrame(v or [], columns=["ts", "open", "high", "low", "close", "volume"]) for k, v in data.items()
+    }
     df = frames[timeframe]
-    signal = ema_crossover(df)
+    needed = 21
+    if df is None or df.empty or len(df) < needed:
+        log(logging.WARNING, "fallback", symbol, f"not enough data for {timeframe} fallback")
+        return "hold"
 
-    # quick probability proxy: distance between fast and slow EMA relative to price
-    ema_fast = df['close'].ewm(span=9).mean().iloc[-1]
-    ema_slow = df['close'].ewm(span=21).mean().iloc[-1]
-    prob = min(1.0, abs(ema_fast - ema_slow) / max(df['close'].iloc[-1], 1e-9))
+    try:
+        signal = ema_crossover(df)
 
-    delta = df["close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_val = rsi.iloc[-1]
+        # quick probability proxy: distance between fast and slow EMA relative to price
+        ema_fast = df['close'].ewm(span=9).mean().iloc[-1]
+        ema_slow = df['close'].ewm(span=21).mean().iloc[-1]
+        prob = min(1.0, abs(ema_fast - ema_slow) / max(df['close'].iloc[-1], 1e-9))
+
+        delta = df["close"].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        rsi_val = rsi.iloc[-1]
+    except Exception as e:
+        log_once("warning", f"[fallback] {symbol} failed to compute indicators: {e}")
+        return "hold"
 
     if prob < prob_threshold:
         return "hold"
