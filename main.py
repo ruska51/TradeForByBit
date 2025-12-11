@@ -2787,10 +2787,89 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
     vol_ratio = safe_vol_ratio(vol_series, VOL_WINDOW, key=symbol) or 0.0
     atr_ratio = atr / close if close else 0.0
 
-    params: dict
-    if atr_ratio >= 0.01 and vol_ratio >= 1.2:
+    def _trade_memory_profile(sym: str) -> dict:
+        durations: list[float] = []
+        profits: list[float] = []
+        wins = 0
+        trades = 0
+        for entry in memory_manager.trade_history():
+            data = entry or {}
+            if data.get("symbol") != sym:
+                continue
+            trades += 1
+            try:
+                profit_val = float(data.get("profit", 0.0))
+            except (TypeError, ValueError):
+                profit_val = 0.0
+            profits.append(profit_val)
+            if profit_val > 0:
+                wins += 1
+            try:
+                duration_val = float(data.get("duration_min", 0.0))
+            except (TypeError, ValueError):
+                duration_val = 0.0
+            if duration_val > 0:
+                durations.append(duration_val)
+        avg_duration = (sum(durations) / len(durations)) if durations else None
+        avg_profit = (sum(profits) / len(profits)) if profits else None
+        win_rate_mem = (wins / trades) if trades else None
+        return {
+            "avg_duration": avg_duration,
+            "avg_profit": avg_profit,
+            "win_rate": win_rate_mem,
+        }
+
+    def _tuned_mode_params(sym: str, base_params: dict) -> dict:
+        tuned = dict(base_params)
+        best_local = best_params_cache.get(sym)
+        best_mem = memory_manager.last_best_params()
+        best_global = best_params_cache.get("GLOBAL", {})
+        best = best_local or best_mem or best_global
+        normalized = normalize_param_keys(best) if best else {}
+        sl_ref = DEFAULT_PARAMS.get("SL_PCT", 0.0) or 0.0
+        tp_ref = DEFAULT_PARAMS.get("TP_PCT", 0.0) or 0.0
+        if sl_ref > 0 and isinstance(normalized.get("SL_PCT"), (int, float)):
+            tuned["sl_mult"] *= float(normalized["SL_PCT"]) / sl_ref
+        if tp_ref > 0 and isinstance(normalized.get("TP_PCT"), (int, float)):
+            tuned["tp_mult"] *= float(normalized["TP_PCT"]) / tp_ref
+        if isinstance(normalized.get("HORIZON"), (int, float)):
+            tuned["horizon"] = int(normalized["HORIZON"])
+        return tuned
+
+    perf = _trade_memory_profile(symbol)
+    stats_win = stats.win_rate(symbol) if "stats" in globals() else None
+    win_rate = stats_win if stats_win is not None else perf.get("win_rate")
+    avg_duration = perf.get("avg_duration")
+    avg_profit = perf.get("avg_profit")
+    pair_state = risk_state.get(symbol)
+    losing_cap = risk_config.get("losing_streak_limit", 4)
+
+    if atr_ratio >= 0.03:
         mode = "scalp"
-        params = {
+    elif atr_ratio >= 0.01:
+        mode = "intraday"
+    else:
+        mode = "swing"
+
+    if vol_ratio >= 1.5 and mode != "scalp":
+        mode = "intraday"
+
+    if avg_duration is not None:
+        if avg_duration <= 45 and (win_rate is None or win_rate >= 0.45):
+            mode = "scalp"
+        elif avg_duration >= 180 and (win_rate is None or win_rate >= 0.4):
+            mode = "swing"
+
+    if avg_profit is not None and avg_profit < 0 and (win_rate or 0) < 0.45:
+        mode = "swing"
+
+    if pair_state and (
+        pair_state.volume_factor <= 0.5 or pair_state.losing_streak >= losing_cap
+    ):
+        mode = "scalp"
+
+    params_map = {
+        "scalp": {
             "sl_mult": 1.0,
             "tp_mult": 2.0,
             "lev": 40,
@@ -2798,32 +2877,42 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
             "trailing_start": 0.004,
             "partial_tp": 0.3,
             "partial_tp_mult": 1.0,
-        }
-    elif atr_ratio < 0.01:
-        mode = "swing"
-        params = {
+        },
+        "swing": {
             "sl_mult": 3.0,
             "tp_mult": 6.0,
             "lev": 10,
             "horizon": 25,
             "partial_tp": 0.5,
             "partial_tp_mult": 1.2,
-        }
-    else:
-        mode = "intraday"
-        params = {
+        },
+        "intraday": {
             "sl_mult": 2.0,
             "tp_mult": 4.0,
             "lev": 20,
             "horizon": 10,
             "partial_tp": 0.4,
             "partial_tp_mult": 1.1,
-        }
+        },
+    }
+
+    params = _tuned_mode_params(symbol, params_map[mode])
 
     logging.info(
-        f"mode | {symbol} | selected {mode.upper()} atr={atr_ratio:.4f} vol_ratio={vol_ratio:.2f}"
+        "mode | %s | selected %s atr=%.4f vol_ratio=%.2f win=%.2f dur=%s",
+        symbol,
+        mode.upper(),
+        atr_ratio,
+        vol_ratio,
+        win_rate if win_rate is not None else -1.0,
+        f"{avg_duration:.0f}" if avg_duration is not None else "?",
     )
     return mode, params, data_mode
+
+# PATCH NOTES:
+# - Mode selection now blends ATR/volume with memory and risk stats to pick scalp/intraday/swing.
+# - SL/TP multipliers are scaled by cached best_params to reuse prior optimizations safely.
+# - Losing streak/volume_factor flags flip symbols into a defensive scalp mode when needed.
 
 
 def best_entry_moment(
