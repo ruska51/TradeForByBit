@@ -110,6 +110,7 @@ from logging_utils import (
     record_candle_status,
     record_no_data,
     clear_no_data,
+    has_no_data,
     record_backtest,
     record_pattern,
     record_error,
@@ -592,10 +593,12 @@ def fetch_multi_ohlcv(
                     )
                 time.sleep(0.1 * (attempt + 1))
         if not ohlcv:
-            log_once(
-                "warning",
-                f"data | {symbol} | {tf} returned no candles",
-            )
+            if not has_no_data(symbol, tf):
+                log_once(
+                    "warning",
+                    f"data | {symbol} | {tf} returned no candles",
+                )
+                record_no_data(symbol, tf, "empty_fetch")
             continue
         df_raw = pd.DataFrame(
             ohlcv,
@@ -605,13 +608,16 @@ def fetch_multi_ohlcv(
         raw_dfs[tf] = df_raw
         df = df_raw.rename(columns=lambda c: f"{c}_{tf}")
         dfs[tf] = df
+        clear_no_data(symbol, tf)
     if not dfs:
         message = f"data | {symbol} | no OHLCV for required timeframes; skipping"
-        if warn:
+        already_missing = has_no_data(symbol, "multi")
+        if warn and not already_missing:
             log_once("warning", message)
-        else:
+        elif not warn and not already_missing:
             log_once("info", message)
-        record_no_data(symbol, "multi", "no_timeframes")
+        if not already_missing:
+            record_no_data(symbol, "multi", "no_timeframes")
         log_decision(symbol, "ohlcv_unavailable")
         return None
 
@@ -5342,7 +5348,7 @@ def run_bot():
         # --- Early model backtest and pattern detection ---
         has_open = symbol in open_trade_ctx
         try:
-            preview = fetch_multi_ohlcv(symbol, timeframes, limit=200, warn=False)
+            preview = fetch_multi_ohlcv(symbol, timeframes, limit=300, warn=False)
         except Exception:
             preview = None
         if preview is None:
