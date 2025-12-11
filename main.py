@@ -5318,20 +5318,56 @@ def run_bot():
     except Exception as e:
         logging.warning("health | pre-run check failed: %s", e)
         return
+    removed_for_data: set[str] = set()
     if issues:
         for sym in issues:
             if sym in active_symbols:
                 active_symbols.remove(sym)
+                removed_for_data.add(sym)
                 logging.info(
                     f"[run_bot] Удаляем {sym} из списка из-за отсутствия данных"
                 )
-                if reserve_symbols:
+                while (
+                    len(active_symbols) < BASE_SYMBOL_COUNT
+                    and reserve_symbols
+                    and reserve_symbols[0] in removed_for_data
+                ):
+                    reserve_symbols.pop(0)
+                if len(active_symbols) < BASE_SYMBOL_COUNT and reserve_symbols:
                     new_sym = reserve_symbols.pop(0)
-                    symbols.append(new_sym)
-                    active_symbols.append(new_sym)
-                    logging.info(
-                        f"[run_bot] Добавлена запасная пара: {new_sym}"
-                    )
+                    if new_sym not in removed_for_data:
+                        symbols.append(new_sym)
+                        active_symbols.append(new_sym)
+                        logging.info(
+                            f"[run_bot] Добавлена запасная пара: {new_sym}"
+                        )
+                    else:
+                        logging.info(
+                            f"[run_bot] Пропускаем запасную пару без данных: {new_sym}"
+                        )
+    try:
+        orphan_positions = exchange.fetch_positions()
+    except Exception as exc:
+        logging.warning("startup | fetch_positions failed: %s", exc)
+        orphan_positions = []
+    for pos in orphan_positions or []:
+        sym = pos.get("symbol")
+        try:
+            contracts = float(pos.get("contracts", 0) or 0)
+        except (TypeError, ValueError):
+            contracts = 0.0
+        if not sym or contracts <= 0:
+            continue
+        if sym not in active_symbols:
+            logging.warning(
+                "[run_bot] Found open position on %s not in active list – will manage it.",
+                sym,
+            )
+            active_symbols.append(sym)
+    # PATCH NOTES:
+    # - Health check now skips re-adding symbols без данных и добавляет только валидные резервные пары.
+    # - Открытые вне списка позиции добавляются в активные для корректного сопровождения.
+    # - Безопасно: изменения касаются только стартовой подготовки списка активных символов.
     if active_symbols:
         test_sym = "ETH/USDT" if "ETH/USDT" in active_symbols else active_symbols[0]
 
