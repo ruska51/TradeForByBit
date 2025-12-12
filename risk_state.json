@@ -1,0 +1,66 @@
+{
+  "pairs": {
+    "BTC/USDT": {
+      "volume_factor": 1.5999999999999999,
+      "losing_streak": 0,
+      "pending_qty": 0.0,
+      "leverage_ready": false,
+      "daily_loss_locked": false,
+      "cooldown_active": false,
+      "last_loss_bar": null
+    },
+    "ETH/USDT": {
+      "volume_factor": 0.4000000000000001,
+      "losing_streak": 3,
+      "pending_qty": 0.0,
+      "leverage_ready": false,
+      "daily_loss_locked": true,
+      "cooldown_active": true,
+      "last_loss_bar": 5885159
+    }
+  },
+  "daily": {
+    "max_daily_loss_per_symbol": 0.05,
+    "losses": {
+      "BTC/USDT": 15.0,
+      "ETH/USDT": -3.0
+    },
+    "day": "2025-12-12"
+  },
+  "cool": {
+    "cool_down_bars": 5,
+    "last_loss": {
+      "ETH/USDT": 5885159
+    }
+  },
+  "stats": {
+    "BTC/USDT": {
+      "trades": 3,
+      "wins": 3,
+      "losses": 0,
+      "pnl": 15.0,
+      "equity": 15.0,
+      "peak": 15.0,
+      "max_drawdown": 0.0,
+      "loss_streak": 0,
+      "loss_streak_start": null,
+      "hard_loss_streak": 0,
+      "banned_until": null,
+      "reduced_risk": false
+    },
+    "ETH/USDT": {
+      "trades": 3,
+      "wins": 0,
+      "losses": 3,
+      "pnl": -3.0,
+      "equity": -3.0,
+      "peak": 0.0,
+      "max_drawdown": -3.0,
+      "loss_streak": 3,
+      "loss_streak_start": "2025-12-12T13:53:54.197660+00:00",
+      "hard_loss_streak": 3,
+      "banned_until": "2025-12-12T14:56:26.004420+00:00",
+      "reduced_risk": false
+    }
+  }
+}

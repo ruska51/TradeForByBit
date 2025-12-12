@@ -1,0 +1,51 @@
+2025-12-12 13:53:50,927 | WARNING | logging_utils | order_norm | BTC/USDT | market lookup failed: 'DummyExchange' object has no attribute 'market'
+2025-12-12 13:53:50,927 | WARNING | logging_utils | order_norm | BTC/USDT | fetch_ticker failed: 'DummyExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:53:50,927 | INFO | logging_utils | order | BTC/USDT | ✅ Order BUY 1 @ None (FILLED)
+2025-12-12 13:53:50,928 | WARNING | logging_utils | order_norm | ETH/USDT | market lookup failed: 'FailExchange' object has no attribute 'market'
+2025-12-12 13:53:50,929 | WARNING | logging_utils | order_norm | ETH/USDT | fetch_ticker failed: 'FailExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:53:50,929 | WARNING | logging_utils | order | ETH/USDT | Order failed: fail
+2025-12-12 13:53:50,930 | INFO | logging_utils | leverage | LTC/USDT | Leverage set to 20x
+2025-12-12 13:53:52,932 | ERROR | logging_utils | leverage | DOGE/USDT | Failed to set leverage 20 (legacy): bad
+2025-12-12 13:53:52,933 | INFO | logging_utils | order | DOGE/USDT | leverage_failed_soft
+2025-12-12 13:53:52,941 | WARNING | logging_utils | order | BTC/USDT | limit rejected ({"code":-4131}); retrying as MARKET
+2025-12-12 13:53:52,941 | INFO | logging_utils | order | BTC/USDT | order_price_band_retry
+2025-12-12 13:53:52,942 | INFO | logging_utils | order | BTC/USDT | order_market_fallback
+2025-12-12 13:53:52,942 | INFO | logging_utils | order | BTC/USDT | ✅ Order BUY 1 @ 100.1 (FILLED)
+2025-12-12 13:53:52,943 | WARNING | logging_utils | order | BTC/USDT | limit rejected ({"retCode":30208}); retrying as MARKET
+2025-12-12 13:53:52,944 | INFO | logging_utils | order | BTC/USDT | order_price_band_retry
+2025-12-12 13:53:52,944 | INFO | logging_utils | order | BTC/USDT | order_market_fallback
+2025-12-12 13:53:52,944 | INFO | logging_utils | order | BTC/USDT | ✅ Order BUY 1 @ 100.1 (FILLED)
+2025-12-12 13:55:12,896 | WARNING | logging_utils | order_norm | BTC/USDT | market lookup failed: 'DummyExchange' object has no attribute 'market'
+2025-12-12 13:55:12,896 | WARNING | logging_utils | order_norm | BTC/USDT | fetch_ticker failed: 'DummyExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:55:12,896 | INFO | logging_utils | order | BTC/USDT | ✅ Order BUY 1 @ None (FILLED)
+2025-12-12 13:55:12,898 | WARNING | logging_utils | order_norm | ETH/USDT | market lookup failed: 'FailExchange' object has no attribute 'market'
+2025-12-12 13:55:12,898 | WARNING | logging_utils | order_norm | ETH/USDT | fetch_ticker failed: 'FailExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:55:12,898 | WARNING | logging_utils | order | ETH/USDT | Order failed: fail
+2025-12-12 13:55:12,899 | INFO | logging_utils | leverage | LTC/USDT | Leverage set to 20x
+2025-12-12 13:55:14,901 | ERROR | logging_utils | leverage | DOGE/USDT | Failed to set leverage 20 (legacy): bad
+2025-12-12 13:55:14,902 | INFO | logging_utils | order | DOGE/USDT | leverage_failed_soft
+2025-12-12 13:55:14,910 | WARNING | logging_utils | order | BTC/USDT | limit rejected ({"code":-4131}); retrying as MARKET
+2025-12-12 13:55:14,910 | INFO | logging_utils | order | BTC/USDT | order_price_band_retry
+2025-12-12 13:55:14,910 | INFO | logging_utils | order | BTC/USDT | order_market_fallback
+2025-12-12 13:55:14,910 | INFO | logging_utils | order | BTC/USDT | ✅ Order BUY 1 @ 100.1 (FILLED)
+2025-12-12 13:55:14,912 | WARNING | logging_utils | order | BTC/USDT | limit rejected ({"retCode":30208}); retrying as MARKET
+2025-12-12 13:55:14,912 | INFO | logging_utils | order | BTC/USDT | order_price_band_retry
+2025-12-12 13:55:14,912 | INFO | logging_utils | order | BTC/USDT | order_market_fallback
+2025-12-12 13:55:14,912 | INFO | logging_utils | order | BTC/USDT | ✅ Order BUY 1 @ 100.1 (FILLED)
+2025-12-12 13:56:23,074 | WARNING | logging_utils | order_norm | BTC/USDT | market lookup failed: 'DummyExchange' object has no attribute 'market'
+2025-12-12 13:56:23,074 | WARNING | logging_utils | order_norm | BTC/USDT | fetch_ticker failed: 'DummyExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:56:23,074 | INFO | logging_utils | order | BTC/USDT | ✅ Order BUY 1 @ None (FILLED)
+2025-12-12 13:56:23,076 | WARNING | logging_utils | order_norm | ETH/USDT | market lookup failed: 'FailExchange' object has no attribute 'market'
+2025-12-12 13:56:23,076 | WARNING | logging_utils | order_norm | ETH/USDT | fetch_ticker failed: 'FailExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:56:23,076 | WARNING | logging_utils | order | ETH/USDT | Order failed: fail
+2025-12-12 13:56:23,078 | INFO | logging_utils | leverage | LTC/USDT | Leverage set to 20x
+2025-12-12 13:56:25,080 | ERROR | logging_utils | leverage | DOGE/USDT | Failed to set leverage 20 (legacy): bad
+2025-12-12 13:56:25,080 | INFO | logging_utils | order | DOGE/USDT | leverage_failed_soft
+2025-12-12 13:56:25,089 | WARNING | logging_utils | order | BTC/USDT | limit rejected ({"code":-4131}); retrying as MARKET
+2025-12-12 13:56:25,089 | INFO | logging_utils | order | BTC/USDT | order_price_band_retry
+2025-12-12 13:56:25,089 | INFO | logging_utils | order | BTC/USDT | order_market_fallback
+2025-12-12 13:56:25,089 | INFO | logging_utils | order | BTC/USDT | ✅ Order BUY 1 @ 100.1 (FILLED)
+2025-12-12 13:56:25,090 | WARNING | logging_utils | order | BTC/USDT | limit rejected ({"retCode":30208}); retrying as MARKET
+2025-12-12 13:56:25,091 | INFO | logging_utils | order | BTC/USDT | order_price_band_retry
+2025-12-12 13:56:25,091 | INFO | logging_utils | order | BTC/USDT | order_market_fallback
+2025-12-12 13:56:25,091 | INFO | logging_utils | order | BTC/USDT | ✅ Order BUY 1 @ 100.1 (FILLED)

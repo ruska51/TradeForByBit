@@ -311,9 +311,11 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     """Set leverage for Bybit linear/inverse derivatives using minimal, explicit params."""
 
     try:
-        L = int(leverage)
+        L_int = int(leverage)
+        L_str = str(L_int)
     except Exception:
-        L = int(float(leverage))
+        L_int = int(float(leverage))
+        L_str = str(L_int)
 
     cat = detect_market_category(exchange, symbol)
     cat_norm = str(cat or "").lower()
@@ -328,7 +330,7 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     else:
         symbol_candidates = [symbol]
 
-    params = {"category": cat_norm, "buyLeverage": L, "sellLeverage": L}
+    params = {"category": cat_norm, "buyLeverage": L_str, "sellLeverage": L_str}
 
     last_exc: Exception | None = None
     for idx, candidate in enumerate(symbol_candidates):
@@ -336,7 +338,7 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
         if not target_symbol:
             continue
         try:
-            return exchange.set_leverage(L, target_symbol, params)
+            return exchange.set_leverage(L_int, target_symbol, params)
         except TypeError:
             raise
         except Exception as exc:  # pragma: no cover - network errors
@@ -628,6 +630,11 @@ class ExchangeAdapter:
             if settle or quote:
                 return "linear"
 
+        if market_type == "spot" and not self.futures:
+            return "spot"
+        if self.futures and market_type != "spot":
+            return "linear"
+
         return None
 
     # ------------------------------------------------------------------
@@ -696,15 +703,15 @@ class ExchangeAdapter:
             if callable(ctor) and name not in {n for n, _ in candidates}:
                 candidates.append((name, ctor))
 
-        # Используем строго указанный exchange_id. Без fallback на Binance.
-        normalized_id = self.exchange_id or ""
-        if normalized_id == "bybit":
-            candidate_ids: list[str] = ["bybit"]
-        elif normalized_id:
-            candidate_ids = [normalized_id]
-        else:
-            # по умолчанию выбираем bybit для futures
-            candidate_ids = ["bybit"]
+        # [ANCHOR_EXCHANGE_FALLBACK]
+        normalized_id = self.exchange_id or "bybit"
+        primary_id = "bybit" if "bybit" in normalized_id else normalized_id
+        fallback_ids = ["binance"]
+
+        candidate_ids = [primary_id]
+        for fid in fallback_ids:
+            if fid not in candidate_ids:
+                candidate_ids.append(fid)
 
         for candidate_id in candidate_ids:
             add_candidate(candidate_id)
@@ -962,6 +969,13 @@ class ExchangeAdapter:
                     no_data,
                     cat_label,
                 )
+            if not all(isinstance(row, list) and len(row) >= 6 for row in data):
+                log_once(
+                    "warning",
+                    f"adapter | fetch_ohlcv malformed: {symbol} {timeframe} cat={cat_label}",
+                )
+                no_data[symbol] = self._next_no_data_retry()
+                return None
             url = getattr(self.x, "last_request_url", "unknown")
             status = getattr(self.x, "last_http_status_code", "unknown")
             logging.debug(

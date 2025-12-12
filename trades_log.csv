@@ -1,0 +1,10 @@
+trade_id,timestamp_entry,symbol,side,entry_price,sl,tp,qty,reason,source,reduced_risk,timestamp_exit,exit_price,profit,pnl_net,exit_type,trail_triggered,time_stop_triggered,duration_sec
+1765489996418-ETH_USDT,2025-12-11T21:53:16.418Z,ETH/USDT,SHORT,3270.23923077,6638.9,32.03,0.26,pattern_override,pattern,False,,,,,,,,
+1765490039918-XRP_USDT,2025-12-11T21:53:59.918Z,XRP/USDT,SHORT,4.57094192,5.141934,3.512831,50.1,pattern_override,pattern,False,,,,,,,,
+1765490084745-SUI_USDT,2025-12-11T21:54:44.745Z,SUI/USDT,SHORT,1.6096,1.62,1.59,160.0,pattern_override,pattern,False,,,,,,,,
+1765493294037-ADA_USDT,2025-12-11T22:48:14.037Z,ADA/USDT,LONG,0.4363,0.332,0.614,5.0,pattern_override,pattern,False,,,,,,,,
+1765527264358-BNB_USDT,2025-12-12T08:14:24.358Z,BNB/USDT,LONG,860.10204082,785.03098,1009.93804,0.98,pattern_override,pattern,False,,,,,,,,
+1765529528591-ETH_USDT,2025-12-12T08:52:08.591Z,ETH/USDT,LONG,3303.28666667,2225.79,5443.45,0.24,pattern_override,pattern,False,,,,,,,,
+1765542776912-ETH_USDT:USDT,2025-12-12T12:32:56.912Z,ETH/USDT:USDT,LONG,2900.75058824,1824.8,5089.16,0.17,pattern_override,pattern,False,,,,,,,,
+1765543622466-ETH_USDT,2025-12-12T12:47:02.466Z,ETH/USDT,LONG,2483.9025,1378.65,4713.01,0.16,pattern_override,pattern,False,,,,,,,,
+1765544588735-ETH_USDT,2025-12-12T13:03:08.735Z,ETH/USDT,LONG,2125.51368421,984.38,4419.54,0.19,pattern_override,pattern,False,,,,,,,,
