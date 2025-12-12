@@ -94,6 +94,12 @@ def _setup_env(tmp_path, monkeypatch, *, confirm_trend=True, limiter_ok=True, co
         def pop_soft_risk(self, sym):
             return 0
 
+        def win_rate(self, symbol: str) -> float | None:
+            return 0.5
+
+        def register(self, symbol: str, profit: float) -> None:
+            pass
+
     main.stats = DummyStats()
 
     class DummyLimiter:

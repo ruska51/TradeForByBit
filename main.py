@@ -3508,117 +3508,48 @@ def run_trade(
 
     open_msg = (
         f"trade | {symbol} | Opening {want_side.upper()} position | "
-        f"qty={qty_target} | price={price}"
+        f"qty={qty_target} | price≈{price} | SL={sl_price:.4f} TP={tp_price:.4f}"
     )
     open_color_key = "open_short" if str(want_side).lower() in {"sell", "short"} else "open"
     logging.info(colorize(open_msg, open_color_key))
-    order_id = None
-    try:
-        filled_qty = enter_ensure_filled(
-            ADAPTER.x,
-            symbol,
-            want_side,
-            qty_target,
-            category=category,
-        )
-    except Exception as exc:
-        logging.warning("entry | %s | ensure_filled failed: %s", symbol, exc)
-        log_decision(symbol, "order_failed")
-        return False
-    if (filled_qty or 0.0) <= 0:
-        log_decision(symbol, "order_failed")
-        return False
-    _entry_guard[symbol] = {"bar": now_bar5, "side": want_side}
 
+    order_params = {
+        'stopLoss': sl_price,
+        'takeProfit': tp_price,
+    }
+    order_id, err = safe_create_order(
+        ADAPTER.x,
+        symbol,
+        'market',
+        want_side,
+        qty_target,
+        params=order_params
+    )
+
+    if err:
+        logging.warning("entry | %s | create_order failed: %s", symbol, err)
+        log_decision(symbol, "order_failed", detail=str(err))
+        return False
+    if not order_id:
+        log_decision(symbol, "order_failed", detail="no order_id returned")
+        return False
+
+    _entry_guard[symbol] = {"bar": now_bar5, "side": want_side}
     detected_qty = wait_position_after_entry(
-        ADAPTER.x, symbol, category=category, timeout_sec=3.0
+        ADAPTER.x, symbol, category=category, timeout_sec=5.0
     )
     if detected_qty <= 0:
         log_once(
             "warning",
-            f"entry | {symbol} | filled order but position not visible yet; exits postponed",
+            f"entry | {symbol} | filled order but position not visible yet; exits may be delayed",
             window_sec=60.0,
         )
 
     _pos_signed_after, pos_abs_after = has_open_position(exchange, symbol, category)
     entry_price = get_position_entry_price(exchange, symbol, category) or price
+    qty = float(pos_abs_after or detected_qty or qty_target)
 
     want_long = signal == "long"
-    try:
-        sl_pct_eff = abs((sl_price / entry_price) - 1) if entry_price else SL_PCT
-    except Exception:
-        sl_pct_eff = SL_PCT
-    if not sl_pct_eff or not math.isfinite(sl_pct_eff):
-        sl_pct_eff = SL_PCT
-    try:
-        tp_pct_eff = abs((tp_price / entry_price) - 1) if entry_price else TP_PCT
-    except Exception:
-        tp_pct_eff = TP_PCT
-    if not tp_pct_eff or not math.isfinite(tp_pct_eff):
-        tp_pct_eff = TP_PCT
-
-    if pos_abs_after > 0:
-        try:
-            _, err = place_conditional_exit(
-                ADAPTER.x,
-                symbol,
-                "buy" if want_long else "sell",
-                entry_price,
-                price,
-                sl_pct_eff,
-                category,
-                is_tp=False,
-            )
-            if err:
-                log_once("warning", f"Failed to set SL for {symbol}: {err}")
-        except RuntimeError as exc:
-            log_once("warning", f"Failed to set SL for {symbol}: {exc}")
-        except Exception as exc:
-            log_once("warning", f"Failed to set SL for {symbol}: {exc}")
-
-        try:
-            order_id, err = place_conditional_exit(
-                ADAPTER.x,
-                symbol,
-                "buy" if want_long else "sell",
-                entry_price,
-                price,
-                tp_pct_eff,
-                category,
-                is_tp=True,
-            )
-        except RuntimeError as exc:
-            err_lower = str(exc).lower()
-            if not (
-                err_lower.startswith("exit skipped")
-                or err_lower.startswith("exit postponed")
-                or "нет позиции" in err_lower
-            ):
-                log_once(
-                    "warning",
-                    f"Failed to set TP (conditional) for {symbol}: {exc}",
-                )
-        except Exception as exc:
-            log_once(
-                "warning", f"Failed to set TP (conditional) for {symbol}: {exc}"
-            )
-        else:
-            if err and not (
-                str(err).lower().startswith("exit skipped")
-                or str(err).lower().startswith("exit postponed")
-            ):
-                log_once(
-                    "warning",
-                    f"Failed to set TP (conditional) for {symbol}: {err}",
-                )
-            elif order_id:
-                logging.info(
-                    "exit | %s | Take-profit conditional order placed at %.4f",
-                    symbol,
-                    tp_price,
-                )
-
-    qty = float(pos_abs_after or detected_qty or filled_qty)
     try:
         entry_price_logged = float(entry_price)
     except (TypeError, ValueError):

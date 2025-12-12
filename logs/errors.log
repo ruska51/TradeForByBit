@@ -1,0 +1,524 @@
+2025-12-12 13:49:53,493 | WARNING | root | retrain_utils | retrain_utils | xgboost unavailable: No module named 'joblib'; ExtraTrees only (needs sklearn)
+2025-12-12 13:51:15,420 | WARNING | root | retrain_utils | retrain_utils | xgboost unavailable: No module named 'joblib'; ExtraTrees only (needs sklearn)
+2025-12-12 13:53:50,379 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:50,379 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:50,379 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:50,379 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:50,380 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:50,380 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:50,380 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for BTC/USDT
+2025-12-12 13:53:50,381 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: markets empty for BTC/USDT (type=unknown)
+2025-12-12 13:53:50,381 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for ETH/USDT
+2025-12-12 13:53:50,381 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: markets empty for ETH/USDT (type=unknown)
+2025-12-12 13:53:50,381 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for SOL/USDT
+2025-12-12 13:53:50,381 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: markets empty for SOL/USDT (type=unknown)
+2025-12-12 13:53:50,381 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for BNB/USDT
+2025-12-12 13:53:50,381 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: markets empty for BNB/USDT (type=unknown)
+2025-12-12 13:53:50,382 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for ADA/USDT
+2025-12-12 13:53:50,382 | WARNING | root | data_prep | data_prep | ADA/USDT | failed to fetch/build features: markets empty for ADA/USDT (type=unknown)
+2025-12-12 13:53:50,382 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for XRP/USDT
+2025-12-12 13:53:50,382 | WARNING | root | data_prep | data_prep | XRP/USDT | failed to fetch/build features: markets empty for XRP/USDT (type=unknown)
+2025-12-12 13:53:50,382 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for LTC/USDT
+2025-12-12 13:53:50,382 | WARNING | root | data_prep | data_prep | LTC/USDT | failed to fetch/build features: markets empty for LTC/USDT (type=unknown)
+2025-12-12 13:53:50,382 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for LINK/USDT
+2025-12-12 13:53:50,383 | WARNING | root | data_prep | data_prep | LINK/USDT | failed to fetch/build features: markets empty for LINK/USDT (type=unknown)
+2025-12-12 13:53:50,383 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for NEAR/USDT
+2025-12-12 13:53:50,383 | WARNING | root | data_prep | data_prep | NEAR/USDT | failed to fetch/build features: markets empty for NEAR/USDT (type=unknown)
+2025-12-12 13:53:50,383 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for SUI/USDT
+2025-12-12 13:53:50,383 | WARNING | root | data_prep | data_prep | SUI/USDT | failed to fetch/build features: markets empty for SUI/USDT (type=unknown)
+2025-12-12 13:53:50,383 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for TON/USDT
+2025-12-12 13:53:50,383 | WARNING | root | data_prep | data_prep | TON/USDT | failed to fetch/build features: markets empty for TON/USDT (type=unknown)
+2025-12-12 13:53:50,384 | WARNING | root | exchange_adapter | adapter | ohlcv unavailable: markets empty for TRX/USDT
+2025-12-12 13:53:50,384 | WARNING | root | data_prep | data_prep | TRX/USDT | failed to fetch/build features: markets empty for TRX/USDT (type=unknown)
+2025-12-12 13:53:50,384 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,451 | WARNING | root | exchange_adapter | adapter | fetch_open_orders failed: boom
+2025-12-12 13:53:50,586 | WARNING | root | symbol_utils | filter | markets unavailable, skipping symbol-filter: boom
+2025-12-12 13:53:50,587 | WARNING | root | exchange_adapter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:50,681 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:50,759 | WARNING | root | logging_utils | adapter | fetch_ohlcv fallback failed exchange=binance symbol=BTC/USDT timeframe=5m: 'binance' object has no attribute 'fetch_ohlcv'
+2025-12-12 13:53:50,760 | WARNING | root | exchange_adapter | adapter | BTC/USDT | failed 5m
+2025-12-12 13:53:50,763 | WARNING | root | exchange_adapter | adapter | fetch_ohlcv failed url= params={'symbol': 'BTC/USDT', 'timeframe': '1m', 'limit': 1, 'request_params': {'category': 'linear'}} status=0 error=boom
+2025-12-12 13:53:50,777 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,777 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,777 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,777 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,777 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,788 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,788 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,788 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,788 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,788 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,799 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,799 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,799 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,799 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,799 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,811 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,812 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,812 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,812 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,812 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,822 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,822 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,822 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,822 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,822 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,833 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,833 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,833 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,833 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,833 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,843 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,843 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,844 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,844 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,844 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,854 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,854 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,854 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,854 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,854 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,864 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,864 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,864 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,864 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,864 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,875 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,875 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,875 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,875 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,875 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,885 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,885 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,885 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,885 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,885 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,896 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,896 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,896 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,896 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,896 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,897 | WARNING | root | main | exit_guard | BTC/USDT | fetch_open_orders failed: temporary outage
+2025-12-12 13:53:50,907 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,907 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,907 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,907 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:50,907 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:50,909 | ERROR | root | logging_utils | fallback | BTC/USDT | fetch failed: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv'
+2025-12-12 13:53:52,976 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,976 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,977 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,977 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,977 | WARNING | root | data_prep | data_prep | ADA/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,977 | WARNING | root | data_prep | data_prep | XRP/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,977 | WARNING | root | data_prep | data_prep | LTC/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,977 | WARNING | root | data_prep | data_prep | LINK/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,977 | WARNING | root | data_prep | data_prep | NEAR/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,977 | WARNING | root | data_prep | data_prep | SUI/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,977 | WARNING | root | data_prep | data_prep | TON/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,978 | WARNING | root | data_prep | data_prep | TRX/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,978 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:52,988 | WARNING | root | data_prep | data_prep | BTC/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,988 | WARNING | root | data_prep | data_prep | ETH/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,988 | WARNING | root | data_prep | data_prep | SOL/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,989 | WARNING | root | data_prep | data_prep | BNB/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,989 | WARNING | root | data_prep | data_prep | ADA/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,989 | WARNING | root | data_prep | data_prep | XRP/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,989 | WARNING | root | data_prep | data_prep | LTC/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,989 | WARNING | root | data_prep | data_prep | LINK/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,989 | WARNING | root | data_prep | data_prep | NEAR/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,989 | WARNING | root | data_prep | data_prep | SUI/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,989 | WARNING | root | data_prep | data_prep | TON/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,989 | WARNING | root | data_prep | data_prep | TRX/USDT | failed to fetch/build features: '_AdapterStub' object has no attribute 'fetch_ohlcv' (type=unknown)
+2025-12-12 13:53:52,990 | ERROR | root | main | main | retrain failed: data_prep | no training data collected: all rows empty
+2025-12-12 13:53:52,996 | ERROR | root | model_utils | model | retrain failed: retrain_global_model() missing 3 required positional arguments: 'df_features', 'df_target', and 'feature_cols'; falling back to XGBoost
+2025-12-12 13:53:52,997 | WARNING | root | model_utils | model | BTC/USDT | ohlcv fetch failed: '_AdapterStub' object has no attribute 'fetch_ohlcv'
+2025-12-12 13:53:52,997 | WARNING | root | model_utils | model | build_recent_dataset failed: not enough data; using constant hold model
+2025-12-12 13:53:53,002 | WARNING | root | model_utils | model | BTC/USDT | ohlcv fetch failed: '_AdapterStub' object has no attribute 'fetch_ohlcv'
+2025-12-12 13:53:53,002 | WARNING | root | model_utils | model | build_recent_dataset failed: not enough data; using constant hold model
+2025-12-12 13:53:53,015 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,015 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,016 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,016 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,016 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,016 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,026 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,027 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,027 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,027 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,027 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,027 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,085 | WARNING | root | main | model | TEST | adding synthetic samples for classes [0]
+2025-12-12 13:53:53,098 | ERROR | root | model_utils | model | retrain failed: retrain_global_model() missing 3 required positional arguments: 'df_features', 'df_target', and 'feature_cols'; falling back to XGBoost
+2025-12-12 13:53:53,143 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,144 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,144 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,144 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,144 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,144 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,155 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,156 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,156 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,156 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,156 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,156 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,161 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:53:53,162 | WARNING | root | main | startup | fetch_positions failed: 'DummyExchange' object has no attribute 'fetch_positions'
+2025-12-12 13:53:53,162 | WARNING | root | main | health | BTC/USDT | fetch_ticker failed: 'DummyExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:53:53,163 | WARNING | root | logging_utils | exchange | fetch_balance failed: 'DummyExchange' object has no attribute 'fetch_balance'
+2025-12-12 13:53:53,163 | WARNING | root | main | health | BTC/USDT | fetch_balance failed: 'DummyExchange' object has no attribute 'fetch_balance'
+2025-12-12 13:53:53,163 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:53:53,163 | WARNING | root | main | health | BTC/USDT | fetch_ticker retry failed: 'DummyExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:53:53,264 | WARNING | root | risk_management | confirm_trend: no valid TF votes; treating as weak_trend
+2025-12-12 13:53:53,277 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,277 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,277 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,278 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,278 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,278 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,287 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,287 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,287 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,288 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,288 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,288 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,301 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,301 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,301 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,301 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,301 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,301 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,311 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,311 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,311 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,311 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,311 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,311 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,313 | WARNING | root | logging_utils | data | BTC/USDT | 5m returned no candles
+2025-12-12 13:53:53,314 | WARNING | root | logging_utils | data | BTC/USDT | 15m returned no candles
+2025-12-12 13:53:53,315 | WARNING | root | logging_utils | data | BTC/USDT | 30m returned no candles
+2025-12-12 13:53:53,316 | WARNING | root | logging_utils | data | BTC/USDT | 1h returned no candles
+2025-12-12 13:53:53,317 | WARNING | root | logging_utils | data | BTC/USDT | 4h returned no candles
+2025-12-12 13:53:53,318 | WARNING | root | logging_utils | data | BTC/USDT | 12h returned no candles
+2025-12-12 13:53:53,319 | WARNING | root | logging_utils | data | BTC/USDT | 1d returned no candles
+2025-12-12 13:53:53,320 | WARNING | root | logging_utils | data | BTC/USDT | no OHLCV for required timeframes; skipping
+2025-12-12 13:53:53,321 | WARNING | root | main | backtest | BTC/USDT | data unavailable
+2025-12-12 13:53:53,332 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,332 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,332 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,332 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,332 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,333 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,335 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:53:53,354 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:53:53,375 | ERROR | root | logging_utils | register_trade_result failed
+Traceback (most recent call last):
+  File "/app/logging_utils.py", line 2410, in log_exit_from_order
+    register_trade_result(symbol, profit, trade_log_path)
+  File "/app/main.py", line 2633, in register_trade_result
+    stats.register(symbol, profit)
+    ^^^^^^^^^^^^^^
+AttributeError: 'DummyStats' object has no attribute 'register'
+2025-12-12 13:53:53,380 | WARNING | root | logging_utils | positions | BTC/USDT | fallback to generic fetch_positions: _setup_env.<locals>.DummyExchange.fetch_positions() takes from 1 to 2 positional arguments but 3 were given
+2025-12-12 13:53:53,804 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,804 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:53,805 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:53,805 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:53,805 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:53,805 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:53,807 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:53:53,826 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:53:53,847 | ERROR | root | logging_utils | register_trade_result failed
+Traceback (most recent call last):
+  File "/app/logging_utils.py", line 2410, in log_exit_from_order
+    register_trade_result(symbol, profit, trade_log_path)
+  File "/app/main.py", line 2633, in register_trade_result
+    stats.register(symbol, profit)
+    ^^^^^^^^^^^^^^
+AttributeError: 'DummyStats' object has no attribute 'register'
+2025-12-12 13:53:54,172 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:54,172 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:54,172 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:54,172 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:54,172 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:54,173 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:54,191 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:54,191 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:53:54,192 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:53:54,192 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:53:54,192 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:53:54,192 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:53:54,242 | WARNING | root | symbol_utils | filter | markets unavailable, skipping symbol-filter: 'DummyAdapter' object has no attribute 'load_markets'
+2025-12-12 13:53:54,244 | WARNING | root | symbol_utils | filter | markets unavailable, skipping symbol-filter: 'DummyAdapter' object has no attribute 'load_markets'
+2025-12-12 13:55:12,346 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:12,346 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:12,346 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:12,346 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:12,346 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:12,347 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:12,424 | WARNING | root | exchange_adapter | adapter | fetch_open_orders failed: boom
+2025-12-12 13:55:12,556 | WARNING | root | symbol_utils | filter | markets unavailable, skipping symbol-filter: boom
+2025-12-12 13:55:12,556 | WARNING | root | exchange_adapter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:12,643 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:12,721 | WARNING | root | logging_utils | adapter | fetch_ohlcv fallback failed exchange=binance symbol=BTC/USDT timeframe=5m: 'binance' object has no attribute 'fetch_ohlcv'
+2025-12-12 13:55:12,721 | WARNING | root | exchange_adapter | adapter | BTC/USDT | failed 5m
+2025-12-12 13:55:12,724 | WARNING | root | exchange_adapter | adapter | fetch_ohlcv failed url= params={'symbol': 'BTC/USDT', 'timeframe': '1m', 'limit': 1, 'request_params': {'category': 'linear'}} status=0 error=boom
+2025-12-12 13:55:12,867 | WARNING | root | main | exit_guard | BTC/USDT | fetch_open_orders failed: temporary outage
+2025-12-12 13:55:12,880 | ERROR | root | logging_utils | fallback | BTC/USDT | fetch failed: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv'
+2025-12-12 13:55:14,976 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:14,977 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:14,977 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:14,977 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:14,977 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:14,977 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:14,987 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:14,987 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:14,988 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:14,988 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:14,988 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:14,988 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,046 | WARNING | root | main | model | TEST | adding synthetic samples for classes [0]
+2025-12-12 13:55:15,060 | ERROR | root | model_utils | model | retrain failed: retrain_global_model() missing 3 required positional arguments: 'df_features', 'df_target', and 'feature_cols'; falling back to XGBoost
+2025-12-12 13:55:15,105 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,106 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,106 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,106 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,106 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,106 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,117 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,117 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,118 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,118 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,118 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,118 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,123 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:55:15,124 | WARNING | root | main | startup | fetch_positions failed: 'DummyExchange' object has no attribute 'fetch_positions'
+2025-12-12 13:55:15,125 | WARNING | root | main | health | BTC/USDT | fetch_ticker failed: 'DummyExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:55:15,125 | WARNING | root | logging_utils | exchange | fetch_balance failed: 'DummyExchange' object has no attribute 'fetch_balance'
+2025-12-12 13:55:15,125 | WARNING | root | main | health | BTC/USDT | fetch_balance failed: 'DummyExchange' object has no attribute 'fetch_balance'
+2025-12-12 13:55:15,125 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:55:15,125 | WARNING | root | main | health | BTC/USDT | fetch_ticker retry failed: 'DummyExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:55:15,226 | WARNING | root | risk_management | confirm_trend: no valid TF votes; treating as weak_trend
+2025-12-12 13:55:15,238 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,239 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,239 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,239 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,239 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,239 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,249 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,249 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,249 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,249 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,249 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,250 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,261 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,262 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,262 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,262 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,262 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,262 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,272 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,273 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,273 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,273 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,273 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,273 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,275 | WARNING | root | logging_utils | data | BTC/USDT | 5m returned no candles
+2025-12-12 13:55:15,276 | WARNING | root | logging_utils | data | BTC/USDT | 15m returned no candles
+2025-12-12 13:55:15,277 | WARNING | root | logging_utils | data | BTC/USDT | 30m returned no candles
+2025-12-12 13:55:15,278 | WARNING | root | logging_utils | data | BTC/USDT | 1h returned no candles
+2025-12-12 13:55:15,279 | WARNING | root | logging_utils | data | BTC/USDT | 4h returned no candles
+2025-12-12 13:55:15,280 | WARNING | root | logging_utils | data | BTC/USDT | 12h returned no candles
+2025-12-12 13:55:15,280 | WARNING | root | logging_utils | data | BTC/USDT | 1d returned no candles
+2025-12-12 13:55:15,281 | WARNING | root | logging_utils | data | BTC/USDT | no OHLCV for required timeframes; skipping
+2025-12-12 13:55:15,283 | WARNING | root | main | backtest | BTC/USDT | data unavailable
+2025-12-12 13:55:15,294 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,294 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,294 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,295 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,295 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,295 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,297 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:55:15,321 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:55:15,342 | ERROR | root | logging_utils | register_trade_result failed
+Traceback (most recent call last):
+  File "/app/logging_utils.py", line 2410, in log_exit_from_order
+    register_trade_result(symbol, profit, trade_log_path)
+  File "/app/main.py", line 2634, in register_trade_result
+    limiter.register(symbol, profit)
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'DummyLimiter' object has no attribute 'register'
+2025-12-12 13:55:15,348 | WARNING | root | logging_utils | positions | BTC/USDT | fallback to generic fetch_positions: _setup_env.<locals>.DummyExchange.fetch_positions() takes from 1 to 2 positional arguments but 3 were given
+2025-12-12 13:55:15,373 | ERROR | root | logging_utils | predict | BTC/USDT | model lacks predict_proba; fallback
+2025-12-12 13:55:15,416 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:55:15,434 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:55:15,452 | WARNING | root | main | backtest | BTC/USDT | data unavailable, proceeding
+2025-12-12 13:55:15,535 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,535 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,535 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,535 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,535 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,536 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,538 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:55:15,557 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:55:15,578 | ERROR | root | logging_utils | register_trade_result failed
+Traceback (most recent call last):
+  File "/app/logging_utils.py", line 2410, in log_exit_from_order
+    register_trade_result(symbol, profit, trade_log_path)
+  File "/app/main.py", line 2634, in register_trade_result
+    limiter.register(symbol, profit)
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'DummyLimiter' object has no attribute 'register'
+2025-12-12 13:55:15,649 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:55:15,668 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:55:15,686 | WARNING | root | main | backtest | BTC/USDT | data unavailable, proceeding
+2025-12-12 13:55:15,802 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,803 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,803 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,803 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,803 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,803 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,822 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,822 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:55:15,822 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:55:15,822 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:55:15,822 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:55:15,823 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:55:15,872 | WARNING | root | symbol_utils | filter | markets unavailable, skipping symbol-filter: 'DummyAdapter' object has no attribute 'load_markets'
+2025-12-12 13:55:15,874 | WARNING | root | symbol_utils | filter | markets unavailable, skipping symbol-filter: 'DummyAdapter' object has no attribute 'load_markets'
+2025-12-12 13:56:22,608 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:22,608 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:22,608 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:22,609 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:22,609 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:22,609 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:22,673 | WARNING | root | exchange_adapter | adapter | fetch_open_orders failed: boom
+2025-12-12 13:56:22,806 | WARNING | root | symbol_utils | filter | markets unavailable, skipping symbol-filter: boom
+2025-12-12 13:56:22,806 | WARNING | root | exchange_adapter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:22,894 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:22,896 | WARNING | root | logging_utils | adapter | fetch_ohlcv fallback failed exchange=binance symbol=BTC/USDT timeframe=5m: 'binance' object has no attribute 'fetch_ohlcv'
+2025-12-12 13:56:22,896 | WARNING | root | exchange_adapter | adapter | BTC/USDT | failed 5m
+2025-12-12 13:56:22,899 | WARNING | root | exchange_adapter | adapter | fetch_ohlcv failed url= params={'symbol': 'BTC/USDT', 'timeframe': '1m', 'limit': 1, 'request_params': {'category': 'linear'}} status=0 error=boom
+2025-12-12 13:56:23,044 | WARNING | root | main | exit_guard | BTC/USDT | fetch_open_orders failed: temporary outage
+2025-12-12 13:56:23,057 | ERROR | root | logging_utils | fallback | BTC/USDT | fetch failed: 'DummyExchangeAdapter' object has no attribute 'fetch_ohlcv'
+2025-12-12 13:56:25,156 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,156 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,156 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,156 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,157 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,157 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,167 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,167 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,168 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,168 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,168 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,168 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,227 | WARNING | root | main | model | TEST | adding synthetic samples for classes [0]
+2025-12-12 13:56:25,241 | ERROR | root | model_utils | model | retrain failed: retrain_global_model() missing 3 required positional arguments: 'df_features', 'df_target', and 'feature_cols'; falling back to XGBoost
+2025-12-12 13:56:25,286 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,287 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,287 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,287 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,287 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,287 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,299 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,299 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,299 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,299 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,299 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,299 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,305 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:56:25,306 | WARNING | root | main | startup | fetch_positions failed: 'DummyExchange' object has no attribute 'fetch_positions'
+2025-12-12 13:56:25,306 | WARNING | root | main | health | BTC/USDT | fetch_ticker failed: 'DummyExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:56:25,306 | WARNING | root | logging_utils | exchange | fetch_balance failed: 'DummyExchange' object has no attribute 'fetch_balance'
+2025-12-12 13:56:25,307 | WARNING | root | main | health | BTC/USDT | fetch_balance failed: 'DummyExchange' object has no attribute 'fetch_balance'
+2025-12-12 13:56:25,307 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:56:25,307 | WARNING | root | main | health | BTC/USDT | fetch_ticker retry failed: 'DummyExchange' object has no attribute 'fetch_ticker'
+2025-12-12 13:56:25,407 | WARNING | root | risk_management | confirm_trend: no valid TF votes; treating as weak_trend
+2025-12-12 13:56:25,420 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,420 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,420 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,420 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,420 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,420 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,430 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,431 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,431 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,431 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,431 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,431 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,443 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,443 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,444 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,444 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,444 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,444 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,454 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,454 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,455 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,455 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,455 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,455 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,457 | WARNING | root | logging_utils | data | BTC/USDT | 5m returned no candles
+2025-12-12 13:56:25,458 | WARNING | root | logging_utils | data | BTC/USDT | 15m returned no candles
+2025-12-12 13:56:25,458 | WARNING | root | logging_utils | data | BTC/USDT | 30m returned no candles
+2025-12-12 13:56:25,459 | WARNING | root | logging_utils | data | BTC/USDT | 1h returned no candles
+2025-12-12 13:56:25,460 | WARNING | root | logging_utils | data | BTC/USDT | 4h returned no candles
+2025-12-12 13:56:25,461 | WARNING | root | logging_utils | data | BTC/USDT | 12h returned no candles
+2025-12-12 13:56:25,462 | WARNING | root | logging_utils | data | BTC/USDT | 1d returned no candles
+2025-12-12 13:56:25,462 | WARNING | root | logging_utils | data | BTC/USDT | no OHLCV for required timeframes; skipping
+2025-12-12 13:56:25,463 | WARNING | root | main | backtest | BTC/USDT | data unavailable
+2025-12-12 13:56:25,475 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,475 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,475 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,475 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,475 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,476 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,478 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:56:25,501 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:56:25,523 | ERROR | root | logging_utils | register_trade_result failed
+Traceback (most recent call last):
+  File "/app/logging_utils.py", line 2410, in log_exit_from_order
+    register_trade_result(symbol, profit, trade_log_path)
+  File "/app/main.py", line 2634, in register_trade_result
+    limiter.register(symbol, profit)
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'DummyLimiter' object has no attribute 'register'
+2025-12-12 13:56:25,528 | WARNING | root | logging_utils | positions | BTC/USDT | fallback to generic fetch_positions: _setup_env.<locals>.DummyExchange.fetch_positions() takes from 1 to 2 positional arguments but 3 were given
+2025-12-12 13:56:25,554 | ERROR | root | logging_utils | predict | BTC/USDT | model lacks predict_proba; fallback
+2025-12-12 13:56:25,595 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:56:25,613 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:56:25,631 | WARNING | root | main | backtest | BTC/USDT | data unavailable, proceeding
+2025-12-12 13:56:25,712 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,712 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,712 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,713 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,713 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,713 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,715 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:56:25,733 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:56:25,755 | ERROR | root | logging_utils | register_trade_result failed
+Traceback (most recent call last):
+  File "/app/logging_utils.py", line 2410, in log_exit_from_order
+    register_trade_result(symbol, profit, trade_log_path)
+  File "/app/main.py", line 2634, in register_trade_result
+    limiter.register(symbol, profit)
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'DummyLimiter' object has no attribute 'register'
+2025-12-12 13:56:25,824 | WARNING | root | main | run_bot | GLOBAL_MODEL lacks predict_proba; using deterministic fallback
+2025-12-12 13:56:25,844 | WARNING | root | risk_management | risk | BTC/USDT | exchange unavailable for sizing
+2025-12-12 13:56:25,861 | WARNING | root | main | backtest | BTC/USDT | data unavailable, proceeding
+2025-12-12 13:56:25,979 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,979 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,980 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,980 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:25,980 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:25,980 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:25,999 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:25,999 | WARNING | root | exchange_adapter | adapter | bybit unusable: AdapterInitError('bybit: fetchOHLCV not available')
+2025-12-12 13:56:25,999 | WARNING | root | exchange_adapter | adapter | markets empty after load; continuing with empty markets
+2025-12-12 13:56:26,000 | WARNING | root | exchange_adapter | adapter | binance unusable: AdapterInitError('binance: fetchOHLCV not available')
+2025-12-12 13:56:26,000 | ERROR | root | main | main | adapter init failed: No usable CCXT exchange class with fetch_ohlcv (ccxt=?). Tried: ['bybit', 'binance']
+2025-12-12 13:56:26,000 | WARNING | root | exchange_adapter | filter | empty markets set, skipping symbol-filter
+2025-12-12 13:56:26,048 | WARNING | root | symbol_utils | filter | markets unavailable, skipping symbol-filter: 'DummyAdapter' object has no attribute 'load_markets'
+2025-12-12 13:56:26,050 | WARNING | root | symbol_utils | filter | markets unavailable, skipping symbol-filter: 'DummyAdapter' object has no attribute 'load_markets'
