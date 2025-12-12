@@ -3094,7 +3094,17 @@ def _adjust_qty_for_margin(
     """Return quantity adjusted for available margin or ``None`` if impossible."""
 
     effective_leverage = max(float(leverage) or 0.0, 1.0)
-    adjusted_qty = float(exchange.amount_to_precision(symbol, qty))
+    try:
+        adjusted_qty = float(exchange.amount_to_precision(symbol, qty))
+    except ccxt.BaseError as exc:
+        log_once(
+            "warning",
+            f"trade | {symbol} | amount_to_precision failed: {exc}",
+            window_sec=300.0,
+        )
+        return None, "bad_symbol"
+    except Exception:
+        raise
     attempts = 0
     available = max(float(available_margin or 0.0), 0.0)
 
