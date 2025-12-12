@@ -1,3 +1,4 @@
 __pycache__/
 pattern_model.pt
 bot_memory.json
+\n# Log files\nbot.log\nlogs/\n\n# Data files\ndecision_log.csv\nequity_curve.csv\npair_report.csv\nprofit_report.csv\ntrades_log.csv\nbest_params.json\n

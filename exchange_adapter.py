@@ -403,6 +403,17 @@ def validate_api(exchange) -> None:
 def safe_fetch_closed_orders(exchange, symbol: str | None = None, limit: int = 50, params: dict | None = None):
     """Return closed orders without raising on failures."""
 
+    # Check if the exchange is Bybit
+    is_bybit = 'bybit' in exchange.id.lower()
+
+    # Prepare symbol and params for Bybit
+    if is_bybit and symbol:
+        if symbol.endswith('/USDT') and ':' not in symbol:
+            symbol = f"{symbol}:USDT"
+        if params is None:
+            params = {}
+        params['category'] = 'linear'
+
     try:
         return exchange.fetch_closed_orders(symbol, None, limit, params or {})
     except TypeError:
@@ -1589,6 +1600,10 @@ class ExchangeAdapter:
 
         try:
             ex = getattr(self, "x", None)
+            is_bybit = 'bybit' in ex.id.lower()
+            if is_bybit and symbol:
+                if symbol.endswith('/USDT') and ':' not in symbol:
+                    symbol = f"{symbol}:USDT"
             normalized_symbol = self._ccxt_symbol(symbol) if symbol else symbol
             params = self._default_params(symbol=symbol)
             if ex and hasattr(ex, "fetch_open_orders"):
@@ -1622,6 +1637,11 @@ class ExchangeAdapter:
         try:
             if not getattr(self, "x", None):
                 return (0, [])
+
+            is_bybit = 'bybit' in self.x.id.lower()
+            if is_bybit and symbol:
+                if symbol.endswith('/USDT') and ':' not in symbol:
+                    symbol = f"{symbol}:USDT"
 
             cnt, ids = self.fetch_open_orders(symbol)
             if not cnt:
