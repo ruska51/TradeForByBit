@@ -3318,6 +3318,30 @@ def place_conditional_exit(
             except Exception:
                 continue
 
+    if _is_bybit_exchange(exchange):
+        try:
+            params = {
+                "category": cat,
+                "tpSlMode": "Full",
+                "triggerBy": "LastPrice",
+            }
+            kwargs = {}
+            if is_tp:
+                kwargs["takeProfitPrice"] = float(trig_val)
+            else:
+                kwargs["stopLossPrice"] = float(trig_val)
+
+            exchange.set_trading_stop(norm_symbol, **kwargs, params=params)
+            logging.info(
+                "order | %s | conditional %s set @ %.4f via trading stop",
+                symbol,
+                "TP" if is_tp else "SL",
+                trig_val,
+            )
+            return f"tpsl_{symbol.replace('/', '')}", None
+        except Exception as exc:
+            return None, str(exc)
+
     params = {
         "category": cat,
         "triggerPrice": float(trig_val),

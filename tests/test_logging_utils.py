@@ -244,6 +244,12 @@ class BybitExitExchange:
         self.calls.append((order_type, side, qty, price, params))
         return {"id": "3", "status": "FILLED", "filled": qty}
 
+    def set_trading_stop(self, symbol, takeProfitPrice=None, stopLossPrice=None, params=None):
+        self.calls.append(
+            ("set_trading_stop", symbol, takeProfitPrice, stopLossPrice, params)
+        )
+        return {"result": {"list": [{"orderId": "tpsl-1"}]}}
+
 
 class BybitSpotMetaExchange:
     id = "bybit"
@@ -525,18 +531,14 @@ def test_place_conditional_exit_normalized(caplog):
         "linear",
         is_tp=False,
     )
-    assert order_id == "3"
+    assert order_id is not None
     assert err is None
-    assert ex.calls, "Expected create_order to be invoked"
-    otype, side, qty, price, params = ex.calls[-1]
-    assert otype == "STOP_MARKET"
-    assert side == "sell"
-    assert qty == pytest.approx(1.0)
-    assert price is None
-    assert params["slOrderType"] == "Market"
-    assert params["slTriggerBy"] == "LastPrice"
-    assert params["triggerPrice"] == pytest.approx(980.0, rel=1e-4)
-    assert params["triggerDirection"] == 2
+    assert ex.calls, "Expected set_trading_stop to be invoked"
+    method, symbol, take_profit, stop_loss, params = ex.calls[0]
+    assert method == "set_trading_stop"
+    assert symbol == "ETH/USDT"
+    assert take_profit is None
+    assert stop_loss == pytest.approx(980.0, rel=1e-4)
 
     order_id_tp, err_tp = place_conditional_exit(
         ex,
@@ -548,17 +550,13 @@ def test_place_conditional_exit_normalized(caplog):
         "linear",
         is_tp=True,
     )
-    assert order_id_tp == "3"
+    assert order_id_tp is not None
     assert err_tp is None
-    otype_tp, side_tp, qty_tp, price_tp, params_tp = ex.calls[-1]
-    assert otype_tp == "TAKE_PROFIT_MARKET"
-    assert side_tp == "sell"
-    assert qty_tp == pytest.approx(1.0)
-    assert price_tp is None
-    assert params_tp["tpOrderType"] == "Market"
-    assert params_tp["tpTriggerBy"] == "LastPrice"
-    assert params_tp["triggerDirection"] == 1
-    assert params_tp["triggerPrice"] == pytest.approx(1020.0, rel=1e-4)
+    method_tp, symbol_tp, take_profit_tp, stop_loss_tp, params_tp = ex.calls[-1]
+    assert method_tp == "set_trading_stop"
+    assert symbol_tp == "ETH/USDT"
+    assert take_profit_tp == pytest.approx(1020.0, rel=1e-4)
+    assert stop_loss_tp is None
 
 
 def test_safe_create_order_loads_markets_before_symbol_normalization():

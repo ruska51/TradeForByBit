@@ -39,7 +39,7 @@ def _default_time_stop_bars() -> int:
 time_stop_bars: int = _default_time_stop_bars()
 
 # [ANCHOR:TRAIL_PARAMS]
-TRAIL_ACTIVATE_R: float = 0.5
+TRAIL_ACTIVATE_R: float = 0.3
 TRAIL_ACTIVATE_ATR: float = 0.75
 TRAIL_OFFSET_ATR: float = 1.2
 TRAIL_MIN_TICKS: int = 3
@@ -226,18 +226,11 @@ def calc_sl_tp(
     except (TypeError, ValueError, AttributeError):
         sl_mult = 2.0
     try:
-        tp_mult = float(params.get("tp_mult", 4.0))
+        tp_mult = float(params.get("tp_mult", 3.0))
     except (TypeError, ValueError, AttributeError):
-        tp_mult = 4.0
+        tp_mult = 3.0
 
     atr_pct = atr_val / price if price else 0.0
-    if atr_pct < 0.5:
-        sl_mult *= 3.0
-        tp_mult *= 3.0
-    # если ATR менее 0.5%, множители увеличиваем в 3 раза
-    if atr_pct < 0.005:
-        sl_mult *= 3.0
-        tp_mult *= 3.0
 
     sl_pct = max(sl_mult * atr_pct, 0.005)
     tp_pct = max(tp_mult * atr_pct, 0.01)
