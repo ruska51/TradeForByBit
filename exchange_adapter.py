@@ -10,6 +10,7 @@ import csv
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
+from types import MethodType
 
 from logging_utils import (
     log,
@@ -777,6 +778,7 @@ class ExchangeAdapter:
                 self.backend = "ccxt"
                 self.ccxt_id = name
                 self.markets_loaded_at = time.time()
+                self._ensure_trading_stop()
                 validate_api(self.x)
                 logging.info("adapter | switched backend to ccxt:%s", name)
                 logging.info(
@@ -797,6 +799,61 @@ class ExchangeAdapter:
             f"Tried: {tried}"
         )
         raise AdapterInitError(msg) from last_err
+
+    # ------------------------------------------------------------------
+    def _ensure_trading_stop(self) -> None:
+        """Attach a Bybit trading-stop shim when ccxt lacks the helper."""
+
+        ex = getattr(self, "x", None)
+        if not ex:
+            return
+
+        ex_id = str(getattr(ex, "id", "") or "").lower()
+        if "bybit" not in ex_id:
+            return
+
+        if getattr(ex, "set_trading_stop", None) or getattr(ex, "setTradingStop", None):
+            return
+
+        trading_stop_call = getattr(ex, "private_post_v5_position_trading_stop", None)
+        if not callable(trading_stop_call):
+            return
+
+        def _patched_trading_stop(
+            self_ex,
+            symbol,
+            takeProfitPrice=None,
+            stopLossPrice=None,
+            params=None,
+        ):
+            params_base = dict(params or {})
+            params_base.setdefault("category", "linear")
+            params_base.setdefault("tpSlMode", "Full")
+            params_base.setdefault("triggerBy", "LastPrice")
+            params_base.setdefault("positionIdx", 0)
+
+            ccxt_symbol = _ccxt_symbol(symbol)
+            if ccxt_symbol:
+                params_base.setdefault("symbol", ccxt_symbol.upper())
+
+            if takeProfitPrice is not None:
+                try:
+                    tp_precise = self_ex.price_to_precision(symbol, takeProfitPrice)
+                    params_base["takeProfit"] = float(tp_precise)
+                except Exception:
+                    params_base["takeProfit"] = takeProfitPrice
+            if stopLossPrice is not None:
+                try:
+                    sl_precise = self_ex.price_to_precision(symbol, stopLossPrice)
+                    params_base["stopLoss"] = float(sl_precise)
+                except Exception:
+                    params_base["stopLoss"] = stopLossPrice
+
+            return trading_stop_call(params_base)
+
+        bound = MethodType(_patched_trading_stop, ex)
+        ex.set_trading_stop = bound
+        ex.setTradingStop = bound
 
     # ------------------------------------------------------------------
     def load_markets_safe(self) -> bool:

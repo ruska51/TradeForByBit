@@ -3567,66 +3567,63 @@ def run_trade(
     if not tp_pct_eff or not math.isfinite(tp_pct_eff):
         tp_pct_eff = TP_PCT
 
-    if pos_abs_after > 0:
-        try:
-            _, err = place_conditional_exit(
-                ADAPTER.x,
-                symbol,
-                "buy" if want_long else "sell",
-                entry_price,
-                price,
-                sl_pct_eff,
-                category,
-                is_tp=False,
-            )
-            if err:
-                log_once("warning", f"Failed to set SL for {symbol}: {err}")
-        except RuntimeError as exc:
-            log_once("warning", f"Failed to set SL for {symbol}: {exc}")
-        except Exception as exc:
-            log_once("warning", f"Failed to set SL for {symbol}: {exc}")
+    try:
+        _, err = place_conditional_exit(
+            ADAPTER.x,
+            symbol,
+            "buy" if want_long else "sell",
+            entry_price,
+            price,
+            sl_pct_eff,
+            category,
+            is_tp=False,
+        )
+        if err:
+            log_once("warning", f"Failed to set SL for {symbol}: {err}")
+    except RuntimeError as exc:
+        log_once("warning", f"Failed to set SL for {symbol}: {exc}")
+    except Exception as exc:
+        log_once("warning", f"Failed to set SL for {symbol}: {exc}")
 
-        try:
-            order_id, err = place_conditional_exit(
-                ADAPTER.x,
-                symbol,
-                "buy" if want_long else "sell",
-                entry_price,
-                price,
-                tp_pct_eff,
-                category,
-                is_tp=True,
-            )
-        except RuntimeError as exc:
-            err_lower = str(exc).lower()
-            if not (
-                err_lower.startswith("exit skipped")
-                or err_lower.startswith("exit postponed")
-                or "нет позиции" in err_lower
-            ):
-                log_once(
-                    "warning",
-                    f"Failed to set TP (conditional) for {symbol}: {exc}",
-                )
-        except Exception as exc:
+    try:
+        order_id, err = place_conditional_exit(
+            ADAPTER.x,
+            symbol,
+            "buy" if want_long else "sell",
+            entry_price,
+            price,
+            tp_pct_eff,
+            category,
+            is_tp=True,
+        )
+    except RuntimeError as exc:
+        err_lower = str(exc).lower()
+        if not (
+            err_lower.startswith("exit skipped")
+            or err_lower.startswith("exit postponed")
+            or "нет позиции" in err_lower
+        ):
             log_once(
-                "warning", f"Failed to set TP (conditional) for {symbol}: {exc}"
+                "warning",
+                f"Failed to set TP (conditional) for {symbol}: {exc}",
             )
-        else:
-            if err and not (
-                str(err).lower().startswith("exit skipped")
-                or str(err).lower().startswith("exit postponed")
-            ):
-                log_once(
-                    "warning",
-                    f"Failed to set TP (conditional) for {symbol}: {err}",
-                )
-            elif order_id:
-                logging.info(
-                    "exit | %s | Take-profit conditional order placed at %.4f",
-                    symbol,
-                    tp_price,
-                )
+    except Exception as exc:
+        log_once("warning", f"Failed to set TP (conditional) for {symbol}: {exc}")
+    else:
+        if err and not (
+            str(err).lower().startswith("exit skipped")
+            or str(err).lower().startswith("exit postponed")
+        ):
+            log_once(
+                "warning",
+                f"Failed to set TP (conditional) for {symbol}: {err}",
+            )
+        elif order_id:
+            logging.info(
+                "exit | %s | Take-profit conditional order placed at %.4f",
+                symbol,
+                tp_price,
+            )
 
     qty = float(pos_abs_after or detected_qty or filled_qty)
     try:
@@ -3636,6 +3633,9 @@ def run_trade(
     if not math.isfinite(entry_price_logged):
         entry_price_logged = float(price or 0.0)
     qty_logged = float(qty or 0.0)
+    # PATCH NOTES:
+    # 1) TP/SL now placed immediately after filled entry without waiting for position visibility.
+    # 2) Bybit trading-stop calls rely on patched support with required params.
     logging.info(
         "entry | %s | позиция открыта по цене %.4f, qty=%.3f",
         symbol,

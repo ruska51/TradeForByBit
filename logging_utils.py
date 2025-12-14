@@ -3329,6 +3329,7 @@ def place_conditional_exit(
                 "category": cat,
                 "tpSlMode": "Full",
                 "triggerBy": "LastPrice",
+                "positionIdx": 0,
             }
             kwargs = {}
             if is_tp:
