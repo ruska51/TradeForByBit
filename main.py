@@ -5073,20 +5073,23 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
             continue
 
     trigger_direction = BYBIT_TRIGGER_DIRECTIONS["falling" if qty_signed > 0 else "rising"]
+    position_idx = 1 if qty_signed > 0 else 2
     sl_params = {
         "category": cat,
         "triggerPrice": trigger_price,
         "triggerDirection": trigger_direction,
+        "triggerBy": "LastPrice",
         "reduceOnly": True,
         "closeOnTrigger": True,
         "slOrderType": "Market",
-        "slTriggerBy": "LastPrice",
+        "positionIdx": position_idx,
+        "tpSlMode": "Full",
     }
 
     try:
         exchange.create_order(
             norm_symbol,
-            "STOP_MARKET",
+            "Market",
             exit_side,
             amount_val,
             None,

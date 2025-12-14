@@ -36,9 +36,45 @@ def test_dry_cycle_builds_reports(tmp_path, monkeypatch):
 
     base = datetime(2024, 1, 1, tzinfo=timezone.utc)
     trades = [
-        ("BTC/USDT", 100.0, {"type": "TAKE_PROFIT_MARKET", "avgPrice": 110.0}, {}),
-        ("ETH/USDT", 200.0, {"type": "STOP_MARKET", "avgPrice": 190.0}, {}),
-        ("XRP/USDT", 50.0, {"type": "STOP_MARKET", "avgPrice": 55.0}, {"trailing_profit_used": True}),
+        (
+            "BTC/USDT",
+            100.0,
+            {
+                "type": "MARKET",
+                "orderType": "TAKE_PROFIT",
+                "triggerDirection": 1,
+                "closeOnTrigger": True,
+                "reduceOnly": True,
+                "avgPrice": 110.0,
+            },
+            {},
+        ),
+        (
+            "ETH/USDT",
+            200.0,
+            {
+                "type": "MARKET",
+                "orderType": "STOP",
+                "triggerDirection": 2,
+                "closeOnTrigger": True,
+                "reduceOnly": True,
+                "avgPrice": 190.0,
+            },
+            {},
+        ),
+        (
+            "XRP/USDT",
+            50.0,
+            {
+                "type": "MARKET",
+                "orderType": "STOP",
+                "triggerDirection": 2,
+                "closeOnTrigger": True,
+                "reduceOnly": True,
+                "avgPrice": 55.0,
+            },
+            {"trailing_profit_used": True},
+        ),
         ("LTC/USDT", 80.0, {"type": "MARKET", "avgPrice": 78.0}, {"exit_type_hint": "TIME"}),
     ]
 

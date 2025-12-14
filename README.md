@@ -121,18 +121,21 @@ entry using the V5 trigger format. Every protective order is created with
 ``reduceOnly=True`` and ``closeOnTrigger=True`` so it can only decrease the
 position size.
 
-For a stop-loss the bot submits a ``STOP_MARKET`` order without a price value:
+For a stop-loss the bot submits a ``Market`` order without a price value and a
+``triggerPrice``:
 
 ```python
 params_sl = {
     "triggerPrice": sl_price,
     "triggerDirection": 2,  # price must fall to hit the stop for a long
+    "triggerBy": "LastPrice",
     "reduceOnly": True,
     "closeOnTrigger": True,
     "slOrderType": "Market",
-    "slTriggerBy": "LastPrice",
+    "positionIdx": 1,  # long position
+    "tpSlMode": "Full",
 }
-exchange.create_order(symbol, "STOP_MARKET", exit_side, qty, None, params_sl)
+exchange.create_order(symbol, "Market", exit_side, qty, None, params_sl)
 ```
 
 The matching take-profit uses the ``tp`` keys while keeping the same trigger
@@ -142,12 +145,14 @@ structure:
 params_tp = {
     "triggerPrice": tp_price,
     "triggerDirection": 1,  # price must rise to hit the take-profit for a long
+    "triggerBy": "LastPrice",
     "reduceOnly": True,
     "closeOnTrigger": True,
     "tpOrderType": "Market",
-    "tpTriggerBy": "LastPrice",
+    "positionIdx": 1,  # long position
+    "tpSlMode": "Full",
 }
-exchange.create_order(symbol, "TAKE_PROFIT_MARKET", exit_side, qty, None, params_tp)
+exchange.create_order(symbol, "Market", exit_side, qty, None, params_tp)
 ```
 
 Legacy fields such as ``stopPrice``, ``closePosition`` and ``priceProtect`` are
