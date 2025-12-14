@@ -1162,6 +1162,7 @@ def get_last_price(exchange, symbol: str, category: str = "linear") -> float | N
         cat = "linear"
 
     norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+
     fetch_ticker = getattr(exchange, "fetch_ticker", None)
     if not callable(fetch_ticker):
         fetch_ticker = getattr(exchange, "fetchTicker", None)
@@ -3171,6 +3172,15 @@ def place_conditional_exit(
 
     norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
 
+    position_idx = 0
+    side_lower = str(side_open or "").lower()
+    if _is_bybit_exchange(exchange) and cat in {"linear", "inverse"}:
+        if side_lower in {"buy", "long"}:
+            position_idx = 1
+        elif side_lower in {"sell", "short"}:
+            position_idx = 2
+    tp_sl_mode = "Partial" if position_idx in {1, 2} else "Full"
+
     qty_signed, qty_abs = has_open_position(exchange, symbol, cat)
     try:
         qty_abs_val = float(qty_abs)
@@ -3318,6 +3328,7 @@ def place_conditional_exit(
             except Exception:
                 continue
 
+    trading_stop_error = None
     if _is_bybit_exchange(exchange):
         try:
             trading_stop = getattr(exchange, "set_trading_stop", None) or getattr(
@@ -3327,9 +3338,9 @@ def place_conditional_exit(
                 raise AttributeError("set_trading_stop missing")
             params = {
                 "category": cat,
-                "tpSlMode": "Full",
+                "tpSlMode": tp_sl_mode,
                 "triggerBy": "LastPrice",
-                "positionIdx": 0,
+                "positionIdx": position_idx,
             }
             kwargs = {}
             if is_tp:
@@ -3346,7 +3357,13 @@ def place_conditional_exit(
             )
             return f"tpsl_{symbol.replace('/', '')}", None
         except Exception as exc:
-            return None, str(exc)
+            trading_stop_error = str(exc)
+            log_once(
+                "warning",
+                f"order | {symbol} | trading_stop failed ({trading_stop_error});"
+                " using fallback order",
+                window_sec=30,
+            )
 
     params = {
         "category": cat,
@@ -3355,6 +3372,9 @@ def place_conditional_exit(
         "reduceOnly": True,
         "closeOnTrigger": True,
     }
+
+    if _is_bybit_exchange(exchange):
+        params.update({"positionIdx": position_idx, "tpSlMode": tp_sl_mode})
 
     if is_tp:
         params.update({"tpOrderType": "Market", "tpTriggerBy": "LastPrice"})
@@ -3368,6 +3388,8 @@ def place_conditional_exit(
             norm_symbol, order_type, exit_side, amount_val, None, params
         )
     except Exception as exc:
+        if trading_stop_error and trading_stop_error == str(exc):
+            return None, trading_stop_error
         return None, str(exc)
 
     order_id = None
