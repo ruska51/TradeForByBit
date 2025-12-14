@@ -2805,6 +2805,7 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
     symbol = normalized_symbol
 
     otype = str(order_type or "").lower()
+    upper_type = str(order_type or "").upper()
     requested_market = otype.endswith("market")
     side = str(side or "").lower()
     adj_price = None if requested_market else price
@@ -2841,7 +2842,7 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
 
     last_price = _extract_last_price()
     entry_price = adj_price
-    is_exit_order = any(tok in str(order_type).upper() for tok in ("STOP", "TAKE_PROFIT"))
+    is_exit_order = any(tok in upper_type for tok in ("STOP", "TAKE_PROFIT"))
     is_entry_order = not is_exit_order and otype in {"market", "limit"}
 
     if is_entry_order and last_price is not None:
@@ -2898,6 +2899,21 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
 
     final_params: dict | None = base_params
     if is_bybit:
+        # Убираем TP/SL параметры из ENTRY ордеров - они должны ставиться отдельными conditional orders
+        if not is_exit_order:
+            # Для entry ордеров НИКОГДА не включаем TP/SL параметры
+            params_dict = dict(base_params or {})
+            params_dict.pop("stopLoss", None)
+            params_dict.pop("takeProfit", None)
+            params_dict.pop("slOrderType", None)
+            params_dict.pop("tpOrderType", None)
+            params_dict.pop("tpSlMode", None)
+            params_dict.pop("tpslTriggerBy", None)
+            params_dict.pop("triggerPrice", None)
+            params_dict.pop("triggerDirection", None)
+        else:
+            params_dict = dict(base_params or {})
+
         def _normalize_trigger_direction_value(value):
             if value is None:
                 return None
@@ -2931,10 +2947,6 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                 return None
             return result
 
-        params_dict = dict(base_params or {})
-        upper_type = str(order_type or "").upper()
-        is_exit_order = any(tok in upper_type for tok in ("STOP", "TAKE_PROFIT"))
-
         stop_loss = _float_or_none(params_dict.get("stopLoss"))
         take_profit = _float_or_none(params_dict.get("takeProfit"))
         if not is_exit_order:
@@ -2948,12 +2960,6 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                 )
 
         sl_order_type = params_dict.get("slOrderType")
-        tpsl_trigger_by = (
-            params_dict.get("tpslTriggerBy")
-            or params_dict.get("tpsl_trigger_by")
-            or "MarkPrice"
-        )
-
         entry_reference = adj_price if adj_price is not None else last_price
         if entry_reference is None:
             entry_reference = price
@@ -3026,14 +3032,6 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
         else:
             params_dict.pop("positionIdx", None)
         resolved_category = cat
-
-        has_sl = params_dict.get("stopLoss") is not None
-        has_tp = params_dict.get("takeProfit") is not None
-        if not is_exit_order and (has_sl or has_tp):
-            params_dict.setdefault("tpSlMode", "Full")
-            params_dict.setdefault("tpslTriggerBy", tpsl_trigger_by)
-        if params_dict.get("slOrderType") and not (has_sl or has_tp):
-            params_dict.pop("slOrderType", None)
 
         if is_exit_order:
             for key in (
@@ -3211,8 +3209,6 @@ def place_conditional_exit(
             position_idx = 1
         elif side_lower in {"sell", "short"}:
             position_idx = 2
-    tp_sl_mode = "Partial" if position_idx in {1, 2} else "Full"
-
     qty_signed, qty_abs = has_open_position(exchange, symbol, cat)
     try:
         qty_abs_val = float(qty_abs)
@@ -3360,75 +3356,84 @@ def place_conditional_exit(
             except Exception:
                 continue
 
-    trading_stop_error = None
-    if _is_bybit_exchange(exchange):
+    trigger_map = (
+        getattr(sys.modules.get("main"), "BYBIT_TRIGGER_DIRECTIONS", {})
+        or globals().get("BYBIT_TRIGGER_DIRECTIONS", {})
+        or {}
+    )
+    falling_dir = trigger_map.get("falling", 2)
+    rising_dir = trigger_map.get("rising", 1)
+
+    is_stop = not is_tp
+    is_take_profit = is_tp
+    stop_price = trig_val
+
+    if is_stop:
+        if stop_price is None:
+            return None, None
         try:
-            trading_stop = getattr(exchange, "set_trading_stop", None) or getattr(
-                exchange, "setTradingStop", None
-            )
-            if trading_stop is None:
-                raise AttributeError("set_trading_stop missing")
-            params = {
-                "category": cat,
-                "tpSlMode": tp_sl_mode,
-                "triggerBy": "LastPrice",
-                "positionIdx": position_idx,
-            }
-            kwargs = {}
-            if is_tp:
-                kwargs["takeProfitPrice"] = float(trig_val)
-            else:
-                kwargs["stopLossPrice"] = float(trig_val)
+            stop_prec = float(exchange.price_to_precision(norm_symbol, stop_price))
+        except Exception:
+            stop_prec = float(stop_price)
 
-            trading_stop(norm_symbol, **kwargs, params=params)
-            logging.info(
-                "order | %s | conditional %s set @ %.4f via trading stop",
-                symbol,
-                "TP" if is_tp else "SL",
-                trig_val,
+        params_sl = {
+            "category": cat,
+            "triggerPrice": stop_prec,
+            "triggerDirection": falling_dir if side_open.lower() == "buy" else rising_dir,
+            "triggerBy": "LastPrice",
+            "reduceOnly": True,
+            "closeOnTrigger": True,
+            "positionIdx": position_idx,
+        }
+
+        try:
+            order = exchange.create_order(
+                norm_symbol,
+                "Market",  # тип ордера Market для conditional
+                exit_side,
+                amount_val,
+                None,  # price = None для Market
+                params_sl,
             )
-            return f"tpsl_{symbol.replace('/', '')}", None
+            if isinstance(order, dict):
+                return order.get("id") or order.get("orderId"), None
+            return None, None
         except Exception as exc:
-            trading_stop_error = str(exc)
-            log_once(
-                "warning",
-                f"order | {symbol} | trading_stop failed ({trading_stop_error});"
-                " using fallback order",
-                window_sec=30,
+            return None, str(exc)
+
+    if is_take_profit:
+        try:
+            tp_prec = float(exchange.price_to_precision(norm_symbol, stop_price))
+        except Exception:
+            tp_prec = float(stop_price)
+
+        params_tp = {
+            "category": cat,
+            "triggerPrice": tp_prec,
+            "triggerDirection": rising_dir if side_open.lower() == "sell" else falling_dir,
+            "triggerBy": "LastPrice",
+            "reduceOnly": True,
+            "closeOnTrigger": True,
+            "positionIdx": position_idx,
+        }
+
+        try:
+            order = exchange.create_order(
+                norm_symbol,
+                "Market",
+                exit_side,
+                amount_val,
+                None,
+                params_tp,
             )
+            if isinstance(order, dict):
+                return order.get("id") or order.get("orderId"), None
+            return None, None
+        except Exception as exc:
+            return None, str(exc)
 
-    params = {
-        "category": cat,
-        "triggerPrice": float(trig_val),
-        "triggerDirection": direction,
-        "triggerBy": "LastPrice",
-        "reduceOnly": True,
-        "closeOnTrigger": True,
-    }
+    return None, None
 
-    if _is_bybit_exchange(exchange):
-        params.update({"positionIdx": position_idx, "tpSlMode": tp_sl_mode})
-
-    if is_tp:
-        params.update({"tpOrderType": "Market"})
-    else:
-        params.update({"slOrderType": "Market"})
-    params = _clean_params(params)
-
-    order_type = "Market"
-    try:
-        resp = exchange.create_order(
-            norm_symbol, order_type, exit_side, amount_val, None, params
-        )
-    except Exception as exc:
-        if trading_stop_error and trading_stop_error == str(exc):
-            return None, trading_stop_error
-        return None, str(exc)
-
-    order_id = None
-    if isinstance(resp, dict):
-        order_id = resp.get("id") or resp.get("orderId")
-    return order_id, None
 
 
 def wait_position_after_entry(
