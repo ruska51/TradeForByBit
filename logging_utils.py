@@ -2297,13 +2297,27 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
             if trade_id in _LOGGED_EXIT_IDS and symbol not in open_trade_ctx:
                 return False
 
+            info = order.get("info", {}) if isinstance(order.get("info"), dict) else {}
             otype = (
                 str(
                     order.get("type")
-                    or order.get("info", {}).get("type")
-                    or order.get("info", {}).get("origType", "")
+                    or info.get("type")
+                    or info.get("origType", "")
                 ).upper()
             )
+            stop_type = str(
+                order.get("stopOrderType")
+                or order.get("orderType")
+                or info.get("stopOrderType")
+                or info.get("orderType", "")
+            ).upper()
+            trigger_dir = order.get("triggerDirection") or info.get("triggerDirection")
+            close_on_trigger = order.get("closeOnTrigger")
+            if close_on_trigger is None:
+                close_on_trigger = info.get("closeOnTrigger")
+            reduce_only = order.get("reduceOnly")
+            if reduce_only is None:
+                reduce_only = info.get("reduceOnly")
 
             price = next(
                 (
@@ -2342,9 +2356,27 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
             exit_hint = str(exit_hint_raw or "").upper()
             trail_active = bool(ctx.get("trailing_profit_used"))
 
-            if otype == "STOP_MARKET":
+            trigger_map: dict[str, Any] = {}
+            try:
+                import main as main_module  # type: ignore
+
+                trigger_map = getattr(main_module, "BYBIT_TRIGGER_DIRECTIONS", {}) or {}
+            except Exception:
+                trigger_map = globals().get("BYBIT_TRIGGER_DIRECTIONS", {}) or {}
+
+            falling_dir = trigger_map.get("falling", 2)
+            rising_dir = trigger_map.get("rising", 1)
+
+            is_stop = stop_type.startswith("STOP")
+            is_tp_kind = stop_type.startswith("TAKE_PROFIT")
+            is_close_trigger = bool(close_on_trigger and reduce_only)
+            if otype == "STOP_MARKET" or (
+                is_close_trigger and trigger_dir in {falling_dir, 2}
+            ) or is_stop:
                 exit_type = "TRAIL_STOP" if trail_active else "SL"
-            elif otype in {"TAKE_PROFIT", "TAKE_PROFIT_MARKET"}:
+            elif otype in {"TAKE_PROFIT", "TAKE_PROFIT_MARKET"} or (
+                is_close_trigger and trigger_dir in {rising_dir, 1}
+            ) or is_tp_kind:
                 exit_type = "TP"
             elif exit_hint == "TIME":
                 exit_type = "TIME"
@@ -3369,6 +3401,7 @@ def place_conditional_exit(
         "category": cat,
         "triggerPrice": float(trig_val),
         "triggerDirection": direction,
+        "triggerBy": "LastPrice",
         "reduceOnly": True,
         "closeOnTrigger": True,
     }
@@ -3377,12 +3410,12 @@ def place_conditional_exit(
         params.update({"positionIdx": position_idx, "tpSlMode": tp_sl_mode})
 
     if is_tp:
-        params.update({"tpOrderType": "Market", "tpTriggerBy": "LastPrice"})
+        params.update({"tpOrderType": "Market"})
     else:
-        params.update({"slOrderType": "Market", "slTriggerBy": "LastPrice"})
+        params.update({"slOrderType": "Market"})
     params = _clean_params(params)
 
-    order_type = "TAKE_PROFIT_MARKET" if is_tp else "STOP_MARKET"
+    order_type = "Market"
     try:
         resp = exchange.create_order(
             norm_symbol, order_type, exit_side, amount_val, None, params
