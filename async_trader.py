@@ -297,9 +297,20 @@ async def run_trade(
             if not kwargs:
                 return False
 
+            trading_stop = getattr(exchange, "set_trading_stop", None) or getattr(
+                exchange, "setTradingStop", None
+            )
+            if trading_stop is None:
+                log_once(
+                    "warning",
+                    f"order | {symbol} | trading stop method missing",
+                    window_sec=10.0,
+                )
+                return False
+
             try:
                 await asyncio.to_thread(
-                    exchange.set_trading_stop,
+                    trading_stop,
                     symbol,
                     **kwargs,
                     params=params,

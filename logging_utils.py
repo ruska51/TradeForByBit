@@ -3320,6 +3320,11 @@ def place_conditional_exit(
 
     if _is_bybit_exchange(exchange):
         try:
+            trading_stop = getattr(exchange, "set_trading_stop", None) or getattr(
+                exchange, "setTradingStop", None
+            )
+            if trading_stop is None:
+                raise AttributeError("set_trading_stop missing")
             params = {
                 "category": cat,
                 "tpSlMode": "Full",
@@ -3331,7 +3336,7 @@ def place_conditional_exit(
             else:
                 kwargs["stopLossPrice"] = float(trig_val)
 
-            exchange.set_trading_stop(norm_symbol, **kwargs, params=params)
+            trading_stop(norm_symbol, **kwargs, params=params)
             logging.info(
                 "order | %s | conditional %s set @ %.4f via trading stop",
                 symbol,
