@@ -3606,6 +3606,18 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
 
     exchange_id = str(getattr(exchange, "id", "") or "").lower()
 
+    if leverage is None:
+        log(logging.INFO, "leverage", symbol, "Leverage setup skipped (no value)")
+        return True
+
+    def _infer_category(sym: str) -> str | None:
+        sym_upper = str(sym or "").upper()
+        if "USDT" in sym_upper or ":USDT" in sym_upper:
+            return "linear"
+        if sym_upper.endswith("/USD") and "USDT" not in sym_upper:
+            return "inverse"
+        return None
+
     def _legacy_leverage_symbols(sym: str) -> list[str]:
         """Return leverage symbol candidates for direct CCXT calls."""
 
@@ -3634,6 +3646,7 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
 
         return result or [cleaned]
 
+    cat_norm: str | None = None
     try:
         market_cat = detect_market_category(exchange, symbol)
     except Exception as exc:
@@ -3654,6 +3667,7 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
                 window_sec=5.0,
             )
             return True
+        cat_norm = cat
     for attempt in range(attempts):
         try:
             L = set_valid_leverage(exchange, symbol, leverage)
@@ -3663,7 +3677,15 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
             last_error: Exception | None = None
             for idx, legacy_symbol in enumerate(legacy_symbols):
                 try:
-                    L = exchange.set_leverage(leverage, legacy_symbol)
+                    category = cat_norm or _infer_category(legacy_symbol) or _infer_category(symbol)
+                    leverage_params = {"category": category} if category else None
+                    try:
+                        if leverage_params is not None:
+                            L = exchange.set_leverage(leverage, legacy_symbol, leverage_params)
+                        else:
+                            L = exchange.set_leverage(leverage, legacy_symbol)
+                    except TypeError:
+                        L = exchange.set_leverage(leverage, legacy_symbol)
                 except Exception as exc:
                     last_error = exc
                     message = str(exc).lower()
@@ -3757,3 +3779,9 @@ def flush_cycle_logs() -> None:
 # - setup_logger использует RotatingFileHandler для app.log без ANSI-кодов.
 # Почему безопасно: без colorama уровень остаётся неизменным, файловый лог plain-text.
 # Критерии приёмки: консольный INFO зелёный, WARNING жёлтый, ERROR/CRITICAL красные; app.log ротируется в app.log.N.
+
+# PATCH NOTES (leverage):
+# - safe_set_leverage пропускает None и передаёт category для Bybit даже в legacy-вызовах.
+# - set_valid_leverage подбирает category из символа, если detect_market_category не дал явный тип.
+# Почему безопасно: меняются только параметры set_leverage, логика skip cross сохраняется.
+# Критерии приёмки: запросы к Bybit содержат category=linear|inverse, cross-режим продолжает возвращать LEVERAGE_SKIPPED.
