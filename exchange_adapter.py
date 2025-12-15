@@ -323,6 +323,13 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
     if cat_norm not in {"linear", "inverse"}:
         cat_norm = "linear"
 
+    if not cat or str(cat).lower() in {"", "swap"}:
+        symbol_upper = str(symbol or "").upper()
+        if "USDT" in symbol_upper or ":USDT" in symbol_upper:
+            cat_norm = "linear"
+        elif symbol_upper.endswith("/USD") and "USDT" not in symbol_upper:
+            cat_norm = "inverse"
+
     exchange_id = str(getattr(exchange, "id", "") or "").lower()
     if exchange_id == "bybit":
         symbol_candidates = _bybit_leverage_candidates(exchange, symbol)
