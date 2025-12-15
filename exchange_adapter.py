@@ -354,7 +354,14 @@ def set_valid_leverage(exchange, symbol: str, leverage: int | float):
                 "not linear",
             )
             if exchange_id == "bybit" and idx < len(symbol_candidates) - 1:
-                if any(token in lowered for token in retry_tokens):
+                request_param_error = "request parameter error" in lowered or "retcode:10001" in lowered
+                if any(token in lowered for token in retry_tokens) or request_param_error:
+                    if request_param_error:
+                        log_once(
+                            "info",
+                            f"leverage | {symbol} | retry (request parameter error)",
+                            window_sec=30.0,
+                        )
                     continue
             break
 
