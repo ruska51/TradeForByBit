@@ -3678,14 +3678,10 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
             for idx, legacy_symbol in enumerate(legacy_symbols):
                 try:
                     category = cat_norm or _infer_category(legacy_symbol) or _infer_category(symbol)
-                    leverage_params = {"category": category} if category else None
-                    try:
-                        if leverage_params is not None:
-                            L = exchange.set_leverage(leverage, legacy_symbol, leverage_params)
-                        else:
-                            L = exchange.set_leverage(leverage, legacy_symbol)
-                    except TypeError:
-                        L = exchange.set_leverage(leverage, legacy_symbol)
+                    if exchange_id == "bybit" and not category:
+                        category = "linear"
+                    leverage_params = {"category": category} if category else {}
+                    L = exchange.set_leverage(leverage, legacy_symbol, leverage_params)
                 except Exception as exc:
                     last_error = exc
                     message = str(exc).lower()
@@ -3781,7 +3777,7 @@ def flush_cycle_logs() -> None:
 # Критерии приёмки: консольный INFO зелёный, WARNING жёлтый, ERROR/CRITICAL красные; app.log ротируется в app.log.N.
 
 # PATCH NOTES (leverage):
-# - safe_set_leverage пропускает None и передаёт category для Bybit даже в legacy-вызовах.
+# - safe_set_leverage пропускает None и передаёт category для Bybit даже в legacy-вызовах, дефолт linear.
 # - set_valid_leverage подбирает category из символа, если detect_market_category не дал явный тип.
 # Почему безопасно: меняются только параметры set_leverage, логика skip cross сохраняется.
 # Критерии приёмки: запросы к Bybit содержат category=linear|inverse, cross-режим продолжает возвращать LEVERAGE_SKIPPED.
