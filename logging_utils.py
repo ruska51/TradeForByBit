@@ -215,6 +215,81 @@ def _clean_params(d: dict | None) -> dict | None:
     return out
 
 
+def _bybit_position_idx(
+    exchange, normalized_symbol: str, side: str, category: str
+) -> int | None:
+    """Return ``positionIdx`` when Bybit hedge mode is detected."""
+
+    if not _is_bybit_exchange(exchange):
+        return None
+
+    cat = str(category or "").lower()
+    if cat == "swap":
+        cat = "linear"
+    if cat not in {"linear", "inverse"}:
+        return None
+
+    def _is_hedge(value) -> bool:
+        if isinstance(value, str):
+            lowered = value.lower()
+            if "hedge" in lowered or "both" in lowered:
+                return True
+            if any(flag in lowered for flag in ("oneway", "merged", "single")):
+                return False
+        if isinstance(value, (int, float)):
+            try:
+                int_value = int(value)
+            except Exception:
+                int_value = None
+            if int_value is not None:
+                if int_value == 3:
+                    return True
+                if int_value in (0, 1):
+                    return False
+        return False
+
+    hedge_mode = False
+
+    options = getattr(exchange, "options", {}) or {}
+    for opt_key in ("defaultPositionMode", "positionMode"):
+        opt_value = options.get(opt_key)
+        if _is_hedge(opt_value):
+            hedge_mode = True
+            break
+    if options.get("hedgeMode") is True:
+        hedge_mode = True
+
+    market = None
+    try:
+        market_obj = exchange.market(normalized_symbol)
+        if isinstance(market_obj, dict):
+            market = market_obj
+    except Exception:
+        market = None
+
+    if market is None:
+        markets = getattr(exchange, "markets", {}) or {}
+        market = markets.get(normalized_symbol)
+
+    if isinstance(market, dict):
+        info = market.get("info") or {}
+        for value in (
+            market.get("positionMode"),
+            info.get("positionMode"),
+            info.get("positionModeV5"),
+            info.get("tradeMode"),
+        ):
+            if _is_hedge(value):
+                hedge_mode = True
+                break
+
+    if not hedge_mode:
+        return None
+
+    side_norm = side.lower()
+    return 1 if side_norm == "buy" else 2
+
+
 def enter_ensure_filled(
     exchange,
     symbol: str,
@@ -225,6 +300,7 @@ def enter_ensure_filled(
     """Place IOC limit near last, then market the remainder. Return filled qty."""
 
     normalized_symbol = _normalize_bybit_symbol(exchange, symbol, category)
+    position_idx = _bybit_position_idx(exchange, normalized_symbol, side, category)
     ticker = exchange.fetch_ticker(normalized_symbol, params={"category": category}) or {}
     last = float(
         ticker.get("last")
@@ -242,6 +318,8 @@ def enter_ensure_filled(
         price = float(price)
 
     params = {"category": category, "timeInForce": "IOC", "reduceOnly": False}
+    if position_idx is not None:
+        params["positionIdx"] = position_idx
     try:
         r = exchange.create_order(normalized_symbol, "limit", side, qty, price, params)
         filled1 = float(r.get("filled") or 0.0) if isinstance(r, dict) else 0.0
@@ -259,7 +337,11 @@ def enter_ensure_filled(
             side,
             remainder,
             None,
-            {"category": category, "reduceOnly": False},
+            {
+                "category": category,
+                "reduceOnly": False,
+                **({"positionIdx": position_idx} if position_idx is not None else {}),
+            },
         )
         if isinstance(r2, dict):
             filled2 = float(r2.get("filled") or remainder)
