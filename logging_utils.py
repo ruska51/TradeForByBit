@@ -214,6 +214,54 @@ def _clean_params(d: dict | None) -> dict | None:
         out[key] = value
     return out
 
+def _get_position_mode(exchange, symbol: str, category: str) -> str:
+    """Определяет текущий position mode (oneway или hedge)."""
+    if not _is_bybit_exchange(exchange):
+        return "oneway"
+    
+    cat = str(category or "").lower()
+    if cat in ("", "swap"):
+        cat = "linear"
+    
+    try:
+        # Метод 1: Проверяем через существующие позиции
+        positions = exchange.fetch_positions([symbol], params={"category": cat})
+        
+        for pos in positions:
+            idx = pos.get("info", {}).get("positionIdx")
+            if idx in (1, 2, "1", "2"):
+                logging.debug(f"position_mode | {symbol} | detected hedge via positions (idx={idx})")
+                return "hedge"
+        
+        # Метод 2: Проверяем через position/list API
+        result = exchange.private_get_v5_position_list({
+            "category": cat,
+            "symbol": symbol,
+        })
+        
+        positions_list = result.get("result", {}).get("list", [])
+        for pos in positions_list:
+            idx = pos.get("positionIdx")
+            if idx in (1, 2, "1", "2"):
+                logging.debug(f"position_mode | {symbol} | detected hedge via API (idx={idx})")
+                return "hedge"
+                
+    except Exception as e:
+        logging.debug(f"position_mode | {symbol} | API check failed: {e}")
+    
+    # Метод 3: Fallback через options
+    options = getattr(exchange, "options", {}) or {}
+    position_mode = options.get("defaultPositionMode") or options.get("positionMode")
+    
+    if isinstance(position_mode, str):
+        lower = position_mode.lower()
+        if "hedge" in lower or "both" in lower:
+            logging.debug(f"position_mode | {symbol} | detected hedge via options")
+            return "hedge"
+    
+    # По умолчанию предполагаем hedge, если включено на бирже
+    logging.debug(f"position_mode | {symbol} | defaulting to hedge")
+    return "hedge"  # ИЗМЕНЕНО: по умолчанию hedge, так как вы его включили
 
 def _bybit_position_idx(
     exchange, normalized_symbol: str, side: str, category: str
@@ -288,6 +336,44 @@ def _bybit_position_idx(
 
     side_norm = side.lower()
     return 1 if side_norm == "buy" else 2
+  
+
+def _force_hedge_mode_check(exchange, symbol: str, category: str) -> bool:
+    """Проверяет, действительно ли включен hedge mode для символа."""
+    if not _is_bybit_exchange(exchange):
+        return False
+    
+    cat = str(category or "").lower()
+    if cat in ("", "swap"):
+        cat = "linear"
+    
+    try:
+        # Прямой запрос к API для проверки режима
+        response = exchange.private_get_v5_position_list({
+            "category": cat,
+            "symbol": symbol,
+        })
+        
+        positions = response.get("result", {}).get("list", [])
+        
+        # Если есть хотя бы одна позиция с idx=1 или 2, значит hedge mode
+        for pos in positions:
+            idx = pos.get("positionIdx")
+            if idx in (1, 2, "1", "2"):
+                return True
+        
+        # Если позиций нет, но опции указывают на hedge
+        options = getattr(exchange, "options", {}) or {}
+        mode = options.get("defaultPositionMode", "").lower()
+        if "hedge" in mode or "both" in mode:
+            return True
+            
+    except Exception as e:
+        logging.debug(f"hedge_check | {symbol} | {e}")
+        # В случае ошибки предполагаем hedge, так как вы его включили
+        return True
+    
+    return False  # Если не смогли определить, считаем oneway
 
 
 def enter_ensure_filled(
@@ -300,8 +386,24 @@ def enter_ensure_filled(
     """Place IOC limit near last, then market the remainder. Return filled qty."""
 
     normalized_symbol = _normalize_bybit_symbol(exchange, symbol, category)
-    position_idx = _bybit_position_idx(exchange, normalized_symbol, side, category)
-    ticker = exchange.fetch_ticker(normalized_symbol, params={"category": category}) or {}
+    
+    cat = str(category or "").lower()
+    if cat in ("", "swap"):
+        cat = "linear"
+    
+    # КРИТИЧНО: Принудительная проверка hedge mode
+    is_hedge = _force_hedge_mode_check(exchange, normalized_symbol, cat)
+    
+    # Определяем positionIdx для hedge mode
+    position_idx = 0
+    if is_hedge:
+        position_idx = 1 if side.lower() == "buy" else 2
+        logging.info(f"enter | {symbol} | hedge mode enabled, positionIdx={position_idx}")
+    else:
+        logging.info(f"enter | {symbol} | oneway mode")
+    
+    # Получаем текущую цену
+    ticker = exchange.fetch_ticker(normalized_symbol, params={"category": cat}) or {}
     last = float(
         ticker.get("last")
         or ticker.get("lastPrice")
@@ -317,39 +419,61 @@ def enter_ensure_filled(
     except Exception:
         price = float(price)
 
-    params = {"category": category, "timeInForce": "IOC", "reduceOnly": False}
-    if position_idx is not None:
+    # IOC ордер с hedge mode параметрами
+    params = {
+        "category": cat,
+        "timeInForce": "IOC",
+        "reduceOnly": False,
+    }
+    
+    # КРИТИЧНО: всегда добавляем positionIdx если hedge
+    if is_hedge:
         params["positionIdx"] = position_idx
+    
     try:
         r = exchange.create_order(normalized_symbol, "limit", side, qty, price, params)
         filled1 = float(r.get("filled") or 0.0) if isinstance(r, dict) else 0.0
-    except Exception:
+        logging.info(f"enter | {symbol} | IOC filled {filled1}/{qty}")
+    except Exception as e:
+        logging.warning(f"enter | {symbol} | IOC failed: {e}")
         filled1 = 0.0
 
     time.sleep(2.0)
 
+    # Остаток маркет ордером
     remainder = max(0.0, qty - filled1)
     filled2 = 0.0
     if remainder > 0:
-        r2 = exchange.create_order(
-            normalized_symbol,
-            "market",
-            side,
-            remainder,
-            None,
-            {
-                "category": category,
-                "reduceOnly": False,
-                **({"positionIdx": position_idx} if position_idx is not None else {}),
-            },
-        )
-        if isinstance(r2, dict):
-            filled2 = float(r2.get("filled") or remainder)
-        else:
-            filled2 = remainder
+        market_params = {
+            "category": cat,
+            "reduceOnly": False,
+        }
+        
+        # КРИТИЧНО: всегда добавляем positionIdx если hedge
+        if is_hedge:
+            market_params["positionIdx"] = position_idx
+            
+        try:
+            r2 = exchange.create_order(
+                normalized_symbol,
+                "market",
+                side,
+                remainder,
+                None,
+                market_params,
+            )
+            if isinstance(r2, dict):
+                filled2 = float(r2.get("filled") or remainder)
+            else:
+                filled2 = remainder
+            logging.info(f"enter | {symbol} | Market filled {filled2}/{remainder}")
+        except Exception as e:
+            logging.error(f"enter | {symbol} | Market order failed: {e}")
+            filled2 = 0.0
 
-    return max(0.0, min(qty, filled1 + filled2))
-
+    total_filled = max(0.0, min(qty, filled1 + filled2))
+    logging.info(f"enter | {symbol} | Total filled: {total_filled}/{qty}")
+    return total_filled
 
 def _bybit_trigger_for_exit(
     side_open: str,
@@ -1161,7 +1285,11 @@ def get_position_entry_price(
     symbol: str,
     category: str = "linear",
 ) -> float | None:
-    """Return the average entry price for an open position or ``None``."""
+    """Return the average entry price for an open position or None.
+
+    - Tolerant to different CCXT fetch_positions signatures.
+    - If hedge-mode returns two legs, returns qty-weighted average entry price.
+    """
 
     cat = str(category or "").lower()
     if not cat or cat == "swap":
@@ -1169,78 +1297,93 @@ def get_position_entry_price(
     if cat == "spot":
         cat = "linear"
 
-    params = {"category": cat}
     fetch_positions = getattr(exchange, "fetch_positions", None)
+    if not callable(fetch_positions):
+        fetch_positions = getattr(exchange, "fetchPositions", None)
     if not callable(fetch_positions):
         return None
 
-    positions: list[dict] = []
-    try:
-        positions = fetch_positions([symbol], params=params) or []
-    except Exception:
-        positions = []
+    primary_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+    alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
+    norm_symbol_key = _normalize_symbol_key(alt_symbol or primary_symbol or symbol)
 
-    if not positions:
-        alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
-        if alt_symbol and alt_symbol != symbol:
-            try:
-                positions = fetch_positions([alt_symbol], params=params) or []
-            except Exception:
-                positions = []
+    params = {"category": cat}
 
-    if not positions:
+    def _invoke(arg):
         try:
-            positions = fetch_positions(params=params) or []
+            if arg is None:
+                return fetch_positions(params=params) or []
+            return fetch_positions([arg], params=params) or []
+        except TypeError:
+            try:
+                if arg is None:
+                    return fetch_positions(params) or []
+                return fetch_positions([arg], params) or []
+            except Exception:
+                return []
         except Exception:
-            positions = []
+            return []
 
-    norm_symbol = _normalize_symbol_key(_resolve_ccxt_symbol(exchange, symbol))
+    positions = _invoke(primary_symbol) if primary_symbol else []
+    if not positions and alt_symbol and alt_symbol != primary_symbol:
+        positions = _invoke(alt_symbol)
+    if not positions:
+        positions = _invoke(None)
 
+    legs: list[tuple[float, float]] = []
     for position in positions or []:
         psym = normalize_position_symbol(position)
-        if not psym or psym != norm_symbol:
+        if not psym or psym != norm_symbol_key:
             continue
 
         qty = _extract_position_quantity(position)
-        if abs(qty) <= 0:
+        try:
+            qty_abs = abs(float(qty))
+        except (TypeError, ValueError):
+            qty_abs = 0.0
+        if qty_abs <= 0:
             continue
 
         entry_candidates: list[float | None] = []
         for key in ("entryPrice", "avgPrice", "entry_price", "price", "avg_entry_price"):
-            if key in position:
+            if isinstance(position, dict) and key in position:
                 entry_candidates.append(position.get(key))
 
         info = position.get("info") if isinstance(position, dict) else None
         if isinstance(info, dict):
-            for key in (
-                "entryPrice",
-                "avgPrice",
-                "avg_entry_price",
-                "avgEntryPrice",
-                "basePrice",
-                "positionValue",
-            ):
+            for key in ("entryPrice", "avgPrice", "avg_entry_price", "avgEntryPrice", "basePrice"):
                 if key in info:
                     entry_candidates.append(info.get(key))
 
+        entry_val = None
         for candidate in entry_candidates:
             try:
-                price = float(candidate)
+                val = float(candidate)
             except (TypeError, ValueError):
                 continue
-            if math.isfinite(price) and price > 0:
-                return price
+            if math.isfinite(val) and val > 0:
+                entry_val = val
+                break
 
-    return None
+        if entry_val is not None:
+            legs.append((qty_abs, float(entry_val)))
+
+    if not legs:
+        return None
+
+    total = sum(q for q, _p in legs)
+    if total <= 0:
+        return legs[0][1]
+    return sum(q * p for q, p in legs) / total
+
+
 
 
 def get_last_price(exchange, symbol: str, category: str = "linear") -> float | None:
     """Return the last traded price for ``symbol`` or ``None`` when unavailable."""
 
-    cat = str(category or "").lower()
+    cat = normalize_bybit_category(category) or str(category or "").lower()
     if not cat or cat == "swap":
-        cat = "linear"
-    if cat == "spot":
         cat = "linear"
 
     norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
@@ -1251,7 +1394,7 @@ def get_last_price(exchange, symbol: str, category: str = "linear") -> float | N
     if not callable(fetch_ticker):
         return None
 
-    params = {"category": cat} if _is_bybit_exchange(exchange) else None
+    params = {"category": cat} if cat else None
 
     ticker = None
     try:
@@ -1265,7 +1408,7 @@ def get_last_price(exchange, symbol: str, category: str = "linear") -> float | N
     if ticker is None:
         try:
             alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
-            if alt_symbol:
+            if isinstance(alt_symbol, str) and alt_symbol and alt_symbol != norm_symbol:
                 if params:
                     ticker = fetch_ticker(alt_symbol, params=params)
                 else:
@@ -1277,18 +1420,20 @@ def get_last_price(exchange, symbol: str, category: str = "linear") -> float | N
         return None
 
     price_candidates: list[float | None] = []
-    for key in ("last", "close", "ask", "bid", "markPrice", "indexPrice"):
+    for key in ("last", "lastPrice", "close", "mark", "markPrice", "indexPrice"):
         if key in ticker:
             price_candidates.append(ticker.get(key))
 
-    info = ticker.get("info") if isinstance(ticker, dict) else None
+    info = ticker.get("info")
     if isinstance(info, dict):
         for key in (
             "lastPrice",
-            "close",
+            "last_price",
             "markPrice",
+            "mark_price",
             "indexPrice",
-            "price",
+            "index_price",
+            "close",
         ):
             if key in info:
                 price_candidates.append(info.get(key))
@@ -1302,6 +1447,7 @@ def get_last_price(exchange, symbol: str, category: str = "linear") -> float | N
             return price
 
     return None
+
 
 
 def _get_position_size(exchange, symbol: str, category: str = "linear") -> float:
@@ -2465,14 +2611,14 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
                     "triggerBy": "LastPrice",
                     "reduceOnly": True,
                     "closeOnTrigger": True,
-                    "positionIdx": 1 if position_side == "sell" else 2,
+                    "positionIdx": 1 if position_side == "buy" else 2,
                 }
                 
                 try:
                     order = exchange.create_order(
                         symbol,
                         "Market",  # тип ордера Market для conditional
-                        position_side,
+                        "sell" if position_side == "buy" else "buy",  # Противоположная сторона
                         qty,
                         None,  # price = None для Market
                         params_sl,
@@ -2480,6 +2626,40 @@ def log_exit_from_order(symbol: str, order: dict, commission: float, trade_log_p
                     return order.get("id"), None
                 except Exception as exc:
                     return None, str(exc)
+
+
+            if is_tp:
+                try:
+                    tp_prec = float(exchange.price_to_precision(symbol, stop_price))
+                except Exception:
+                    tp_prec = float(stop_price)
+                
+                # Используем ТОЛЬКО triggerPrice для conditional orders
+                params_tp = {
+                    "category": category,
+                    "triggerPrice": tp_prec,
+                    "triggerDirection": BYBIT_TRIGGER_DIRECTIONS["rising"] if position_side == "buy" else BYBIT_TRIGGER_DIRECTIONS["falling"],
+                    "triggerBy": "LastPrice",
+                    "reduceOnly": True,
+                    "closeOnTrigger": True,
+                    "positionIdx": 1 if position_side == "buy" else 2,
+                }
+                
+                try:
+                    order = exchange.create_order(
+                        symbol,
+                        "Market",  # тип ордера Market для conditional
+                        "sell" if position_side == "buy" else "buy",  # Противоположная сторона
+                        qty,
+                        None,  # price = None для Market
+                        params_tp,
+                    )
+                    return order.get("id"), None
+                except Exception as exc:
+                    return None, str(exc)
+        
+
+            
 
             row = {
                 "trade_id": trade_id,
@@ -3283,10 +3463,9 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
 
     return None, last_error or "order_failed"
 
-
 def place_conditional_exit(
     exchange,
-    symbol: str,
+    symbol,
     side_open: str,
     entry_price: float,
     last: float,
@@ -3295,11 +3474,451 @@ def place_conditional_exit(
     *,
     is_tp: bool,
 ):
-    """Place a conditional market exit for Bybit when a position exists."""
+    """Place a conditional market exit (TP/SL) for Bybit when a position exists."""
 
     cat = str(category or "").lower()
     if cat in ("", "swap"):
         cat = "linear"
+
+    norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+
+    # КРИТИЧНО: Принудительная проверка hedge mode
+    is_hedge = _force_hedge_mode_check(exchange, norm_symbol, cat)
+    
+    # Определяем positionIdx и direction
+    position_idx = 0
+    if is_hedge:
+        position_idx = 1 if side_open.lower() in ("buy", "long") else 2
+        logging.info(f"exit | {symbol} | hedge mode, positionIdx={position_idx}")
+    else:
+        logging.info(f"exit | {symbol} | oneway mode")
+
+    # Получаем текущую цену
+    ticker = exchange.fetch_ticker(norm_symbol, params={"category": cat}) or {}
+    last_val = float(
+        ticker.get("last")
+        or ticker.get("lastPrice")
+        or (ticker.get("info", {}).get("lastPrice") if isinstance(ticker, dict) else 0.0)
+        or 0.0
+    )
+    if not last_val:
+        raise RuntimeError(f"No last price for {symbol}")
+
+    # Расчет trigger price
+    direction, trig = _bybit_trigger_for_exit(
+        side_open,
+        last_val,
+        entry_price,
+        pct,
+        is_tp=is_tp,
+        price_to_precision=lambda p: float(exchange.price_to_precision(norm_symbol, p)),
+    )
+
+    trig, _ = _price_qty_to_precision(exchange, norm_symbol, price=trig, amount=None)
+    
+    try:
+        trig_val = float(trig)
+    except (TypeError, ValueError):
+        trig_val = float(entry_price or last_val)
+
+    # Минимальный tick
+    def _min_tick() -> float:
+        market = None
+        try:
+            market = exchange.market(norm_symbol)
+        except Exception:
+            market = None
+        precision = (market or {}).get("precision") or {}
+        try:
+            price_prec = int(precision.get("price") or 0)
+        except Exception:
+            price_prec = 0
+        if price_prec:
+            try:
+                return float(1 / (10 ** price_prec))
+            except Exception:
+                return 0.0
+        info = (market or {}).get("info") or {}
+        if isinstance(info, dict):
+            try:
+                tick = float(
+                    (info.get("priceFilter") or {}).get("tickSize")
+                    or (info.get("price_filter") or {}).get("tick_size")
+                    or 0.0
+                )
+            except Exception:
+                tick = 0.0
+            return tick if tick > 0 else 0.0
+        return 0.0
+
+    tick_floor = _min_tick()
+    if tick_floor > 0 and trig_val < tick_floor:
+        try:
+            trig_val = float(exchange.price_to_precision(norm_symbol, tick_floor))
+        except Exception:
+            trig_val = tick_floor
+        trig, _ = _price_qty_to_precision(exchange, norm_symbol, price=trig_val, amount=None)
+        try:
+            trig_val = float(trig)
+        except (TypeError, ValueError):
+            trig_val = tick_floor
+
+    if trig_val <= 0:
+        label = "take-profit" if is_tp else "stop-loss"
+        message = f"exit | {symbol} | skip: {label} trigger {trig_val:.8f} invalid"
+        log_once("warning", message, window_sec=10.0)
+        return None, "exit skipped: trigger non-positive"
+
+    # Получаем размер позиции
+    qty_signed, qty_abs = has_open_position(exchange, norm_symbol, cat)
+    try:
+        qty_val = float(qty_abs)
+    except (TypeError, ValueError):
+        qty_val = 0.0
+
+    if qty_val <= 0:
+        return None, "exit postponed: no position"
+
+    exit_side = "sell" if qty_signed > 0 else "buy" if qty_signed < 0 else None
+    if exit_side is None:
+        return None, "exit skipped: no position side"
+
+    amount = _round_qty(exchange, norm_symbol, qty_val)
+    try:
+        amount_val = float(amount)
+    except (TypeError, ValueError):
+        amount_val = float(qty_val)
+
+    if amount_val <= 0:
+        return None, "exit skipped: qty too small"
+
+    # Удаляем старые conditional orders
+    try:
+        stops = exchange.fetch_open_orders(norm_symbol, params={"category": cat, "orderFilter": "StopOrder"})
+    except Exception:
+        stops = []
+
+    stop_orders: list[tuple[dict, float, str]] = []
+    for stop in stops or []:
+        order_id = stop.get("id") or stop.get("orderId")
+        if not order_id:
+            continue
+        info = stop.get("info") if isinstance(stop.get("info"), dict) else {}
+        ts_candidates = [
+            stop.get("timestamp"),
+            stop.get("lastUpdateTimestamp"),
+            stop.get("updateTime"),
+            stop.get("createdTime"),
+            stop.get("createTime"),
+            (info or {}).get("updatedTime"),
+            (info or {}).get("createdTime"),
+        ]
+        ts_val = 0.0
+        for cand in ts_candidates:
+            if cand is None:
+                continue
+            try:
+                cand_float = float(cand)
+            except (TypeError, ValueError):
+                continue
+            try:
+                ts_val = cand_float / (1000 if cand_float > 1e12 else 1)
+            except Exception:
+                ts_val = 0.0
+            else:
+                break
+        stop_orders.append((stop, ts_val, str(order_id)))
+
+    if len(stop_orders) > 2:
+        stop_orders.sort(key=lambda item: item[1], reverse=True)
+        for _stop, _ts, order_id in stop_orders[2:]:
+            try:
+                exchange.cancel_order(order_id, norm_symbol, {"category": cat})
+                logging.info(f"exit | {symbol} | cancelled old order {order_id}")
+            except Exception:
+                continue
+
+    # КРИТИЧНО: создаем conditional order с правильными параметрами для hedge mode
+    params = {
+        "category": cat,
+        "triggerPrice": float(trig_val),
+        "triggerDirection": direction,
+        "triggerBy": "LastPrice",
+        "reduceOnly": True,
+        "closeOnTrigger": True,
+    }
+    
+    # КРИТИЧНО: всегда добавляем positionIdx если hedge
+    if is_hedge:
+        params["positionIdx"] = position_idx
+        params["tpSlMode"] = "Partial"  # Для hedge mode используем Partial
+    else:
+        params["tpSlMode"] = "Full"  # Для oneway используем Full
+
+    order_type = "Market"
+    try:
+        resp = exchange.create_order(
+            norm_symbol,
+            order_type,
+            exit_side,
+            amount_val,
+            None,  # price = None для Market conditional
+            params,
+        )
+        logging.info(f"exit | {symbol} | {'TP' if is_tp else 'SL'} order created: {params}")
+    except Exception as exc:
+        logging.error(f"exit | {symbol} | Order failed: {exc}")
+        return None, str(exc)
+
+    order_id = None
+    if isinstance(resp, dict):
+        order_id = resp.get("id") or resp.get("orderId")
+    
+    logging.info(
+        "exit | %s | %s conditional order placed @ %.6f (positionIdx=%s)",
+        symbol,
+        "TP" if is_tp else "SL",
+        trig_val,
+        position_idx if is_hedge else "0",
+    )
+    
+    return order_id, None
+
+    cat = str(category or "").lower()
+    if cat in ("", "swap"):
+        cat = "linear"
+
+    norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+
+    # Resolve hedge/one-way mode BEFORE we compute params.
+    position_idx = None
+    tp_sl_mode = "Full"
+    if _is_bybit_exchange(exchange) and cat in {"linear", "inverse"}:
+        try:
+            position_mode = _get_position_mode(exchange, norm_symbol, cat)
+        except Exception:
+            position_mode = "oneway"
+        side_lower = str(side_open or "").lower()
+        if position_mode == "hedge":
+            if side_lower in {"buy", "long"}:
+                position_idx = 1
+            elif side_lower in {"sell", "short"}:
+                position_idx = 2
+            else:
+                position_idx = 0
+            tp_sl_mode = "Partial"
+        else:
+            position_idx = 0
+            tp_sl_mode = "Full"
+
+    qty_signed, qty_abs = has_open_position(exchange, symbol, cat)
+    try:
+        qty_abs_val = float(qty_abs)
+    except (TypeError, ValueError):
+        qty_abs_val = 0.0
+    if qty_abs_val <= 0:
+        return None, "exit postponed: no position"
+
+    side_lower = str(side_open or "").lower()
+    exit_side = "sell" if side_lower in {"buy", "long"} else "buy"
+
+    if hasattr(exchange, "price_to_precision"):
+        def _precision_cb(value: float, *, _symbol: str = norm_symbol, _ex=exchange):
+            return _ex.price_to_precision(_symbol, value)
+    else:
+        _precision_cb = lambda value, *_args, **_kwargs: value  # type: ignore
+
+    try:
+        entry_val = float(entry_price)
+    except (TypeError, ValueError):
+        entry_val = 0.0
+    try:
+        last_val = float(last)
+    except (TypeError, ValueError):
+        last_val = 0.0
+    if last_val <= 0:
+        last_val = entry_val
+
+    direction, trig = _bybit_trigger_for_exit(
+        side_open,
+        last_val,
+        entry_val,
+        pct,
+        is_tp=is_tp,
+        price_to_precision=_precision_cb,
+    )
+
+    trig, _ = _price_qty_to_precision(exchange, norm_symbol, price=trig, amount=None)
+
+    def _min_tick() -> float:
+        market = None
+        try:
+            market = exchange.market(norm_symbol)
+        except Exception:
+            market = None
+        precision = (market or {}).get("precision") or {}
+        try:
+            price_prec = int(precision.get("price") or 0)
+        except Exception:
+            price_prec = 0
+        if price_prec:
+            try:
+                return float(1 / (10 ** price_prec))
+            except Exception:
+                return 0.0
+        info = (market or {}).get("info") or {}
+        if isinstance(info, dict):
+            try:
+                tick = float(
+                    (info.get("priceFilter") or {}).get("tickSize")
+                    or (info.get("price_filter") or {}).get("tick_size")
+                    or 0.0
+                )
+            except Exception:
+                tick = 0.0
+            return tick if tick > 0 else 0.0
+        return 0.0
+
+    try:
+        trig_val = float(trig)
+    except (TypeError, ValueError):
+        trig_val = float(entry_val or last_val)
+
+    tick_floor = _min_tick()
+    if tick_floor > 0 and trig_val < tick_floor:
+        try:
+            trig_val = float(exchange.price_to_precision(norm_symbol, tick_floor))
+        except Exception:
+            trig_val = tick_floor
+        trig, _ = _price_qty_to_precision(exchange, norm_symbol, price=trig_val, amount=None)
+        try:
+            trig_val = float(trig)
+        except (TypeError, ValueError):
+            trig_val = tick_floor
+
+    if trig_val <= 0:
+        label = "take-profit" if is_tp else "stop-loss"
+        message = f"exit | {symbol} | skip: {label} trigger {trig_val:.8f} invalid"
+        log_once("warning", message, window_sec=10.0)
+        return None, "exit skipped: trigger non-positive"
+
+    amount = _round_qty(exchange, norm_symbol, qty_abs_val)
+    try:
+        amount_val = float(amount)
+    except (TypeError, ValueError):
+        amount_val = float(qty_abs_val)
+    if amount_val <= 0:
+        return None, "exit skipped: qty too small"
+
+    # Avoid accumulating too many conditional orders on the same symbol.
+    try:
+        stops = exchange.fetch_open_orders(norm_symbol, params={"category": cat, "orderFilter": "StopOrder"})
+    except Exception:
+        stops = []
+
+    stop_orders: list[tuple[dict, float, str]] = []
+    for stop in stops or []:
+        order_id = stop.get("id") or stop.get("orderId")
+        if not order_id:
+            continue
+        info = stop.get("info") if isinstance(stop.get("info"), dict) else {}
+        ts_candidates = [
+            stop.get("timestamp"),
+            stop.get("lastUpdateTimestamp"),
+            stop.get("updateTime"),
+            stop.get("createdTime"),
+            stop.get("createTime"),
+            (info or {}).get("updatedTime"),
+            (info or {}).get("createdTime"),
+        ]
+        ts_val = 0.0
+        for cand in ts_candidates:
+            if cand is None:
+                continue
+            try:
+                cand_float = float(cand)
+            except (TypeError, ValueError):
+                continue
+            try:
+                ts_val = cand_float / (1000 if cand_float > 1e12 else 1)
+            except Exception:
+                ts_val = 0.0
+            else:
+                break
+        stop_orders.append((stop, ts_val, str(order_id)))
+
+    if len(stop_orders) > 2:
+        stop_orders.sort(key=lambda item: item[1], reverse=True)
+        for _stop, _ts, order_id in stop_orders[2:]:
+            try:
+                exchange.cancel_order(order_id, norm_symbol, {"category": cat})
+            except Exception:
+                continue
+
+    trading_stop_error = None
+    if _is_bybit_exchange(exchange):
+        try:
+            trading_stop = getattr(exchange, "set_trading_stop", None) or getattr(exchange, "setTradingStop", None)
+            if trading_stop is None:
+                raise AttributeError("set_trading_stop missing")
+
+            params = {"category": cat}
+            if position_idx is not None:
+                params.update({"positionIdx": position_idx, "tpSlMode": tp_sl_mode})
+
+            kwargs = {}
+            if is_tp:
+                kwargs["takeProfitPrice"] = float(trig_val)
+            else:
+                kwargs["stopLossPrice"] = float(trig_val)
+
+            trading_stop(norm_symbol, **kwargs, params=params)
+            logging.info("order | %s | conditional %s set @ %.4f via trading stop", symbol, "TP" if is_tp else "SL", trig_val)
+            return f"tpsl_{symbol.replace('/', '')}", None
+        except Exception as exc:
+            trading_stop_error = str(exc)
+            log_once("warning", f"order | {symbol} | trading_stop failed ({trading_stop_error}); using fallback order", window_sec=30)
+
+    params = {
+        "category": cat,
+        "triggerPrice": float(trig_val),
+        "triggerDirection": direction,
+        "triggerBy": "LastPrice",
+        "reduceOnly": True,
+        "closeOnTrigger": True,
+    }
+    if position_idx is not None:
+        params.update({"positionIdx": position_idx, "tpSlMode": tp_sl_mode})
+    if is_tp:
+        params.update({"tpOrderType": "Market"})
+    else:
+        params.update({"slOrderType": "Market"})
+    params = _clean_params(params)
+
+    order_type = "Market"
+    try:
+        resp = exchange.create_order(norm_symbol, order_type, exit_side, amount_val, None, params)
+    except Exception as exc:
+        if trading_stop_error and trading_stop_error == str(exc):
+            return None, trading_stop_error
+        return None, str(exc)
+
+    order_id = None
+    if isinstance(resp, dict):
+        order_id = resp.get("id") or resp.get("orderId")
+    return order_id, None
+
+    cat = str(category or "").lower()
+    if cat in ("", "swap"):
+        cat = "linear"
+
+    # ИСПРАВЛЕНИЕ: проверяем position mode
+    position_mode = _get_position_mode(exchange, norm_symbol, cat)
+    
+    position_idx = 0
+    if position_mode == "hedge":
+        s = side_open.lower()
+        position_idx = 1 if s == "buy" else 2
 
     norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
 
@@ -3467,12 +4086,19 @@ def place_conditional_exit(
             )
             if trading_stop is None:
                 raise AttributeError("set_trading_stop missing")
+
+
             params = {
                 "category": cat,
-                "tpSlMode": tp_sl_mode,
+                "triggerPrice": float(trig_val),
+                "triggerDirection": direction,
                 "triggerBy": "LastPrice",
-                "positionIdx": position_idx,
+                "reduceOnly": True,
+                "closeOnTrigger": True,
             }
+
+            if _is_bybit_exchange(exchange):
+                params.update({"positionIdx": position_idx, "tpSlMode": "Full"})
             kwargs = {}
             if is_tp:
                 kwargs["takeProfitPrice"] = float(trig_val)
@@ -3506,8 +4132,7 @@ def place_conditional_exit(
     }
 
     if _is_bybit_exchange(exchange):
-        params.update({"positionIdx": position_idx, "tpSlMode": tp_sl_mode})
-
+        params.update({"positionIdx": position_idx, "tpSlMode": "Full"})
     if is_tp:
         params.update({"tpOrderType": "Market"})
     else:
@@ -3554,7 +4179,7 @@ def wait_position_after_entry(
 
 
 def has_pending_entry(exchange, symbol: str, side: str, category: str = "linear") -> bool:
-    """Return ``True`` when a non-reduceOnly order exists for *symbol* and *side*."""
+    """Return True when a non-reduceOnly open order exists for symbol and side."""
 
     cat = str(category or "").lower()
     if not cat or cat == "swap":
@@ -3562,34 +4187,56 @@ def has_pending_entry(exchange, symbol: str, side: str, category: str = "linear"
     if cat == "spot":
         cat = "linear"
 
-    params = {"category": cat}
-
     fetch_open_orders = getattr(exchange, "fetch_open_orders", None)
     if not callable(fetch_open_orders):
         fetch_open_orders = getattr(exchange, "fetchOpenOrders", None)
     if not callable(fetch_open_orders):
         return False
 
-    try:
-        orders = fetch_open_orders(symbol, params=params) or []
-    except Exception:
-        return False
+    norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
 
-    side_lower = str(side).lower()
+    base_params = {"category": cat}
+    orders: list[dict] = []
+
+    # Prefer "Order" filter (regular orders) on Bybit V5, but fall back if unsupported.
+    try:
+        params = dict(base_params)
+        params["orderFilter"] = "Order"
+        orders = fetch_open_orders(norm_symbol, params=params) or []
+    except Exception:
+        try:
+            orders = fetch_open_orders(norm_symbol, params=base_params) or []
+        except Exception:
+            return False
+
+    side_lower = str(side or "").lower()
+
     for order in orders or []:
         if not isinstance(order, dict):
             continue
 
+        # Skip reduce-only orders (they are exits, not entries).
         reduce_only = order.get("reduceOnly")
         if isinstance(reduce_only, str):
             if reduce_only.strip().lower() in {"true", "1", "yes"}:
                 continue
-        elif reduce_only:
+        elif bool(reduce_only):
             continue
 
         order_side = str(order.get("side") or "").lower()
-        if order_side == side_lower:
-            return True
+        if order_side != side_lower:
+            continue
+
+        # Defensively skip stop/conditional orders
+        otype = str(order.get("type") or "").lower()
+        if "stop" in otype:
+            continue
+        info = order.get("info") if isinstance(order.get("info"), dict) else {}
+        if isinstance(info, dict):
+            if str(info.get("orderFilter") or "").lower() == "stoporder":
+                continue
+
+        return True
 
     return False
 
@@ -3609,141 +4256,69 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
     if leverage is None:
         log(logging.INFO, "leverage", symbol, "Leverage setup skipped (no value)")
         return True
-
-    def _infer_category(sym: str) -> str | None:
-        sym_upper = str(sym or "").upper()
-        if "USDT" in sym_upper or ":USDT" in sym_upper:
-            return "linear"
-        if sym_upper.endswith("/USD") and "USDT" not in sym_upper:
-            return "inverse"
-        return None
-
-    def _legacy_leverage_symbols(sym: str) -> list[str]:
-        """Return leverage symbol candidates for direct CCXT calls."""
-
-        if not isinstance(sym, str):
-            return [sym]
-
-        cleaned = sym.strip()
-        if not cleaned:
-            return []
-
-        order: list[str] = []
-        if exchange_id == "bybit":
-            short = _ccxt_symbol(cleaned)
-            if cleaned.endswith("/USDT") and short:
-                order.append(f"{short}:USDT")
-            if short and short not in {cleaned, f"{short}:USDT"}:
-                order.append(short)
-            order.append(cleaned)
-        else:
-            order.append(cleaned)
-
-        result: list[str] = []
-        for candidate in order or [cleaned]:
-            if candidate and candidate not in result:
-                result.append(candidate)
-
-        return result or [cleaned]
-
+    
+    # Определяем категорию ДО попыток установки
     cat_norm: str | None = None
     try:
         market_cat = detect_market_category(exchange, symbol)
+        if market_cat is not None:
+            cat = str(market_cat).lower()
+            if cat == "swap":
+                cat = "linear"
+            # ВАЖНО: только linear и inverse поддерживают плечо на Bybit
+            if cat in ("linear", "inverse"):
+                cat_norm = cat
+            else:
+                log(logging.INFO, "leverage", symbol, f"Category {cat} doesn't support leverage")
+                return True  # не ошибка, просто пропускаем
     except Exception as exc:
-        log_once(
-            "warning",
-            f"leverage | {symbol} | market detection failed: {exc}",
-            window_sec=5.0,
-        )
-        market_cat = None
-    if market_cat is not None:
-        cat = str(market_cat).lower()
-        if cat == "swap":
-            cat = "linear"
-        if cat not in {"linear", "inverse"}:
-            log_once(
-                "warning",
-                f"leverage | {symbol} | skip: unsupported contract type {market_cat}",
-                window_sec=5.0,
-            )
-            return True
-        cat_norm = cat
+        log_once("warning", f"leverage | {symbol} | category detection failed: {exc}")
+        return False
+
+    if cat_norm is None:
+        log_once("warning", f"leverage | {symbol} | no valid category for leverage")
+        return False
+
+    # Нормализуем символ для корректного API вызова
+    norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat_norm)
+
     for attempt in range(attempts):
         try:
-            L = set_valid_leverage(exchange, symbol, leverage)
-        except TypeError:
-            L = None
-            legacy_symbols = _legacy_leverage_symbols(symbol)
-            last_error: Exception | None = None
-            for idx, legacy_symbol in enumerate(legacy_symbols):
-                try:
-                    category = cat_norm or _infer_category(legacy_symbol) or _infer_category(symbol)
-                    if exchange_id == "bybit" and not category:
-                        category = "linear"
-                    leverage_params = {"category": category} if category else {}
-                    L = exchange.set_leverage(leverage, legacy_symbol, leverage_params)
-                except Exception as exc:
-                    last_error = exc
-                    message = str(exc).lower()
-                    if (
-                        exchange_id == "bybit"
-                        and "only support linear and inverse market" in message
-                        and idx < len(legacy_symbols) - 1
-                    ):
-                        logging.warning(
-                            "leverage | %s | set_leverage failed for %s: %s. Retrying with alternate symbol.",
-                            symbol,
-                            legacy_symbol,
-                            exc,
-                        )
-                        continue
-                    if idx < len(legacy_symbols) - 1:
-                        continue
-                    L = None
-                    break
-                else:
-                    if L:
-                        log(
-                            logging.INFO,
-                            "leverage",
-                            symbol,
-                            f"Leverage set to {leverage}x",
-                        )
-                        return True
-            if L:
-                log(
-                    logging.INFO,
-                    "leverage",
-                    symbol,
-                    f"Leverage set to {leverage}x",
-                )
+            # Пытаемся через set_valid_leverage с категорией
+            L = set_valid_leverage(exchange, norm_symbol, leverage, category=cat_norm)
+            
+            if L is LEVERAGE_SKIPPED:
+                log(logging.INFO, "leverage", symbol, "Leverage setup skipped")
                 return True
+            if L is not None:
+                log(logging.INFO, "leverage", symbol, f"Leverage set to {L}x")
+                return True
+                
+        except TypeError:
+            # Fallback: прямой вызов с params
+            try:
+                leverage_params = {"category": cat_norm}
+                L = exchange.set_leverage(leverage, norm_symbol, leverage_params)
+                if L:
+                    log(logging.INFO, "leverage", symbol, f"Leverage set to {leverage}x")
+                    return True
+            except Exception as exc:
+                message = str(exc).lower()
+                if attempt < attempts - 1:
+                    time.sleep(2)
+                    continue
+                log_once("warning", f"leverage | {symbol} | Failed to set leverage: {exc}", window_sec=30.0)
+                return False
+        except Exception as exc:
             if attempt < attempts - 1:
                 time.sleep(2)
                 continue
-            message = f"leverage | {symbol} | Failed to set leverage {leverage} (legacy)"
-            if last_error is not None:
-                message = f"{message}: {last_error}"
-            log_once("error", message, window_sec=30.0)
-            tag = "leverage_failed_soft"
-            if tag not in _order_status[symbol]:
-                _order_status[symbol].append(tag)
+            log_once("warning", f"leverage | {symbol} | Failed to set leverage: {exc}", window_sec=30.0)
             return False
-        if L is LEVERAGE_SKIPPED:
-            log(logging.INFO, "leverage", symbol, "Leverage setup skipped")
-            return True
-        if L is not None:
-            log(logging.INFO, "leverage", symbol, f"Leverage set to {L}x")
-            return True
-        if attempt < attempts - 1:
-            time.sleep(2)
-            continue
-        message = f"leverage | {symbol} | Failed to set leverage {leverage} (soft)"
-        log_once("warning", message, window_sec=5.0)
-        tag = "leverage_failed_soft"
-        if tag not in _order_status[symbol]:
-            _order_status[symbol].append(tag)
-        return False
+
+    return False
+
+
 
 
 def flush_symbol_logs(symbol: str) -> None:

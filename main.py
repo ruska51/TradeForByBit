@@ -1500,6 +1500,14 @@ def initialize_symbols() -> list[str]:
     # Scanning for new symbols is temporarily disabled.
     return unique
 
+# === ПРИНУДИТЕЛЬНОЕ ВКЛЮЧЕНИЕ HEDGE MODE ===
+if ADAPTER_READY and exchange:
+    try:
+        exchange.options['defaultPositionMode'] = 'hedged'
+        logging.info("Forced hedge mode enabled in exchange options")
+    except Exception as e:
+        logging.warning(f"Could not set hedge mode in options: {e}")
+
 
 # Торгуемые пары
 symbols = initialize_symbols()
@@ -3260,6 +3268,15 @@ def run_trade(
             ),
         )
         return False
+   
+    # Проверка hedge mode перед входом
+    from logging_utils import _force_hedge_mode_check
+    
+    is_hedge_mode = _force_hedge_mode_check(exchange, symbol, category)
+    logging.info(
+        f"trade | {symbol} | mode={'HEDGE' if is_hedge_mode else 'ONEWAY'} category={category} leverage={lev}x"
+    )
+    
     want_side = "buy" if signal == "long" else "sell"
     qty_signed, qty_abs = has_open_position(exchange, symbol, category)
     if qty_abs > 0 and (
@@ -6381,60 +6398,51 @@ def run_bot():
 
                                                 if (filled_qty or 0.0) <= 0:
                                                     log_decision(symbol, "order_failed")
-                                                else:
-                                                    detected_qty = wait_position_after_entry(
-                                                        ADAPTER.x,
-                                                        symbol,
-                                                        category=cat,
-                                                        timeout_sec=3.0,
-                                                    )
-                                                    if detected_qty <= 0:
-                                                        log_decision(symbol, "position_unavailable")
-                                                    else:
-                                                        entry_price = get_position_entry_price(
-                                                            exchange,
-                                                            symbol,
-                                                            cat,
-                                                        )
-                                                        if entry_price is None or entry_price <= 0:
-                                                            entry_price = current_price
-                                                        last_price = get_last_price(exchange, symbol, cat)
-                                                        if last_price is None or last_price <= 0:
-                                                            last_price = entry_price
+                                                    return False
 
-                                                        try:
-                                                            sl_pct_eff = abs((sl_price / entry_price) - 1)
-                                                        except Exception:
-                                                            sl_pct_eff = sl_pct_raw
-                                                        if not sl_pct_eff or not math.isfinite(sl_pct_eff):
-                                                            sl_pct_eff = max(sl_pct_raw, SL_PCT)
-                                                        try:
-                                                            tp_pct_eff = abs((tp_price / entry_price) - 1)
-                                                        except Exception:
-                                                            tp_pct_eff = TP_PCT
-                                                        if not tp_pct_eff or not math.isfinite(tp_pct_eff):
-                                                            tp_pct_eff = TP_PCT
+                                                # entry guard (анти-дубль входа в одном 5-мин баре)
+                                                _entry_guard[symbol] = {"bar": now_bar5, "side": side}
 
-                                                        _, tp_err = place_conditional_exit(
-                                                            exchange,
+                                                # Ждём появления позиции
+                                                detected_qty = wait_position_after_entry(
+                                                    ADAPTER.x, symbol, category=cat, timeout_sec=3.0
+                                                )
+
+                                                _pos_signed_after, pos_abs_after = has_open_position(exchange, symbol, cat)
+                                                entry_price = get_position_entry_price(exchange, symbol, cat) or current_price
+
+                                                # Получаем last price для триггеров
+                                                ticker = exchange.fetch_ticker(symbol, params={"category": cat})
+                                                last_price = float(
+                                                    ticker.get("last") or ticker.get("lastPrice") or current_price
+                                                )
+
+                                                want_long = (side == "buy")
+
+                                                # Рассчитываем эффективные проценты
+                                                try:
+                                                    sl_pct_eff = abs((sl_price / entry_price) - 1) if entry_price else SL_PCT
+                                                except Exception:
+                                                    sl_pct_eff = SL_PCT
+                                                if not sl_pct_eff or not math.isfinite(sl_pct_eff):
+                                                    sl_pct_eff = SL_PCT
+
+                                                try:
+                                                    tp_pct_eff = abs((tp_price / entry_price) - 1) if entry_price else TP_PCT
+                                                except Exception:
+                                                    tp_pct_eff = TP_PCT
+                                                if not tp_pct_eff or not math.isfinite(tp_pct_eff):
+                                                    tp_pct_eff = TP_PCT
+
+                                                # КРИТИЧНО: Устанавливаем SL как отдельный conditional order
+                                                if pos_abs_after > 0:
+                                                    time.sleep(1.0)  # Даём бирже обработать позицию
+
+                                                    try:
+                                                        sl_order_id, sl_err = place_conditional_exit(
+                                                            ADAPTER.x,
                                                             symbol,
-                                                            side,
-                                                            entry_price,
-                                                            last_price,
-                                                            tp_pct_eff,
-                                                            cat,
-                                                            is_tp=True,
-                                                        )
-                                                        if tp_err:
-                                                            log_once(
-                                                                "warning",
-                                                                f"pattern trade | {symbol} | Failed to set TP: {tp_err}",
-                                                                window_sec=60.0,
-                                                            )
-                                                        _, sl_err = place_conditional_exit(
-                                                            exchange,
-                                                            symbol,
-                                                            side,
+                                                            "buy" if want_long else "sell",
                                                             entry_price,
                                                             last_price,
                                                             sl_pct_eff,
@@ -6442,70 +6450,40 @@ def run_bot():
                                                             is_tp=False,
                                                         )
                                                         if sl_err:
-                                                            log_once(
-                                                                "warning",
-                                                                f"pattern trade | {symbol} | Failed to set SL: {sl_err}",
-                                                                window_sec=60.0,
+                                                            log_once("warning", f"exit | {symbol} | SL setup failed: {sl_err}")
+                                                        elif sl_order_id:
+                                                            logging.info(
+                                                                "exit | %s | Stop-loss placed (order_id=%s)",
+                                                                symbol,
+                                                                sl_order_id,
                                                             )
+                                                    except Exception as exc:
+                                                        log_once("warning", f"exit | {symbol} | SL exception: {exc}")
 
-                                                        _entry_guard[symbol] = {
-                                                            "bar": now_bar5,
-                                                            "side": side,
-                                                        }
-                                                        _, pos_qty = has_open_position(exchange, symbol, cat)
-                                                        qty_val = float(pos_qty)
-                                                        now = datetime.now(timezone.utc)
-                                                        entry_ctx = {
-                                                            "symbol": symbol,
-                                                            "side": model_signal.upper(),
-                                                            "entry_price": float(entry_price),
-                                                            "entry_time": now.isoformat().replace("+00:00", "Z"),
-                                                            "qty": float(qty_val),
-                                                            "open_bar_index": int(now.timestamp() // (5 * 60)),
-                                                            "trailing_profit_used": False,
-                                                            "order_id": None,
-                                                            "source": "pattern",
-                                                            "reason": "pattern_override",
-                                                            "atr": float(atr_val),
-                                                            "tick_size": float(tick_size or 0.0),
-                                                            "sl_price": float(sl_price) if sl_price is not None else None,
-                                                            "tp_price": float(tp_price) if tp_price is not None else None,
-                                                        }
-                                                        entry_ctx.setdefault("last_seen_position_ts", None)
-                                                        entry_ctx.setdefault("last_mark_price", None)
-                                                        open_trade_ctx[symbol] = entry_ctx
-                                                        memory_manager.add_trade_open(entry_ctx)
-                                                        trade_id = log_entry(symbol, entry_ctx, trade_log_path)
-                                                        pair_state.setdefault(symbol, {})["trade_id"] = trade_id
-                                                        symbol_activity[symbol] = now
-                                                        log(
-                                                            logging.INFO,
-                                                            "order",
+                                                    # Устанавливаем TP как отдельный conditional order
+                                                    try:
+                                                        tp_order_id, tp_err = place_conditional_exit(
+                                                            ADAPTER.x,
                                                             symbol,
-                                                            f"Pattern entry {model_signal} qty={qty_val:.6f} price≈{entry_price:.6f}",
+                                                            "buy" if want_long else "sell",
+                                                            entry_price,
+                                                            last_price,
+                                                            tp_pct_eff,
+                                                            cat,
+                                                            is_tp=True,
                                                         )
-                                                        log_decision(symbol, "pattern_entry", decision="entry")
-                                                        try:
-                                                            ensure_exit_orders(
-                                                                ADAPTER,
+                                                        if tp_err:
+                                                            log_once("warning", f"exit | {symbol} | TP setup failed: {tp_err}")
+                                                        elif tp_order_id:
+                                                            logging.info(
+                                                                "exit | %s | Take-profit placed (order_id=%s)",
                                                                 symbol,
-                                                                model_signal,
-                                                                qty_val,
-                                                                entry_ctx.get("sl_price"),
-                                                                entry_ctx.get("tp_price"),
+                                                                tp_order_id,
                                                             )
-                                                        except Exception as exc:
-                                                            logging.warning(
-                                                                "exit_guard | %s | ensure_exit_orders failed: %s",
-                                                                symbol,
-                                                                exc,
-                                                            )
-                                                        recent_hits.append(True)
-                                                        recent_trade_times.append(now)
-                                                        fallback_cooldown[symbol] = entry_ctx["open_bar_index"] + 2
-                                                        hard_entries += 1
-                                                        emit_summary(symbol, "entry")
-                                                        pattern_trade_executed = True
+                                                    except Exception as exc:
+                                                        log_once("warning", f"exit | {symbol} | TP exception: {exc}")
+
+
 
         if pattern_trade_executed:
             continue
@@ -6657,7 +6635,13 @@ def run_bot():
         rsi_val = df_trend["rsi"].iloc[-1]
         if is_derivative_market:
             leverage_category = detect_market_category(exchange, symbol)
-            if str(leverage_category).lower() == "linear":
+            cat_normalized = str(leverage_category or "").lower()
+            
+            # ИСПРАВЛЕНИЕ: нормализуем категорию перед установкой плеча
+            if cat_normalized in ("", "swap"):
+                cat_normalized = "linear"
+            
+            if cat_normalized in ("linear", "inverse"):
                 try:
                     if not safe_set_leverage(exchange, symbol, mode_lev):
                         log_decision(symbol, "leverage_failed")

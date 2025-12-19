@@ -1,6 +1,6 @@
 import os
 
 
-API_KEY = os.getenv("BYBIT_API_KEY", "UAWJzEjAHx31UElsty")
-API_SECRET = os.getenv("BYBIT_API_SECRET", "7EPTFfv1kF9GCUgZUP3VyshBQJuwIKvDA7rT")
+API_KEY = os.getenv("BYBIT_API_KEY", "CAqnV0xKa6fXvWfTk6")
+API_SECRET = os.getenv("BYBIT_API_SECRET", "dauTeTQcl8Ytb06rnLRp8qqv1zNY5lvE5z35")
 
