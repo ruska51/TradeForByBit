@@ -4984,13 +4984,9 @@ def ensure_exit_orders(
             "ensured exits " + " ".join(msg_parts) if msg_parts else "ensured exits",
         )
 
-def update_stop_loss(symbol: str, new_sl: float) -> None:
-    """Replace reduce-only stop-loss with a new trigger price.
 
-    Assumes a derivative position is open on ``symbol``. The function cancels
-    existing stop orders for the opposite side and places a new STOP_MARKET
-    order at ``new_sl`` using LastPrice trigger.
-    """
+def update_stop_loss(symbol: str, new_sl: float) -> None:
+    """Replace reduce-only stop-loss with a new trigger price."""
 
     exchange = getattr(ADAPTER, "x", None)
     if not exchange:
@@ -5043,6 +5039,12 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
     if amount_val <= 0:
         return
 
+    # Проверяем hedge mode
+    is_hedge = _force_hedge_mode_check(exchange, norm_symbol, cat)
+    position_idx = 0
+    if is_hedge:
+        position_idx = 1 if qty_signed > 0 else 2
+
     params = {"category": cat, "orderFilter": "StopOrder"}
     fetch_open_orders = getattr(exchange, "fetch_open_orders", None)
     if not callable(fetch_open_orders):
@@ -5077,6 +5079,7 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
                 return str(cand).lower()
         return ""
 
+    # Отменяем старые SL ордера
     for stop in open_stops:
         if not isinstance(stop, dict):
             continue
@@ -5094,7 +5097,7 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
             continue
 
     trigger_direction = BYBIT_TRIGGER_DIRECTIONS["falling" if qty_signed > 0 else "rising"]
-    position_idx = 1 if qty_signed > 0 else 2
+    
     sl_params = {
         "category": cat,
         "triggerPrice": trigger_price,
@@ -5102,10 +5105,11 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
         "triggerBy": "LastPrice",
         "reduceOnly": True,
         "closeOnTrigger": True,
-        "slOrderType": "Market",
-        "positionIdx": position_idx,
-        "tpSlMode": "Full",
     }
+    
+    # КРИТИЧНО: добавляем positionIdx для hedge mode
+    if is_hedge:
+        sl_params["positionIdx"] = position_idx
 
     try:
         exchange.create_order(
@@ -5124,7 +5128,7 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
         )
         return
 
-    logging.info(f"order | {symbol} | stop-loss updated -> {trigger_price:.6f}")
+    logging.info(f"order | {symbol} | stop-loss updated -> {trigger_price:.6f} (idx={position_idx if is_hedge else 0})") 
 
 
 def detect_pattern_from_chart(image_path):
@@ -5402,6 +5406,36 @@ def run_bot():
     # - Health check now skips re-adding symbols без данных и добавляет только валидные резервные пары.
     # - Открытые вне списка позиции добавляются в активные для корректного сопровождения.
     # - Безопасно: изменения касаются только стартовой подготовки списка активных символов.
+        for pos in orphan_positions or []:
+            sym = pos.get("symbol")
+            try:
+                contracts = float(pos.get("contracts", 0) or 0)
+            except (TypeError, ValueError):
+                contracts = 0.0
+            if not sym or contracts <= 0:
+                continue
+            if sym not in active_symbols:
+                logging.warning(
+                    "[run_bot] Found open position on %s not in active list — will manage it.",
+                    sym,
+                )
+                active_symbols.append(sym)
+
+
+        logging.info(f"[run_bot] Active symbols before normalization: {active_symbols}")
+
+        normalized_symbols = []
+        for sym in active_symbols:
+            # Убираем :USDT суффикс если есть
+            clean_sym = sym.split(":")[0] if ":" in sym else sym
+            normalized_symbols.append(clean_sym)
+            if clean_sym != sym:
+                logging.info(f"[run_bot] Normalized {sym} -> {clean_sym}")
+
+        active_symbols = normalized_symbols
+        logging.info(f"[run_bot] Active symbols after normalization: {active_symbols}")
+
+    
     if active_symbols:
         test_sym = "ETH/USDT" if "ETH/USDT" in active_symbols else active_symbols[0]
 
@@ -5625,6 +5659,29 @@ def run_bot():
 
         # process any closed orders even if position info is unavailable
         closed_orders = safe_fetch_closed_orders(exchange, symbol, limit=5)
+        
+        # Обработка закрытых ордеров с нормализацией символов
+        for symbol in active_symbols:
+            # Нормализуем символ для Bybit
+            category = detect_market_category(exchange, symbol) or "linear"
+            norm_symbol = _normalize_bybit_symbol(exchange, symbol, category)
+            
+            try:
+                closed_orders = safe_fetch_closed_orders(exchange, norm_symbol, limit=5)
+            except Exception as exc:
+                # Если не нашли с нормализованным символом, пробуем оригинальный
+                if "does not have market symbol" in str(exc):
+                    try:
+                        # Убираем :USDT если есть
+                        clean_symbol = symbol.split(':')[0]
+                        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
+                    except Exception:
+                        closed_orders = []
+                else:
+                    logging.error(f"fetch_closed_orders failed for {symbol}: {exc}")
+                    closed_orders = []
+
+
         reverse_done = False
         for order in reversed(closed_orders):
             oid = str(order.get("id") or "")
@@ -6633,19 +6690,21 @@ def run_bot():
 
         # === Дополнительная фильтрация по тренду и паттернам ===
         rsi_val = df_trend["rsi"].iloc[-1]
+    
         if is_derivative_market:
             leverage_category = detect_market_category(exchange, symbol)
             cat_normalized = str(leverage_category or "").lower()
             
-            # ИСПРАВЛЕНИЕ: нормализуем категорию перед установкой плеча
             if cat_normalized in ("", "swap"):
                 cat_normalized = "linear"
             
             if cat_normalized in ("linear", "inverse"):
                 try:
-                    if not safe_set_leverage(exchange, symbol, mode_lev):
-                        log_decision(symbol, "leverage_failed")
-                        continue
+                    leverage_result = safe_set_leverage(exchange, symbol, mode_lev)
+                    if not leverage_result:
+                        # Проверяем, не была ли это "leverage not modified"
+                        log_decision(symbol, "leverage_check_failed")
+                        # Не прерываем выполнение - рычаг уже может быть установлен
                     pair_flags = risk_state.setdefault(symbol, PairState())
                     if not pair_flags.leverage_ready:
                         pair_flags.leverage_ready = True
@@ -6655,14 +6714,21 @@ def run_bot():
                             logging.exception("save_risk_state failed: %s", e)
                     logging.info("leverage | %s | leverage_ready set", symbol)
                 except Exception as exc:
-                    logging.error(
-                        "leverage | %s | unexpected set_leverage failure: %s",
-                        symbol,
-                        exc,
-                        exc_info=True,
-                    )
-                    log_decision(symbol, "leverage_exception")
-                    continue
+                    exc_str = str(exc).lower()
+                    if "110043" in exc_str or "leverage not modified" in exc_str:
+                        # Рычаг уже установлен правильно - не ошибка
+                        logging.debug("leverage | %s | already at correct leverage", symbol)
+                        pair_flags = risk_state.setdefault(symbol, PairState())
+                        pair_flags.leverage_ready = True
+                    else:
+                        logging.error(
+                            "leverage | %s | unexpected set_leverage failure: %s",
+                            symbol,
+                            exc,
+                            exc_info=True,
+                        )
+                        log_decision(symbol, "leverage_exception")
+                        continue
             else:
                 logging.warning(
                     "leverage | %s | skip: market %s not linear",
