@@ -22,6 +22,12 @@ import pandas as pd
 from exchange_adapter import ExchangeAdapter
 from logging_utils import ensure_report_schema
 
+# exchange_adapter.py
+from .symbol_utils import normalize_symbol_for_exchange
+
+markets_cache = {}
+
+
 MIN_NOTIONAL = getattr(sys.modules.get("main"), "MIN_NOTIONAL", 10.0)
 
 

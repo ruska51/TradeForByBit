@@ -18,6 +18,13 @@ from logging_utils import (
     log_once,
 )
 
+# Для нормализации символов Bybit
+from .symbol_utils import normalize_symbol_for_exchange
+
+# Глобальный кэш рынков для normalize_symbol_for_exchange
+_markets_cache: dict[str, dict] = {}
+
+
 
 LEVERAGE_SKIPPED = object()
 
@@ -422,12 +429,17 @@ def safe_fetch_closed_orders(exchange, symbol: str | None = None, limit: int = 5
     is_bybit = 'bybit' in exchange.id.lower()
 
     # Prepare symbol and params for Bybit
-    if is_bybit and symbol:
-        if symbol.endswith('/USDT') and ':' not in symbol:
-            symbol = f"{symbol}:USDT"
-        if params is None:
-            params = {}
-        params['category'] = 'linear'
+    # Определяем, надо ли нормализовать символ
+    if symbol:
+        if is_bybit:
+            # Приводим символ к CCXT‑совместимому виду (убирает ':USDT')
+            symbol = normalize_symbol_for_exchange(exchange, symbol, _markets_cache)
+            # Определяем категорию рынка (linear/inverse) с помощью detect_market_category
+            category = detect_market_category(exchange, symbol) or 'linear'
+            if params is None:
+                params = {}
+            params['category'] = category
+
 
     try:
         return exchange.fetch_closed_orders(symbol, None, limit, params or {})
@@ -1671,11 +1683,15 @@ class ExchangeAdapter:
 
         try:
             ex = getattr(self, "x", None)
-            is_bybit = 'bybit' in ex.id.lower()
-            if is_bybit and symbol:
-                if symbol.endswith('/USDT') and ':' not in symbol:
-                    symbol = f"{symbol}:USDT"
-            normalized_symbol = self._ccxt_symbol(symbol) if symbol else symbol
+            is_bybit = 'bybit' in ex.id.lower() if ex else False
+
+            # Нормализуем символ для Bybit
+            if symbol:
+                if is_bybit:
+                    symbol = normalize_symbol_for_exchange(ex, symbol, _markets_cache)
+                normalized_symbol = self._ccxt_symbol(symbol) if symbol else symbol
+            else:
+                normalized_symbol = None
             params = self._default_params(symbol=symbol)
             if ex and hasattr(ex, "fetch_open_orders"):
                 sym_arg = normalized_symbol if symbol is not None else None
@@ -1710,9 +1726,10 @@ class ExchangeAdapter:
                 return (0, [])
 
             is_bybit = 'bybit' in self.x.id.lower()
-            if is_bybit and symbol:
-                if symbol.endswith('/USDT') and ':' not in symbol:
-                    symbol = f"{symbol}:USDT"
+            if symbol:
+                if is_bybit:
+                    symbol = normalize_symbol_for_exchange(self.x, symbol, _markets_cache)
+
 
             cnt, ids = self.fetch_open_orders(symbol)
             if not cnt:
