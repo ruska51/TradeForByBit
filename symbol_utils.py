@@ -19,9 +19,18 @@ def normalize_symbol_for_exchange(exchange, symbol: str, markets_cache: dict) ->
 
     if not markets_cache.get("loaded"):
         markets_cache["by_name"] = set(getattr(exchange, "markets", {}) or {})
-        markets_cache["by_id"] = {
-            k: v.get("symbol") for k, v in getattr(exchange, "markets_by_id", {}).items()
-        }
+        if isinstance(raw_mb, dict):
+            markets_cache["by_id"] = {}
+            for k, v in raw_mb.items():
+                # если элемент — словарь, возьмём поле 'symbol'; иначе используем сам элемент
+                if isinstance(v, dict):
+                    markets_cache["by_id"][k] = v.get("symbol")
+                else:
+                    markets_cache["by_id"][k] = v
+        else:
+            # если markets_by_id — список или другой тип, не пытаемся вызвать .items()
+            markets_cache["by_id"] = {}
+
         markets_cache["loaded"] = True
 
     by_name = markets_cache.get("by_name", set())
