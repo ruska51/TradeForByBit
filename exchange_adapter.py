@@ -19,7 +19,12 @@ from logging_utils import (
 )
 
 # Для нормализации символов Bybit
-from .symbol_utils import normalize_symbol_for_exchange
+try:
+    # относительный импорт сработает, если проект запускается как пакет (python -m TradeForByBit.main)
+    from .symbol_utils import normalize_symbol_for_exchange
+except ImportError:
+    # fallback на абсолютный импорт при запуске main.py напрямую
+    from symbol_utils import normalize_symbol_for_exchange
 
 # Глобальный кэш рынков для normalize_symbol_for_exchange
 _markets_cache: dict[str, dict] = {}
@@ -1696,9 +1701,20 @@ class ExchangeAdapter:
             if ex and hasattr(ex, "fetch_open_orders"):
                 sym_arg = normalized_symbol if symbol is not None else None
                 orders = _call_fetch(ex, sym_arg, params) or []
-                ids = [o.get("id") or o.get("orderId") for o in orders]
+
+                # Безопасно извлекаем идентификаторы: обрабатываем только словари
+                ids: list[str] = []
+                for o in orders:
+                    if not isinstance(o, dict):
+                        # элемент неожиданного типа (список и т.п.), пропускаем
+                        continue
+                    # берем id из общих полей CCXT
+                    order_id = o.get("id") or o.get("orderId")
+                    if order_id is not None:
+                        ids.append(order_id)
+
                 return len(ids), ids
-        except Exception as exc:  # pragma: no cover - logging only
+        except Exception as exc:
             if self._is_rate_limited(exc):
                 logging.warning("adapter | fetch_open_orders rate limited: %s", exc)
                 time.sleep(1.0)
