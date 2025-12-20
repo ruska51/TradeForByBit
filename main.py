@@ -1479,7 +1479,6 @@ def initialize_symbols() -> list[str]:
         "ADA/USDT",
         "XRP/USDT",
         "LTC/USDT",
-        "LINK/USDT",
         "NEAR/USDT",
         "SUI/USDT",
         "TON/USDT",
@@ -1493,7 +1492,7 @@ def initialize_symbols() -> list[str]:
             seen.add(s)
             unique.append(s)
     # PATCH NOTES:
-    # - Обновлён основной список (BTC, ETH, SOL, BNB, ADA, XRP, LTC, LINK, NEAR, SUI, TON, TRX) для параллельного анализа.
+    # - Обновлён основной список (BTC, ETH, SOL, BNB, ADA, XRP, LTC, NEAR, SUI, TON, TRX) для параллельного анализа.
     # - Резервные пары и лимит max_open_trades обновлены под расширенный охват (10 одновременных позиций).
     # - Безопасно: filter_supported_symbols убирает неподдерживаемые рынки и обновляет BASE_SYMBOL_COUNT.
     # - Критерии: initialize_symbols содержит только активные линейные пары без контрактов без OHLCV.

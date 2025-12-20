@@ -1725,7 +1725,14 @@ class ExchangeAdapter:
                     if ex and hasattr(ex, "fetch_open_orders"):
                         sym_arg = normalized_symbol if symbol is not None else None
                         orders = _call_fetch(ex, sym_arg, params) or []
-                        ids = [o.get("id") or o.get("orderId") for o in orders]
+                        # Безопасно извлекаем идентификаторы: обрабатываем только словари
+                        ids: list[str] = []
+                        for o in orders:
+                            if not isinstance(o, dict):
+                                continue  # пропускаем элементы неожиданных типов (списки и т.п.)
+                            order_id = o.get("id") or o.get("orderId")
+                            if order_id is not None:
+                                ids.append(order_id)
                         return len(ids), ids
                 except Exception as retry_exc:  # pragma: no cover - logging only
                     logging.warning("adapter | fetch_open_orders retry failed: %s", retry_exc)
