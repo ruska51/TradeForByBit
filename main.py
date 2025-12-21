@@ -6209,7 +6209,17 @@ def run_bot():
         ) or 0.0
         if "adx" not in df_trend.columns:
             df_trend["adx"] = 0.0
-        adx_val = df_trend["adx"].iloc[-1]
+            
+        adx_val = float(df_trend["adx"].iloc[-1])
+
+        # Критичный лог для диагностики
+        if adx_val == 0:
+            logging.warning(
+                "DEBUG | %s | ADX=0! df_trend shape=%s, atr=%s",
+                symbol,
+                df_trend.shape,
+                df_trend.get("atr", pd.Series([0])).iloc[-1] if "atr" in df_trend.columns else "MISSING"
+            )
 
         # build feature row for model inference
         for lag in range(1, 7):
