@@ -80,106 +80,68 @@ def _make_xgb_softprob():
 
 
 def retrain_global_model(df_features, df_target, feature_cols):
-    """
-    Обучает модель с гарантированным ``predict_proba``. Предпочитает
-    калиброванный ExtraTrees, при проблемах откатывается на XGBoost.
-    """
-
+    """Retrain global model with XGBoost fallback."""
+    import logging
     import numpy as np
-    import pandas as pd
-    from retrain_utils import (
-        SKLEARN_OK,
-        XGB_OK,
-        _make_extratrees_calibrated,
-        _make_xgb_softprob,
+    from model_utils import save_global_bundle, SimpleScaler  # ← ДОБАВЬ ЭТУ СТРОКУ!
+    
+    try:
+        from xgboost import XGBClassifier
+        has_xgb = True
+    except ImportError:
+        has_xgb = False
+        logging.error("retrain_utils | XGBoost not available")
+        raise RuntimeError("XGBoost required for training")
+    
+    # Ensure all 3 classes present
+    classes_present = set(df_target.unique())
+    if classes_present != {0, 1, 2}:
+        logging.warning(
+            "retrain_utils | classes=%s, adding synthetic samples",
+            classes_present
+        )
+        for cls in [0, 1, 2]:
+            if cls not in classes_present:
+                # Add 3 synthetic samples per missing class
+                for _ in range(3):
+                    df_features = df_features.append(
+                        df_features.iloc[0], ignore_index=True
+                    )
+                    df_target = df_target.append(
+                        pd.Series([cls]), ignore_index=True
+                    )
+    
+    # Scale features
+    scaler = SimpleScaler().fit(df_features.values)
+    X_scaled = scaler.transform(df_features.values)
+    
+    # Train XGBoost
+    model = XGBClassifier(
+        n_estimators=100,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        objective="multi:softprob",
+        num_class=3,
+        eval_metric="mlogloss",
+        tree_method="hist",
+        random_state=42
     )
-
-    if df_features is None or df_target is None or not feature_cols:
-        raise ValueError("retrain_global_model | input features/target empty")
-
-    X_df = df_features.copy()
-    y_s = df_target.copy()
-
-    # убрать NaN и infinities
-    X_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    mask = (~X_df.isna().any(axis=1)) & (~y_s.isna())
-    X_df = X_df.loc[mask]
-    y_s = y_s.loc[mask]
-    if X_df.empty or y_s.empty:
-        raise ValueError("retrain_global_model | dataset empty after cleaning")
-
-    X = X_df[feature_cols].astype("float32").values
-    y = y_s.astype("int32").values
-
-    if X.shape[0] == 0:
-        raise ValueError("retrain_global_model | no training rows available")
-
-    # апсемплинг классов
-    X, y = _ensure_all_classes(X, y, min_count=30)
-
-    if SKLEARN_OK:
-        from sklearn.model_selection import train_test_split
-        from sklearn.preprocessing import StandardScaler
-
-        Xtr, Xte, ytr, yte = train_test_split(
-            X, y, test_size=0.2, stratify=y, random_state=42
-        )
-        scaler = StandardScaler()
-        Xtr_s = scaler.fit_transform(Xtr)
-        model = _make_extratrees_calibrated()
-        model.fit(Xtr_s, ytr)
-        classes = getattr(model, "classes_", np.array([], dtype=int))
-        if (
-            not hasattr(model, "predict_proba")
-            or len(classes) != len(REQUIRED_CLASSES)
-            or set(classes.tolist()) != set(REQUIRED_CLASSES.tolist())
-        ):
-            logging.warning(
-                "retrain_utils | ExtraTrees invalid (proba=%s, classes=%s); fallback to XGB",
-                hasattr(model, "predict_proba"),
-                classes,
-            )
-            if not XGB_OK:
-                raise RuntimeError("ExtraTrees invalid and XGBoost not installed")
-            model = _make_xgb_softprob()
-            model.fit(Xtr_s, ytr)
-            classes = np.array([0, 1, 2])
-        try:
-            model.classes_ = classes
-            save_global_bundle(model, scaler, feature_cols, classes)
-        except Exception as e:
-            logging.error("retrain_utils | save bundle failed: %s", e)
-            raise
-        logging.info(
-            "retrain_utils | saved calibrated model with classes=%s",
-            classes.tolist(),
-        )
-        from model_utils import save_global_bundle
-        save_global_bundle(model, scaler, feature_cols, classes)
-        
-        return model, scaler, feature_cols, classes
-
-    if XGB_OK:
-        scaler = SimpleScaler().fit(X)
-        model = _make_xgb_softprob()
-        model.fit(scaler.transform(X), y)
-        classes = np.array([0, 1, 2])
-        try:
-            model.classes_ = classes
-            save_global_bundle(model, scaler, feature_cols, classes)
-        except Exception as e:
-            logging.error("retrain_utils | save bundle failed: %s", e)
-            raise
-        logging.info(
-            "retrain_utils | saved XGB softprob model with classes=%s",
-            classes.tolist(),
-        )
-        from model_utils import save_global_bundle
-        save_global_bundle(model, scaler, feature_cols, classes)
-
-        return model, scaler, feature_cols, classes
-
-    raise RuntimeError("No ML libraries available. Install sklearn or xgboost.")
+    
+    model.fit(X_scaled, df_target.values)
+    
+    # Ensure classes_ attribute
+    model.classes_ = np.array([0, 1, 2])
+    
+    # Save bundle
+    try:
+        save_global_bundle(model, scaler, feature_cols, model.classes_)
+        logging.info("retrain_utils | saved XGB softprob model with classes=%s", model.classes_)
+    except Exception as e:
+        logging.error("retrain_utils | save bundle failed: %s", e)
+        raise
+    
+    return model, scaler, feature_cols, model.classes_
 
 
 def record_feature_mismatch(threshold: int = 3, *args, **kwargs) -> None:

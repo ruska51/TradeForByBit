@@ -73,6 +73,7 @@ from model_utils import (
 from sklearn.metrics import f1_score
 from collections import Counter, defaultdict
 from uuid import uuid4
+from data_prep import build_feature_dataframe  # Для расчёта индикаторов
 try:
     from utils.data_prep import fetch_and_prepare_training_data
 except ImportError:
@@ -1551,49 +1552,58 @@ PATTERN_SOURCE_MAP = {"cnn": 1, "manual": 2, "real": 3, "synthetic": 4, "none": 
 
 
 def calculate_indicators(df):
-    """Enrich OHLCV dataframe with indicators while keeping rows usable.
-
-    Historically this helper relied on :meth:`pandas.DataFrame.dropna` which
-    caused the caller to receive an empty dataframe whenever a division by
-    zero (for example during flat candles) introduced NaNs.  The trading loop
-    would then emit ``"Chart data unavailable"`` warnings and skip pattern
-    recognition altogether.  The updated implementation keeps computations
-    numerically stable by using ``min_periods=1`` windows, guarding every
-    division and normalising problematic values instead of discarding the
-    entire dataset.
-    """
-
+    """Enrich OHLCV with technical indicators."""
+    if df is None or df.empty:
+        return df
+    
     df = df.copy()
-
-    df["ema_fast"] = df["close"].ewm(span=10, adjust=False).mean()
-    df["ema_slow"] = df["close"].ewm(span=50, adjust=False).mean()
-    df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
+    
+    # Basic indicators
+    df["ema_fast"] = df["close"].ewm(span=10, adjust=False, min_periods=1).mean()
+    df["ema_slow"] = df["close"].ewm(span=50, adjust=False, min_periods=1).mean()
+    df["ema_200"] = df["close"].ewm(span=200, adjust=False, min_periods=1).mean()
     df["sma_100"] = df["close"].rolling(window=100, min_periods=1).mean()
-
+    
+    # Time features
     df["hour"] = df["timestamp"].dt.hour
     df["dayofweek"] = df["timestamp"].dt.dayofweek
-
+    
+    # RSI (14-period) - ИСПРАВЛЕНО
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(14, min_periods=1).mean()
     avg_loss = loss.rolling(14, min_periods=1).mean()
+    
+    # Protect against division by zero
     rs = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
     loss_zero = avg_loss == 0
     gain_zero = avg_gain == 0
     valid_mask = ~(loss_zero & gain_zero)
+    
     rs.loc[valid_mask] = avg_gain.loc[valid_mask] / avg_loss.loc[valid_mask].replace(0, np.nan)
     rs.loc[loss_zero & ~gain_zero] = np.inf
+    
     df["rsi"] = 100 - (100 / (1 + rs.replace([np.inf, -np.inf], np.nan)))
     df.loc[loss_zero & ~gain_zero, "rsi"] = 100.0
     df.loc[gain_zero & ~loss_zero, "rsi"] = 0.0
     df.loc[gain_zero & loss_zero, "rsi"] = 50.0
-
+    
+    # MACD
     df["macd"] = df["close"].ewm(span=12, adjust=False).mean() - df["close"].ewm(span=26, adjust=False).mean()
     df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+    
+    # Volatility
     df["volatility"] = df["close"].pct_change(fill_method=None).rolling(50, min_periods=1).std(ddof=0)
-    df["atr"] = (df["high"] - df["low"]).rolling(14, min_periods=1).mean()
-
+    
+    # ATR (14-period) - КРИТИЧНО ВАЖНО!
+    tr1 = df["high"] - df["low"]
+    tr2 = (df["high"] - df["close"].shift()).abs()
+    tr3 = (df["low"] - df["close"].shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["atr"] = tr.rolling(14, min_periods=1).mean()
+    
+    # Williams %R
     high_roll = df["high"].rolling(14, min_periods=1)
     low_roll = df["low"].rolling(14, min_periods=1)
     range_span = high_roll.max() - low_roll.min()
@@ -1603,29 +1613,34 @@ def calculate_indicators(df):
             0.0,
             (high_roll.max() - df["close"]) / range_span * -100,
         )
-
+    
+    # CCI
     tp = (df["high"] + df["low"] + df["close"]) / 3
     tp_mean = tp.rolling(20, min_periods=1).mean()
     tp_std = tp.rolling(20, min_periods=1).std(ddof=0)
     denom = 0.015 * tp_std
     df["cci"] = np.where(denom == 0, 0.0, (df["close"] - tp_mean) / denom)
-
+    
+    # Additional features
     df["candle_range"] = df["high"] - df["low"]
-    df["volume_ema"] = df["volume"].ewm(span=20, adjust=False).mean()
+    df["volume_ema"] = df["volume"].ewm(span=20, adjust=False, min_periods=1).mean()
     df["trend_strength"] = (df["ema_fast"] - df["ema_slow"]).abs()
     df["ema_200_slope"] = df["ema_200"].diff()
     df["trend_direction"] = np.sign(df["ema_fast"] - df["ema_slow"])
     df["trend_persistence"] = df["trend_direction"].rolling(20, min_periods=1).sum().fillna(0)
-
+    
+    # Momentum indicators
     df["roc"] = df["close"].pct_change(periods=10, fill_method=None)
     df["mom"] = df["close"] - df["close"].shift(10)
     df["obv"] = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
-
+    
+    # Bollinger Bands
     close_mean_20 = df["close"].rolling(20, min_periods=1).mean()
     close_std_20 = df["close"].rolling(20, min_periods=1).std(ddof=0)
     bb_denom = 2 * close_std_20
     df["bb_b"] = np.where(bb_denom == 0, 0.0, (df["close"] - close_mean_20) / bb_denom)
-
+    
+    # Stochastic
     low_min = df["low"].rolling(14, min_periods=1).min()
     high_max = df["high"].rolling(14, min_periods=1).max()
     stoch_denom = high_max - low_min
@@ -1635,27 +1650,33 @@ def calculate_indicators(df):
         100 * (df["close"] - low_min) / stoch_denom,
     )
     df["stoch_d"] = df["stoch_k"].rolling(3, min_periods=1).mean()
-
+    
+    # ADX - КРИТИЧНО ВАЖНО!
     plus_dm = (df["high"].diff()).clip(lower=0)
     minus_dm = (-df["low"].diff()).clip(lower=0)
-    tr1 = df["high"] - df["low"]
-    tr2 = (df["high"] - df["close"].shift()).abs()
-    tr3 = (df["low"] - df["close"].shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_adx = tr.rolling(14, min_periods=1).mean()
-    atr_adx = atr_adx.replace(0, np.nan)
+    
+    # ATR для ADX
+    atr_adx = tr.rolling(14, min_periods=1).mean().replace(0, np.nan)
+    
+    # Directional Indicators
     plus_di = 100 * (plus_dm.rolling(14, min_periods=1).mean() / atr_adx)
     minus_di = 100 * (minus_dm.rolling(14, min_periods=1).mean() / atr_adx)
+    
+    # ADX calculation
     adx_denom = (plus_di + minus_di).replace(0, np.nan)
     df["adx"] = 100 * (plus_di - minus_di).abs() / adx_denom
     df["adx"] = df["adx"].fillna(0.0)
-
+    df["plus_di"] = plus_di.fillna(0.0)
+    df["minus_di"] = minus_di.fillna(0.0)
+    
+    # Lag features
     lag_periods = [1, 2, 3]
     for lag in lag_periods:
         df[f"rsi_lag{lag}"] = df["rsi"].shift(lag)
         df[f"macd_lag{lag}"] = df["macd"].shift(lag)
         df[f"ema_fast_lag{lag}"] = df["ema_fast"].shift(lag)
-
+    
+    # Rolling statistics
     for window in [5, 10, 20, 50]:
         df[f"close_rolling_mean_{window}"] = df["close"].rolling(window, min_periods=1).mean()
         df[f"close_rolling_std_{window}"] = df["close"].rolling(window, min_periods=1).std(ddof=0)
@@ -1665,19 +1686,20 @@ def calculate_indicators(df):
             df["high"].rolling(window, min_periods=1).max()
             - df["low"].rolling(window, min_periods=1).min()
         )
-
+    
     df["vol_div_avg20"] = df["volume"] / (df["volume"].rolling(20, min_periods=1).mean() + 1e-8)
-
+    
+    # Clean up
     warmup = max(10, max(lag_periods))
     if len(df) > warmup:
         df = df.iloc[warmup:].copy()
-
+    
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(subset=["open", "high", "low", "close", "volume"], inplace=True)
     df.ffill(inplace=True)
     df.bfill(inplace=True)
     df.fillna(0.0, inplace=True)
-
+    
     return df
 
 
@@ -2787,6 +2809,11 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
             if df_1h is not None and not df_1h.empty:
                 df_5m = resample_ohlcv(df_1h, "5min")
                 data_mode = "reduced"
+
+    # Убедимся что ATR рассчитан
+    if "atr" not in df_trend.columns or df_trend["atr"].iloc[-1] == 0:
+        # Пересчитаем индикаторы если их нет
+        df_trend = calculate_indicators(df_trend)
 
     if "atr" in df_trend.columns:
         atr = float(df_trend["atr"].iloc[-1])
