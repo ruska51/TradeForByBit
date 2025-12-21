@@ -1557,8 +1557,9 @@ def calculate_indicators(df):
         return df
 
 
-    logging.info(
-        "DEBUG calc_indicators | input shape=%s, close range=[%.2f..%.2f], high-low avg=%.4f",
+    # Диагностика (только в debug режиме)
+    logging.debug(
+        "calc_indicators | input shape=%s, close range=[%.2f..%.2f], high-low avg=%.4f",
         df.shape,
         df["close"].min() if "close" in df.columns else 0,
         df["close"].max() if "close" in df.columns else 0,
@@ -1610,7 +1611,15 @@ def calculate_indicators(df):
     tr2 = (df["high"] - df["close"].shift()).abs()
     tr3 = (df["low"] - df["close"].shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Защита от слишком малых значений (для монет < $1)
+    tr = tr.replace(0, np.nan)  # Заменяем 0 на NaN
     df["atr"] = tr.rolling(14, min_periods=1).mean()
+    
+    # Если ATR всё равно 0, используем процент от цены
+    if df["atr"].iloc[-1] == 0 or pd.isna(df["atr"].iloc[-1]):
+        fallback_atr = df["close"] * 0.02  # 2% от цены
+        df["atr"] = df["atr"].fillna(fallback_atr)
     
     # Williams %R
     high_roll = df["high"].rolling(14, min_periods=1)
@@ -2832,22 +2841,21 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
     df_5m = fetch_ohlcv(symbol, "5m", limit=50)
     data_mode = "normal"
     
-    # 🔥 ПРИНУДИТЕЛЬНЫЙ ПЕРЕСЧЁТ для проблемных символов
-    if "atr" not in df_trend.columns or df_trend["atr"].iloc[-1] == 0:
-        logging.warning(
-            "mode | %s | ATR missing/zero, recalculating indicators",
-            symbol
-        )
+    if "atr" not in df_trend.columns:
+        logging.warning("mode | %s | ATR column missing, recalculating", symbol)
         df_trend = calculate_indicators(df_trend)
-        
-        # Если всё ещё 0 - данные битые
-        if "atr" in df_trend.columns and df_trend["atr"].iloc[-1] == 0:
-            logging.error(
-                "mode | %s | ATR still 0 after recalc! Price range: %.4f-%.4f",
-                symbol,
-                df_trend["close"].min() if not df_trend.empty else 0,
-                df_trend["close"].max() if not df_trend.empty else 0
-            )
+    
+    # Проверка на микроскопический ATR
+    if "atr" in df_trend.columns:
+        atr_raw = df_trend["atr"].iloc[-1]
+        if atr_raw == 0 or pd.isna(atr_raw):
+            # Попробуем взять среднее вместо последнего
+            atr_mean = df_trend["atr"].tail(5).mean()
+            if atr_mean > 0:
+                logging.info("mode | %s | Using mean ATR=%.6f instead of last=%.6f", 
+                           symbol, atr_mean, atr_raw)
+                # Перезаписываем последнее значение
+                df_trend.loc[df_trend.index[-1], "atr"] = atr_mean
 
     if df_5m is None or df_5m.empty:
         df_15m = fetch_ohlcv(symbol, "15m", limit=50)
@@ -5636,6 +5644,10 @@ def run_bot():
         if ENABLE_SYMBOL_BAN and stats.is_banned(symbol):
             log_decision(symbol, "symbol_banned")
             continue
+        
+        import time
+        symbol_start_time = time.time()
+
         soft_risk = 0.5 if stats.pop_soft_risk(symbol) else 1.0
 
         # Retrieve per-symbol parameters
@@ -7076,6 +7088,15 @@ def run_bot():
                     save_risk_state(risk_state, limiter, cool, stats)
                 except Exception as e:
                     logging.exception("save_risk_state failed: %s", e)
+        
+        #ТАЙМАУТ на обработку одного символа
+        elapsed = time.time() - symbol_start_time
+        if elapsed > 30:  # 30 секунд на символ максимум
+            logging.error(
+                "[run_bot] Symbol %s processing timeout (%.1fs), skipping to next",
+                symbol, elapsed
+            )
+            continue
 
         # Trade log entries are written on every position close via
         # the ``log_trade`` helper above.
