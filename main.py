@@ -4229,18 +4229,15 @@ def param_grid_search(symbols=["ETH/USDT", "SOL/USDT", "BNB/USDT", "SUI/USDT", "
 
 
 def cancel_stale_orders(symbol: str) -> int:
-    """Отменяет открытые/висящие ордера по символу. Возвращает int."""
     try:
-        cnt, _ids = ADAPTER.cancel_open_orders(symbol)
-        cnt = int(cnt or 0)
-        if cnt > 0:
-            logging.info(f"order | {symbol} | cancelled open orders: {cnt}")
-        else:
-            logging.debug(f"order | {symbol} | no open orders to cancel")
-        return cnt
-    except Exception as e:  # pragma: no cover - logging only
-        logging.error(f"order | {symbol} | cancel_stale_orders failed: {e}")
+        cnt, ids = ADAPTER.cancel_open_orders(symbol)
+    except Exception as exc:
+        # если вернулось одно значение или None, обрабатываем это
+        logger.error(f"cancel_stale_orders failed: {exc}")
         return 0
+    if cnt > 0:
+        logger.info(f"Cancelled {cnt} stale orders for {symbol}")
+    return cnt
 
 
 def cancel_all_open_orders(symbol):

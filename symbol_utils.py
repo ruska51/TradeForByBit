@@ -19,26 +19,25 @@ def normalize_symbol_for_exchange(exchange, symbol: str, markets_cache: dict) ->
 
     if not markets_cache.get("loaded"):
         markets_cache["by_name"] = set(getattr(exchange, "markets", {}) or {})
-        # Загружаем markets_by_id в промежуточную переменную
+        # вместо ошибочного [str, str] = {} используйте безопасную инициализацию
         raw_mb = getattr(exchange, "markets_by_id", {})
 
-        # Приводим markets_by_id к безопасному виду (словарь), даже если это список или иной тип
         if isinstance(raw_mb, dict):
-            # Значения — словари или строки; извлекаем поле 'symbol' при наличии
             by_id = {}
             for k, v in raw_mb.items():
+                # если запись — словарь, берём поле 'symbol'
                 if isinstance(v, dict):
                     sym = v.get("symbol")
                     if sym:
                         by_id[k] = sym
+                # если запись — строка, используем её как символ
                 elif isinstance(v, str):
                     by_id[k] = v
             markets_cache["by_id"] = by_id
         else:
-            # markets_by_id не является словарём — создаём пустую карту
+            # markets_by_id оказался списком или другой структурой
             markets_cache["by_id"] = {}
 
-        markets_cache["loaded"] = True
 
     by_name = markets_cache.get("by_name", set())
     if symbol in by_name:

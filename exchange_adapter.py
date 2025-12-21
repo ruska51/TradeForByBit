@@ -1687,33 +1687,25 @@ class ExchangeAdapter:
             return ex.fetch_open_orders()
 
         try:
+            
             ex = getattr(self, "x", None)
             is_bybit = 'bybit' in ex.id.lower() if ex else False
 
-            # Нормализуем символ для Bybit
-            if symbol:
-                if is_bybit:
-                    symbol = normalize_symbol_for_exchange(ex, symbol, _markets_cache)
-                normalized_symbol = self._ccxt_symbol(symbol) if symbol else symbol
-            else:
-                normalized_symbol = None
+            if symbol and is_bybit:
+                symbol = normalize_symbol_for_exchange(ex, symbol, _markets_cache)
+            normalized_symbol = self._ccxt_symbol(symbol) if symbol else None
+
             params = self._default_params(symbol=symbol)
-            if ex and hasattr(ex, "fetch_open_orders"):
-                sym_arg = normalized_symbol if symbol is not None else None
-                orders = _call_fetch(ex, sym_arg, params) or []
+            orders = _call_fetch(ex, normalized_symbol, params) or []
 
-                # Безопасно извлекаем идентификаторы: обрабатываем только словари
-                ids: list[str] = []
-                for o in orders:
-                    if not isinstance(o, dict):
-                        # элемент неожиданного типа (список и т.п.), пропускаем
-                        continue
-                    # берем id из общих полей CCXT
-                    order_id = o.get("id") or o.get("orderId")
-                    if order_id is not None:
+            ids: list[str] = []
+            for o in orders:
+                if isinstance(o, dict):
+                    order_id = o.get('id') or o.get('orderId')
+                    if order_id:
                         ids.append(order_id)
+            return len(ids), ids
 
-                return len(ids), ids
         except Exception as exc:
             if self._is_rate_limited(exc):
                 logging.warning("adapter | fetch_open_orders rate limited: %s", exc)
@@ -1741,7 +1733,11 @@ class ExchangeAdapter:
 
     # ------------------------------------------------------------------
     def cancel_open_orders(self, symbol: str | None = None) -> tuple[int, list]:
+
         """Cancel open orders and return ``(count, ids)``."""
+        if symbol and 'bybit' in self.x.id.lower():
+            symbol = normalize_symbol_for_exchange(self.x, symbol, _markets_cache)
+        count, ids = self.fetch_open_orders(symbol=symbol)
 
         cancelled_ids: list = []
         try:
@@ -1754,9 +1750,15 @@ class ExchangeAdapter:
                     symbol = normalize_symbol_for_exchange(self.x, symbol, _markets_cache)
 
 
-            cnt, ids = self.fetch_open_orders(symbol)
-            if not cnt:
-                return (0, [])
+            try:
+                count, ids = self.fetch_open_orders(symbol)
+            except Exception as exc:
+                # логируем исключение, но возвращаем нули, чтобы не было unpack error
+                self.logger.warning(f"cancel_open_orders failed to fetch open orders: {exc}")
+                return 0, []
+
+            if count == 0:
+                return 0, []
 
             params = self._default_params(symbol=symbol)
             if hasattr(self.x, "cancel_all_orders"):
@@ -1778,19 +1780,14 @@ class ExchangeAdapter:
                 cancelled_ids = ids
                 return (len(cancelled_ids), cancelled_ids)
 
+            cancelled_ids = []
             for oid in ids:
                 try:
-                    if params:
-                        try:
-                            self.x.cancel_order(oid, symbol, params)
-                        except TypeError:
-                            self.x.cancel_order(oid, symbol)
-                    else:
-                        self.x.cancel_order(oid, symbol)
+                    self.x.cancel_order(oid, symbol)
                     cancelled_ids.append(oid)
-                except Exception as exc:  # pragma: no cover - logging only
-                    logging.warning("adapter | cancel_order failed: %s", exc)
-            return (len(cancelled_ids), cancelled_ids)
+                except Exception as exc:
+                    self.logger.warning(f"cancel_open_orders failed to cancel {oid}: {exc}")
+            return len(cancelled_ids), cancelled_ids
 
         except Exception as exc:  # pragma: no cover - logging only
             logging.warning("adapter | cancel_open_orders failed: %s", exc)
