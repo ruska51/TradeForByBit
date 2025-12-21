@@ -154,6 +154,9 @@ def retrain_global_model(df_features, df_target, feature_cols):
             "retrain_utils | saved calibrated model with classes=%s",
             classes.tolist(),
         )
+        from model_utils import save_global_bundle
+        save_global_bundle(model, scaler, feature_cols, classes)
+        
         return model, scaler, feature_cols, classes
 
     if XGB_OK:
@@ -171,6 +174,9 @@ def retrain_global_model(df_features, df_target, feature_cols):
             "retrain_utils | saved XGB softprob model with classes=%s",
             classes.tolist(),
         )
+        from model_utils import save_global_bundle
+        save_global_bundle(model, scaler, feature_cols, classes)
+
         return model, scaler, feature_cols, classes
 
     raise RuntimeError("No ML libraries available. Install sklearn or xgboost.")

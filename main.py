@@ -73,7 +73,10 @@ from model_utils import (
 from sklearn.metrics import f1_score
 from collections import Counter, defaultdict
 from uuid import uuid4
-from utils.data_prep import fetch_and_prepare_training_data
+try:
+    from utils.data_prep import fetch_and_prepare_training_data
+except ImportError:
+    from data_prep import fetch_and_prepare_training_data
 
 try:
     import torch
@@ -1887,7 +1890,7 @@ except Exception as e:
     logging.info("main | bundle not found yet: %s; retraining...", e)
     try:
         df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-            ADAPTER, symbols
+            ADAPTER, symbols, base_tf="15m", limit=400
         )
         GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
             df_features, df_target, feature_cols
@@ -1966,7 +1969,7 @@ def ensure_model_loaded(adapter, symbols):
         )
         try:
             df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                adapter, symbols
+                ADAPTER, symbols, base_tf="15m", limit=400
             )
             GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
                 df_features, df_target, feature_cols
@@ -1985,7 +1988,7 @@ def ensure_model_loaded(adapter, symbols):
     except Exception:
         try:
             df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                adapter, symbols
+                ADAPTER, symbols, base_tf="15m", limit=400
             )
             GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
                 df_features, df_target, feature_cols
@@ -2456,7 +2459,7 @@ def backtest(symbol, tf="15m", horizon: int | None = None):
                     pass
                 try:
                     df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                        ADAPTER, symbols
+                        ADAPTER, symbols, base_tf="15m", limit=400
                     )
                     GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
                         df_features, df_target, feature_cols
@@ -5265,7 +5268,7 @@ def run_bot():
                     pass
         try:
             df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                ADAPTER, symbols
+                ADAPTER, symbols, base_tf="15m", limit=400
             )
             GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
                 df_features, df_target, feature_cols
@@ -5420,17 +5423,23 @@ def run_bot():
 
         logging.info(f"[run_bot] Active symbols before normalization: {active_symbols}")
 
+        # Убираем дубликаты после нормализации
+        seen = set()
         normalized_symbols = []
         for sym in active_symbols:
             # Убираем :USDT суффикс если есть
             clean_sym = sym.split(":")[0] if ":" in sym else sym
-            normalized_symbols.append(clean_sym)
-            if clean_sym != sym:
-                logging.info(f"[run_bot] Normalized {sym} -> {clean_sym}")
+            
+            if clean_sym not in seen:
+                normalized_symbols.append(clean_sym)
+                seen.add(clean_sym)
+                if clean_sym != sym:
+                    logging.info(f"[run_bot] Normalized {sym} -> {clean_sym}")
+            else:
+                logging.info(f"[run_bot] Skipped duplicate: {sym} -> {clean_sym}")
 
         active_symbols = normalized_symbols
         logging.info(f"[run_bot] Active symbols after normalization: {active_symbols}")
-
     
     if active_symbols:
         test_sym = "ETH/USDT" if "ETH/USDT" in active_symbols else active_symbols[0]
@@ -7319,7 +7328,7 @@ def main() -> None:
         )
         try:
             df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                ADAPTER, symbols
+                ADAPTER, symbols, base_tf="15m", limit=400
             )
             _retrain_checked(df_features, df_target, feature_cols)
         except Exception as e:
