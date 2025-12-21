@@ -991,7 +991,7 @@ if os.environ.get("LOAD_PATTERN_MODEL") == "1":
 from credentials import API_KEY, API_SECRET
 
 # Leverage used for all pairs
-LEVERAGE = int(os.getenv("LEVERAGE", 20))
+LEVERAGE = int(os.getenv("LEVERAGE", 10))
 
 SANDBOX_MODE = True
 
@@ -1019,20 +1019,20 @@ def _env_float(name: str, default: float) -> float:
 
 
 # Базовые и динамические фильтры вероятности/ADX
-BASE_PROBA_FILTER = 0.25
+BASE_PROBA_FILTER = 0.50
 PROBA_FILTER = _env_float("PROBA_FILTER", BASE_PROBA_FILTER)  # динамическое значение
 # [ANCHOR:DYNA_THRESH_CONSTS]
 MIN_PROBA_FILTER = _env_float(
     "MIN_PROBA_FILTER", min(0.4, float(PROBA_FILTER))
 )
 # Стратегия допускает сделки только при умеренном тренде
-BASE_ADX_THRESHOLD = 20.0  # Повышен базовый порог ADX для трендовых фильтров
+BASE_ADX_THRESHOLD = 10.0  # Понижен базовый порог ADX для трендовых фильтров
 ADX_THRESHOLD = _env_float("ADX_THRESHOLD", BASE_ADX_THRESHOLD)  # минимальный ADX для сделки
 MIN_ADX_THRESHOLD = _env_float(
     "MIN_ADX_THRESHOLD", min(12.0, float(ADX_THRESHOLD))
 )
-RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 75.0)  # порог перекупленности для long
-RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 25.0)  # порог перепроданности для short
+RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 85.0)  # порог перекупленности для long
+RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 15.0)  # порог перепроданности для short
 RSI_OVERBOUGHT_MAX = max(RSI_OVERBOUGHT, _env_float("RSI_OVERBOUGHT_MAX", 80.0))
 RSI_OVERSOLD_MIN = min(RSI_OVERSOLD, _env_float("RSI_OVERSOLD_MIN", 20.0))
 PRED_HORIZON = 3  # число свечей вперёд для прогноза и бэктеста
@@ -6637,6 +6637,15 @@ def run_bot():
         reason = None
         if signal_to_use == "hold":
             reason = "hold_no_position" if no_position else "hold_position_exists"
+        # Fallback для низкого ADX при высокой уверенности модели
+        if adx_val < adj_adx:
+            if confidence >= 0.70:  # Очень высокая уверенность - разрешаем
+                logging.info(f"⚠️ {symbol} | ADX low ({adx_val:.1f}) but confidence high ({confidence:.2f})")
+            else:
+                _inc_event("trend_no_confirm")
+                log_decision(symbol, "trend_no_confirm")
+                continue
+        
         elif fallback_attempted and not fb_confirm:
             reason = "adx_low" if adx_val < adj_adx else "fallback_blocked"
         else:
