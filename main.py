@@ -1555,6 +1555,15 @@ def calculate_indicators(df):
     """Enrich OHLCV with technical indicators."""
     if df is None or df.empty:
         return df
+
+
+    logging.info(
+        "DEBUG calc_indicators | input shape=%s, close range=[%.2f..%.2f], high-low avg=%.4f",
+        df.shape,
+        df["close"].min() if "close" in df.columns else 0,
+        df["close"].max() if "close" in df.columns else 0,
+        (df["high"] - df["low"]).mean() if "high" in df.columns and "low" in df.columns else 0
+    )
     
     df = df.copy()
     
@@ -1778,12 +1787,35 @@ def _fetch_ohlcv(symbol, tf, limit=10000):
         record_no_data(symbol, tf, f"exception: {exc}")
         _NO_DATA_RETRY[(symbol, tf)] = now + NO_DATA_RETRY_SEC
     if not ohlcv:
-        log_candle_status(symbol, tf, None)
-        if (symbol, tf) not in _NO_DATA_RETRY:
-            _NO_DATA_RETRY[(symbol, tf)] = now + NO_DATA_RETRY_SEC
-        record_no_data(symbol, tf, "empty_fetch")
-        FETCH_CACHE[key] = None
-        return None
+        
+        log_candle_status(symbol, tf, count)
+        _NO_DATA_RETRY.pop((symbol, tf), None)
+        clear_no_data(symbol, tf)
+        
+        # 🔥 НОВАЯ ПРОВЕРКА: Валидация данных
+        if "close" in df.columns:
+            close_range = df["close"].max() - df["close"].min()
+            if close_range == 0:
+                logging.warning(
+                    "data | %s | %s | All prices identical (%.4f), data corrupt",
+                    symbol, tf, df["close"].iloc[0]
+                )
+                FETCH_CACHE[key] = None
+                return None
+        
+        result = calculate_indicators(df)
+        
+        # 🔥 ПРОВЕРКА ПОСЛЕ calculate_indicators
+        if result is not None and "atr" in result.columns:
+            atr_val = result["atr"].iloc[-1]
+            if atr_val == 0 or pd.isna(atr_val):
+                logging.warning(
+                    "data | %s | %s | ATR=0 after calculation, data may be corrupt",
+                    symbol, tf
+                )
+        
+        FETCH_CACHE[key] = result
+        return result
 
     df = _safe_df(ohlcv)
     count = len(df) if df is not None else None
@@ -2799,6 +2831,24 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
 
     df_5m = fetch_ohlcv(symbol, "5m", limit=50)
     data_mode = "normal"
+    
+    # 🔥 ПРИНУДИТЕЛЬНЫЙ ПЕРЕСЧЁТ для проблемных символов
+    if "atr" not in df_trend.columns or df_trend["atr"].iloc[-1] == 0:
+        logging.warning(
+            "mode | %s | ATR missing/zero, recalculating indicators",
+            symbol
+        )
+        df_trend = calculate_indicators(df_trend)
+        
+        # Если всё ещё 0 - данные битые
+        if "atr" in df_trend.columns and df_trend["atr"].iloc[-1] == 0:
+            logging.error(
+                "mode | %s | ATR still 0 after recalc! Price range: %.4f-%.4f",
+                symbol,
+                df_trend["close"].min() if not df_trend.empty else 0,
+                df_trend["close"].max() if not df_trend.empty else 0
+            )
+
     if df_5m is None or df_5m.empty:
         df_15m = fetch_ohlcv(symbol, "15m", limit=50)
         if df_15m is not None and not df_15m.empty:
@@ -2809,6 +2859,28 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
             if df_1h is not None and not df_1h.empty:
                 df_5m = resample_ohlcv(df_1h, "5min")
                 data_mode = "reduced"
+   
+    if "atr" not in df_trend.columns or df_trend["atr"].iloc[-1] == 0:
+        logging.warning(
+            "mode | %s | ATR missing/zero, recalculating indicators",
+            symbol
+        )
+        df_trend = calculate_indicators(df_trend)
+        
+        # Если всё ещё 0 - данные битые
+        if "atr" in df_trend.columns and df_trend["atr"].iloc[-1] == 0:
+            logging.error(
+                "mode | %s | ATR still 0 after recalc! Price range: %.4f-%.4f",
+                symbol,
+                df_trend["close"].min(),
+                df_trend["close"].max()
+            )
+    
+    # ... остальной код ...
+    if "atr" in df_trend.columns:
+        atr = float(df_trend["atr"].iloc[-1])
+    else:
+        atr = 0.0
 
     # Убедимся что ATR рассчитан
     if "atr" not in df_trend.columns or df_trend["atr"].iloc[-1] == 0:
@@ -5281,6 +5353,8 @@ def run_bot():
     global GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES
     _maybe_retrain_global()
     ensure_model_loaded(ADAPTER, symbols)
+    global ohlcv_cache
+    ohlcv_cache.clear()
     if GLOBAL_MODEL is None:
         for fn in [
             "global_model.joblib",
