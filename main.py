@@ -5778,6 +5778,45 @@ def run_bot():
         # process any closed orders even if position info is unavailable
         closed_orders = safe_fetch_closed_orders(exchange, symbol, limit=5)
         
+
+        # === Обработка ВСЕХ открытых позиций ОДИН РАЗ ===
+        all_positions = []
+        for sym in active_symbols:
+            try:
+                pos_list = fetch_positions_soft(sym)
+                if pos_list:
+                    all_positions.extend(pos_list)
+            except Exception as exc:
+                logging.error("position | %s | fetch_positions failed: %s", sym, exc)
+                continue
+
+        # Обработка каждой позиции
+        for pos in all_positions:
+            try:
+                if float(pos.get("contracts", 0)) <= 0:
+                    continue
+                
+                pos_symbol = pos.get("symbol")  # Берём символ из позиции!
+                if not pos_symbol:
+                    continue
+                
+                # Теперь весь код управления позицией (trailing, SL, TP и т.д.)
+                entry_price = float(pos.get("entryPrice", 0))
+                last_price = float(pos.get("markPrice", 0))
+                side = str(pos.get("side", "")).upper()
+                qty = float(pos.get("contracts", 0))
+                
+                # ... остальной код обработки позиции из старого блока ...
+                
+            except Exception as exc:
+                logging.error("position | %s | management failed: %s", pos_symbol, exc)
+                continue
+
+        # После фиксации позиции бот сразу сможет открыть новую!
+
+
+
+
         # Обработка закрытых ордеров с нормализацией символов
         for symbol in active_symbols:
             # Нормализуем символ для Bybit
@@ -6115,14 +6154,7 @@ def run_bot():
         if open_pos:
             log_decision(symbol, "position_exists")
             continue
-        # === Проверка открытых позиций и автоматическая фиксация прибыли ===
-        try:
-            positions = fetch_positions_soft(symbol)
-        except Exception as exc:
-            logging.error("position | %s | fetch_positions failed: %s", symbol, exc)
-            continue
-
-        # После фиксации позиции бот сразу сможет открыть новую!
+       
 
         # Получим список позиций повторно, чтобы не считать только что закрытую как открытую
         try:
