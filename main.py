@@ -5638,11 +5638,12 @@ def run_bot():
                 )
 
     for symbol in active_symbols:
-        logging.info(f"[run_bot] Processing symbol: {symbol}")
+        sym = symbol  # обязательно сбрасываем sym для этой итерации
+        logging.info(f"[run_bot] Processing symbol: {sym}")
 
         # [ANCHOR:ENABLE_BAN_RULES]
         if ENABLE_SYMBOL_BAN and stats.is_banned(symbol):
-            log_decision(symbol, "symbol_banned")
+            log_decision(sym, "symbol_banned")
             continue
         
         import time
@@ -5659,24 +5660,24 @@ def run_bot():
         # --- Early model backtest and pattern detection ---
         has_open = symbol in open_trade_ctx
         try:
-            preview = fetch_multi_ohlcv(symbol, timeframes, limit=300, warn=False)
+            preview = fetch_multi_ohlcv(sym, timeframes, limit=300, warn=False)
         except Exception:
             preview = None
         if preview is None:
             logging.warning(
-                "data | %s | no OHLCV for required timeframes; skipping", symbol
+                "data | %s | no OHLCV for required timeframes; skipping", sym
             )
             log_decision(symbol, "ohlcv_unavailable")
             if not has_open:
-                skip_summary["data"].append(symbol)
+                skip_summary["data"].append(sym)
                 continue
             preview = pd.DataFrame()
         if (preview.empty or "close_15m" not in preview.columns) and not has_open:
             logging.warning(
-                "data | %s | no OHLCV for required timeframes; skipping", symbol
+                "data | %s | no OHLCV for required timeframes; skipping", sym
             )
-            log_decision(symbol, "ohlcv_unavailable")
-            skip_summary["data"].append(symbol)
+            log_decision(sym, "ohlcv_unavailable")
+            skip_summary["data"].append(sym)
             continue
 
         cached_ohlcv: dict[str, pd.DataFrame] = {}
@@ -5709,14 +5710,14 @@ def run_bot():
         try:
             metrics = backtest(symbol)
         except RuntimeError as e:
-            record_error(symbol, f"backtest failed: {e}")
-            logging.warning(f"Backtest failed for {symbol}: {e}")
-            skip_summary["model"].append(symbol)
-            log_decision(symbol, "backtest_unavailable")
+            record_error(sym, f"backtest failed: {e}")
+            logging.warning(f"Backtest failed for {sym}: {e}")
+            skip_summary["model"].append(sym)
+            log_decision(sym, "backtest_unavailable")
             continue
         except Exception as e:
-            record_error(symbol, f"backtest failed: {e}")
-            logging.warning(f"Backtest failed for {symbol}: {e}")
+            record_error(sym, f"backtest failed: {e}")
+            logging.warning(f"Backtest failed for {sym}: {e}")
             metrics = {"mode": "unavailable"}
         if (
             not metrics
@@ -5729,42 +5730,42 @@ def run_bot():
                 and "close_15m" in preview.columns
             ):
                 logging.warning(
-                    "backtest | %s | data unavailable, proceeding", symbol
+                    "backtest | %s | data unavailable, proceeding", sym
                 )
             else:
                 record_error(
-                    symbol,
+                    sym,
                     f"backtest data unavailable backend={getattr(ADAPTER, 'backend', '?')} futures={getattr(ADAPTER, 'futures', getattr(ADAPTER, 'is_futures', False))} limit=300 tfs={timeframes}",
                 )
-                log_decision(symbol, "backtest_unavailable")
-                skip_summary["data"].append(symbol)
+                log_decision(sym, "backtest_unavailable")
+                skip_summary["data"].append(sym)
                 continue
 
         df_for_chart = _cached_fetch_ohlcv("15m", limit=300)
         pattern_info = {"pattern_name": "none", "source": "none", "confidence": 0.0}
         if df_for_chart is not None and not df_for_chart.empty:
-            chart_path = f"chart_{symbol.replace('/', '')}_{int(time.time()*1000)}.png"
-            save_candle_chart(df_for_chart, symbol, chart_path)
+            chart_path = f"chart_{sym.replace('/', '')}_{int(time.time()*1000)}.png"
+            save_candle_chart(df_for_chart, sym, chart_path)
             img_info = detect_pattern_image(chart_path)
-            data_info = asyncio.run(detect_pattern(symbol, df_for_chart))
+            data_info = asyncio.run(detect_pattern(sym, df_for_chart))
             pattern_info = (
                 data_info
                 if data_info["confidence"] >= img_info["confidence"]
                 else img_info
             )
-            record_pattern(symbol, pattern_info["pattern_name"])
+            record_pattern(sym, pattern_info["pattern_name"])
             log(
                 logging.INFO,
                 "pattern",
-                symbol,
+                sym,
                 f"Detected: {pattern_info['pattern_name']} ({pattern_info['source']} {pattern_info['confidence']:.2f})",
             )
         else:
-            log(logging.WARNING, "pattern", symbol, "Chart data unavailable")
+            log(logging.WARNING, "pattern", sym, "Chart data unavailable")
             pattern_info = {"pattern_name": "none", "source": "none", "confidence": 0.0}
 
         # run self-test to track hit rate for this symbol
-        pattern_hit_rates[symbol] = pattern_self_test(df_for_chart)
+        pattern_hit_rates[sym] = pattern_self_test(df_for_chart)
 
         pattern_name = str(pattern_info.get("pattern_name") or "none")
         try:
@@ -5775,19 +5776,21 @@ def run_bot():
 
         open_pos = None  # <-- инициализация переменной перед использованием
 
-        # process any closed orders even if position info is unavailable
-        closed_orders = safe_fetch_closed_orders(exchange, symbol, limit=5)
+        # обрабатываем закрытые ордера текущего инструмента
+        clean_symbol = symbol.split(':')[0]
+        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
+
         
 
         # === Обработка ВСЕХ открытых позиций ОДИН РАЗ ===
         all_positions = []
-        for sym in active_symbols:
+        for pos_sym in active_symbols:
             try:
-                pos_list = fetch_positions_soft(sym)
+                pos_list = fetch_positions_soft(pos_sym)
                 if pos_list:
                     all_positions.extend(pos_list)
             except Exception as exc:
-                logging.error("position | %s | fetch_positions failed: %s", sym, exc)
+                logging.error("position | %s | fetch_positions failed: %s", pos_sym, exc)
                 continue
 
         # Обработка каждой позиции
@@ -5797,10 +5800,13 @@ def run_bot():
                     continue
                 
                 pos_symbol = pos.get("symbol")  # Берём символ из позиции!
+                clean_pos_symbol = pos_symbol.split(':')[0]
+                if clean_pos_symbol not in active_symbols:
+                    active_symbols.append(clean_pos_symbol)
                 if not pos_symbol:
                     continue
                 
-                # Теперь весь код управления позицией (trailing, SL, TP и т.д.)
+                # ✅ Теперь весь код управления позицией (trailing, SL, TP и т.д.)
                 entry_price = float(pos.get("entryPrice", 0))
                 last_price = float(pos.get("markPrice", 0))
                 side = str(pos.get("side", "")).upper()
@@ -5815,27 +5821,27 @@ def run_bot():
         # После фиксации позиции бот сразу сможет открыть новую!
 
 
-
-
         # Обработка закрытых ордеров с нормализацией символов
-        for symbol in active_symbols:
+        for active_sym in active_symbols:
             # Нормализуем символ для Bybit
-            category = detect_market_category(exchange, symbol) or "linear"
-            norm_symbol = _normalize_bybit_symbol(exchange, symbol, category)
+            category = detect_market_category(exchange, active_sym) or "linear"
+            norm_symbol = _normalize_bybit_symbol(exchange, active_sym, category)
             
             try:
-                closed_orders = safe_fetch_closed_orders(exchange, norm_symbol, limit=5)
+                # обрабатываем закрытые ордера текущего инструмента
+                clean_symbol = symbol.split(':')[0]
+                closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
             except Exception as exc:
                 # Если не нашли с нормализованным символом, пробуем оригинальный
                 if "does not have market symbol" in str(exc):
                     try:
                         # Убираем :USDT если есть
-                        clean_symbol = symbol.split(':')[0]
+                        clean_symbol = sym.split(':')[0]
                         closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
                     except Exception:
                         closed_orders = []
                 else:
-                    logging.error(f"fetch_closed_orders failed for {symbol}: {exc}")
+                    logging.error(f"fetch_closed_orders failed for {active_sym}: {exc}")
                     closed_orders = []
 
 
@@ -5913,18 +5919,18 @@ def run_bot():
                             logging.exception("save_risk_state failed: %s", e)
                     if ok and can_daily and can_cool:
                         open_reverse_position_with_reduced_risk(
-                            symbol,
+                            sym,
                             opposite_side,
                             df_trend=dataframes.get("1h"),
                             risk_multiplier=soft_risk,
                         )
                         reverse_done = True
-        cancel_stale_orders(symbol)
+        cancel_stale_orders(sym)
 
         try:
             positions = fetch_positions_soft(symbol)
         except Exception as exc:
-            logging.error("position | %s | fetch_positions failed: %s", symbol, exc)
+            logging.error("position | %s | fetch_positions failed: %s", sym, exc)
             continue
         no_position = not any(float(p.get("contracts", 0)) > 0 for p in positions)
 
@@ -5939,13 +5945,13 @@ def run_bot():
                     last_seen_val = 0.0
                 now_ts = time.time()
                 if last_seen_val > 0 and (now_ts - last_seen_val) >= 5.0:
-                    cat = detect_market_category(exchange, symbol) or "linear"
+                    cat = detect_market_category(exchange, sym) or "linear"
                     try:
                         exit_price = float(ctx_missing.get("last_mark_price") or 0.0)
                     except (TypeError, ValueError):
                         exit_price = 0.0
                     if exit_price <= 0:
-                        fetched_price = get_last_price(exchange, symbol, str(cat))
+                        fetched_price = get_last_price(exchange, sym, str(cat))
                         try:
                             exit_price = float(fetched_price or 0.0)
                         except (TypeError, ValueError):
@@ -5955,7 +5961,7 @@ def run_bot():
 
                     ctx_missing["exit_type_hint"] = "LIQUIDATION"
                     synthetic_order = {
-                        "id": f"external-{ctx_missing.get('trade_id', symbol)}-{int(now_ts)}",
+                        "id": f"external-{ctx_missing.get('trade_id', sym)}-{int(now_ts)}",
                         "type": "MARKET",
                         "price": exit_price,
                         "info": {
@@ -5964,12 +5970,12 @@ def run_bot():
                         },
                     }
                     handled = log_exit_from_order(
-                        symbol, synthetic_order, 0.0, trade_log_path
+                        sym, synthetic_order, 0.0, trade_log_path
                     )
                     if handled:
                         logging.error(
                             "exit | %s | position missing on exchange -> logged liquidation",
-                            symbol,
+                            sym,
                         )
                         rebuild_reports_on_exit()
                         try:
@@ -6023,7 +6029,7 @@ def run_bot():
                 open_trade_ctx[symbol] = ctx
                 ensure_exit_orders(
                     ADAPTER,
-                    symbol,
+                    sym,
                     "long" if side == "LONG" else "short",
                     qty,
                     sl_price_ctx,
@@ -6055,7 +6061,7 @@ def run_bot():
                     ctx = open_trade_ctx.get(symbol, {})
                     ctx["exit_type_hint"] = "TP"
                     handled = log_exit_from_order(
-                        symbol, order, commission, trade_log_path
+                        sym, order, commission, trade_log_path
                     )
                     if handled:
                         _processed_order_ids.add(str(order.get("id") or ""))
@@ -6090,7 +6096,7 @@ def run_bot():
                         tick,
                         breakeven_done,
                         current_sl,
-                        symbol,
+                        sym,
                     )
 
                     # Не расширяем риск: обновляем только если стоп становится "жёстче"
@@ -6103,7 +6109,7 @@ def run_bot():
                             state["sl"] = float(new_sl)
                             # [ANCHOR:TRAIL_LOG]
                             log_decision(
-                                symbol,
+                                sym,
                                 f"trailing_update be={state.get('breakeven_done', False)} new_sl={new_sl:@TICK}",
                             )
                     else:
@@ -6115,7 +6121,7 @@ def run_bot():
                             state["sl"] = float(new_sl)
                             # [ANCHOR:TRAIL_LOG]
                             log_decision(
-                                symbol,
+                                sym,
                                 f"trailing_update be={state.get('breakeven_done', False)} new_sl={new_sl:@TICK}",
                             )
 
@@ -6138,7 +6144,7 @@ def run_bot():
                     ctx = open_trade_ctx.get(symbol, {})
                     ctx["exit_type_hint"] = "TIME"
                     handled = log_exit_from_order(
-                        symbol, order, commission, trade_log_path
+                        sym, order, commission, trade_log_path
                     )
                     if handled:
                         _processed_order_ids.add(str(order.get("id") or ""))
@@ -6160,7 +6166,7 @@ def run_bot():
         try:
             positions = fetch_positions_soft(symbol)
         except Exception as exc:
-            logging.error("position | %s | fetch_positions failed: %s", symbol, exc)
+            logging.error("position | %s | fetch_positions failed: %s", sym, exc)
             continue
 
         open_pos = None
@@ -6202,7 +6208,7 @@ def run_bot():
             cached_ohlcv["1h"] = df_trend.copy()
         if df_trend is None or df_trend.empty:
             log_decision(
-                symbol,
+                sym,
                 "no_data",
                 detail=f"data | {symbol} | missing timeframe 1h",
             )
@@ -6211,7 +6217,7 @@ def run_bot():
         trend_state = determine_trend(df_trend)
         mode, mode_params, data_mode = select_trade_mode(symbol, df_trend)
         mode_lev = mode_params.get("lev", LEVERAGE)
-        market_category = detect_market_category(exchange, symbol)
+        market_category = detect_market_category(exchange, sym)
         if market_category is None:
             adapter_category = getattr(ADAPTER, "_detect_bybit_category", None)
             if callable(adapter_category):
@@ -6220,7 +6226,7 @@ def run_bot():
                 except Exception as exc:
                     logging.debug(
                         "market | %s | adapter category lookup failed: %s",
-                        symbol,
+                        sym,
                         exc,
                     )
         market_category = (market_category or "").lower() or None
@@ -6242,7 +6248,7 @@ def run_bot():
         df_15m = _cached_fetch_ohlcv("15m", limit=100)
         if df_5m is None or df_15m is None:
             log_decision(
-                symbol,
+                sym,
                 "no_data",
                 detail=f"data | {symbol} | missing lower timeframe data",
             )
@@ -6263,7 +6269,7 @@ def run_bot():
                 multi_df = None
         if multi_df is None or multi_df.empty:
             log_decision(
-                symbol,
+                sym,
                 "no_data",
                 detail=f"data | {symbol} | insufficient multi-timeframe data",
             )
@@ -6273,7 +6279,7 @@ def run_bot():
         if missing_multi:
             missing_cols = ",".join(sorted(missing_multi))
             log_decision(
-                symbol,
+                sym,
                 "no_data",
                 detail=f"data | {symbol} | missing multi-timeframe columns {missing_cols}",
             )
@@ -6318,7 +6324,7 @@ def run_bot():
         # [ANCHOR:VOL_LOG]
         logging.info(
             "params | %s | VOL_RATIO=%s",
-            symbol,
+            sym,
             "missing" if vol_ratio is None else f"{vol_ratio:.2f}",
         )
 
@@ -6334,7 +6340,7 @@ def run_bot():
         if adx_val == 0:
             logging.warning(
                 "DEBUG | %s | ADX=0! df_trend shape=%s, atr=%s",
-                symbol,
+                sym,
                 df_trend.shape,
                 df_trend.get("atr", pd.Series([0])).iloc[-1] if "atr" in df_trend.columns else "MISSING"
             )
@@ -6373,14 +6379,14 @@ def run_bot():
                 rsi_cross_from_extreme = "long"
 
         model_signal, confidence = predict_signal(
-            symbol,
+            sym,
             X_last,
             float(adx_val),
             bool(rsi_cross_from_extreme),
             float(returns_1h),
         )
         record_summary(
-            symbol,
+            sym,
             mode.upper(),
             float(atr_val),
             float(adx_val),
@@ -6406,7 +6412,7 @@ def run_bot():
             if model_signal != pattern_dir:
                 logging.info(
                     "signal | %s | Pattern override %s → %s (conf=%.2f)",
-                    symbol,
+                    sym,
                     model_signal,
                     pattern_dir,
                     pattern_conf,
@@ -6425,7 +6431,7 @@ def run_bot():
             pattern_conflict = True
             logging.info(
                 "signal | %s | Aligning with pattern trend %s → %s", 
-                symbol,
+                sym,
                 model_signal,
                 pattern_side.lower(),
             )
@@ -6463,17 +6469,17 @@ def run_bot():
                 log_decision(symbol, "price_unavailable")
             else:
                 side = "buy" if model_signal == "long" else "sell"
-                cat = detect_market_category(exchange, symbol) or "linear"
+                cat = detect_market_category(exchange, sym) or "linear"
                 cat = str(cat or "").lower()
                 if cat in ("", "swap"):
                     cat = "linear"
                 if cat not in {"linear", "inverse"}:
                     log_decision(symbol, "no_futures_contract")
                 else:
-                    qty_signed, _qty_abs = has_open_position(exchange, symbol, cat)
+                    qty_signed, _qty_abs = has_open_position(exchange, sym, cat)
                     if (side == "buy" and qty_signed > 0) or (side == "sell" and qty_signed < 0):
                         log_decision(symbol, "position_already_open")
-                    elif has_pending_entry(exchange, symbol, side, cat):
+                    elif has_pending_entry(exchange, sym, side, cat):
                         log_decision(symbol, "pending_entry_exists")
                     else:
                         now_bar5 = int(time.time() // (5 * 60))
@@ -6492,7 +6498,7 @@ def run_bot():
                             except Exception as exc:
                                 logging.warning(
                                     "pattern trade | %s | fetch_balance failed: %s",
-                                    symbol,
+                                    sym,
                                     exc,
                                 )
                             try:
@@ -6500,7 +6506,7 @@ def run_bot():
                             except Exception as exc:
                                 logging.warning(
                                     "pattern trade | %s | market lookup failed: %s",
-                                    symbol,
+                                    sym,
                                     exc,
                                 )
                                 market = {}
@@ -6516,7 +6522,7 @@ def run_bot():
                                     price_precision = 0
                             tick_size = 1 / (10 ** price_precision) if price_precision else None
 
-                            symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, cat)
+                            symbol_norm = _normalize_bybit_symbol(ADAPTER.x, sym, cat)
                             qty_target = _compute_entry_qty(
                                 symbol,
                                 side,
@@ -6536,7 +6542,7 @@ def run_bot():
                                 leverage_val = max(leverage_val, 1)
                                 affordable_qty = _max_affordable_amount(
                                     exchange,
-                                    symbol,
+                                    sym,
                                     side,
                                     leverage_val,
                                     current_price,
@@ -6552,7 +6558,7 @@ def run_bot():
                                     else:
                                         adjusted_qty, margin_reason = _adjust_qty_for_margin(
                                             exchange,
-                                            symbol,
+                                            sym,
                                             qty_target,
                                             current_price,
                                             leverage_val,
@@ -6566,7 +6572,7 @@ def run_bot():
                                             max_pos_qty = get_max_position_qty(symbol, leverage_val, current_price)
                                             if max_pos_qty:
                                                 qty_target = min(qty_target, max_pos_qty)
-                                            qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
+                                            qty_target = _round_qty(ADAPTER.x, sym_norm, qty_target)
                                             if qty_target <= 0:
                                                 log_decision(symbol, "qty_insufficient")
                                             else:
@@ -6599,7 +6605,7 @@ def run_bot():
                                                 try:
                                                     filled_qty = enter_ensure_filled(
                                                         ADAPTER.x,
-                                                        symbol,
+                                                        sym,
                                                         side,
                                                         qty_target,
                                                         category=cat,
@@ -6607,7 +6613,7 @@ def run_bot():
                                                 except Exception as exc:
                                                     logging.warning(
                                                         "pattern trade | %s | ensure_filled failed: %s",
-                                                        symbol,
+                                                        sym,
                                                         exc,
                                                     )
                                                     log_decision(symbol, "order_failed")
@@ -6622,11 +6628,11 @@ def run_bot():
 
                                                 # Ждём появления позиции
                                                 detected_qty = wait_position_after_entry(
-                                                    ADAPTER.x, symbol, category=cat, timeout_sec=3.0
+                                                    ADAPTER.x, sym, category=cat, timeout_sec=3.0
                                                 )
 
-                                                _pos_signed_after, pos_abs_after = has_open_position(exchange, symbol, cat)
-                                                entry_price = get_position_entry_price(exchange, symbol, cat) or current_price
+                                                _pos_signed_after, pos_abs_after = has_open_position(exchange, sym, cat)
+                                                entry_price = get_position_entry_price(exchange, sym, cat) or current_price
 
                                                 # Получаем last price для триггеров
                                                 ticker = exchange.fetch_ticker(symbol, params={"category": cat})
@@ -6658,7 +6664,7 @@ def run_bot():
                                                     try:
                                                         sl_order_id, sl_err = place_conditional_exit(
                                                             ADAPTER.x,
-                                                            symbol,
+                                                            sym,
                                                             "buy" if want_long else "sell",
                                                             entry_price,
                                                             last_price,
@@ -6671,7 +6677,7 @@ def run_bot():
                                                         elif sl_order_id:
                                                             logging.info(
                                                                 "exit | %s | Stop-loss placed (order_id=%s)",
-                                                                symbol,
+                                                                sym,
                                                                 sl_order_id,
                                                             )
                                                     except Exception as exc:
@@ -6681,7 +6687,7 @@ def run_bot():
                                                     try:
                                                         tp_order_id, tp_err = place_conditional_exit(
                                                             ADAPTER.x,
-                                                            symbol,
+                                                            sym,
                                                             "buy" if want_long else "sell",
                                                             entry_price,
                                                             last_price,
@@ -6694,7 +6700,7 @@ def run_bot():
                                                         elif tp_order_id:
                                                             logging.info(
                                                                 "exit | %s | Take-profit placed (order_id=%s)",
-                                                                symbol,
+                                                                sym,
                                                                 tp_order_id,
                                                             )
                                                     except Exception as exc:
@@ -6794,11 +6800,12 @@ def run_bot():
             )
             if pattern_conflict and pconf >= base_thr and pconf < base_thr + 0.05:
                 logging.info(
-                    "signal | %s | Pattern/trend disagreement kept for monitoring", symbol
+                    "signal | %s | Pattern/trend disagreement kept for monitoring", sym
                 )
                 pattern_conflict = False
         # [ANCHOR:NORMALIZE_DECLINE_REASONS]
         reason = None
+        trend_ok = confirm_trend(trend_dfs, signal_to_use.upper()) if trend_dfs is not None else False
         if signal_to_use == "hold":
             reason = "hold_no_position" if no_position else "hold_position_exists"
         # Fallback для низкого ADX при высокой уверенности модели
@@ -6809,7 +6816,7 @@ def run_bot():
                 _inc_event("trend_no_confirm")
                 log_decision(symbol, "trend_no_confirm")
                 continue
-        
+
         elif fallback_attempted and not fb_confirm:
             reason = "adx_low" if adx_val < adj_adx else "fallback_blocked"
         else:
@@ -6830,7 +6837,7 @@ def run_bot():
         if vol_reason == "vol_low":
             _inc_event("vol_low")
             logging.warning(
-                "low volume for %s | VOL_RATIO=%.2f", symbol, vol_ratio
+                "low volume for %s | VOL_RATIO=%.2f", sym, vol_ratio
             )
             log_decision(symbol, "volume_low")
             continue
@@ -6861,7 +6868,7 @@ def run_bot():
         rsi_val = df_trend["rsi"].iloc[-1]
     
         if is_derivative_market:
-            leverage_category = detect_market_category(exchange, symbol)
+            leverage_category = detect_market_category(exchange, sym)
             cat_normalized = str(leverage_category or "").lower()
             
             if cat_normalized in ("", "swap"):
@@ -6869,7 +6876,7 @@ def run_bot():
             
             if cat_normalized in ("linear", "inverse"):
                 try:
-                    leverage_result = safe_set_leverage(exchange, symbol, mode_lev)
+                    leverage_result = safe_set_leverage(exchange, sym, mode_lev)
                     if not leverage_result:
                         # Проверяем, не была ли это "leverage not modified"
                         log_decision(symbol, "leverage_check_failed")
@@ -6881,18 +6888,18 @@ def run_bot():
                             save_risk_state(risk_state, limiter, cool, stats)
                         except Exception as e:
                             logging.exception("save_risk_state failed: %s", e)
-                    logging.info("leverage | %s | leverage_ready set", symbol)
+                    logging.info("leverage | %s | leverage_ready set", sym)
                 except Exception as exc:
                     exc_str = str(exc).lower()
                     if "110043" in exc_str or "leverage not modified" in exc_str:
                         # Рычаг уже установлен правильно - не ошибка
-                        logging.debug("leverage | %s | already at correct leverage", symbol)
+                        logging.debug("leverage | %s | already at correct leverage", sym)
                         pair_flags = risk_state.setdefault(symbol, PairState())
                         pair_flags.leverage_ready = True
                     else:
                         logging.error(
                             "leverage | %s | unexpected set_leverage failure: %s",
-                            symbol,
+                            sym,
                             exc,
                             exc_info=True,
                         )
@@ -6901,13 +6908,13 @@ def run_bot():
             else:
                 logging.warning(
                     "leverage | %s | skip: market %s not linear",
-                    symbol,
+                    sym,
                     leverage_category or "unknown",
                 )
         else:
             logging.debug(
                 "leverage | %s | Skipping leverage setup for %s market",
-                symbol,
+                sym,
                 market_category or "unknown",
             )
         if not use_fallback:
@@ -6944,7 +6951,7 @@ def run_bot():
             adx=adx_val,
         )
         if signal_to_use != orig_signal:
-            log(logging.INFO, "pattern", symbol, f"Signal adjusted by pattern: {orig_signal} \u2192 {signal_to_use}")
+            log(logging.INFO, "pattern", sym, f"Signal adjusted by pattern: {orig_signal} \u2192 {signal_to_use}")
 
         if (
             (signal_to_use == "long" and trend_state == "bearish")
@@ -7028,7 +7035,7 @@ def run_bot():
             except Exception as e:
                 logging.exception("save_risk_state failed: %s", e)
         if not best_entry_moment(
-            symbol,
+            sym,
             signal_to_use,
             source="fallback" if use_fallback else "model",
             mode=mode.upper(),
@@ -7064,7 +7071,7 @@ def run_bot():
                 price_hint = None
 
         success = run_trade(
-            symbol,
+            sym,
             signal_to_use,
             df_trend,
             stats,
@@ -7081,10 +7088,10 @@ def run_bot():
         if not success:
             logging.info(
                 "entry | %s | run_trade failed, attempting simplified market entry",
-                symbol,
+                sym,
             )
             success = attempt_direct_market_entry(
-                symbol,
+                sym,
                 signal_to_use,
                 ctx=ctx,
                 df_trend=df_trend,
@@ -7106,7 +7113,10 @@ def run_bot():
         else:
             recent_hits.append(False)
             emit_summary(symbol, "entry_failed")
-        closed_orders = safe_fetch_closed_orders(exchange, symbol, limit=5)
+        # обрабатываем закрытые ордера текущего инструмента
+        clean_symbol = symbol.split(':')[0]
+        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
+
         for order in reversed(closed_orders):
             oid = str(order.get("id") or "")
             # [ANCHOR:PROCESSED_ORDERS_CACHE_USE]
@@ -7126,7 +7136,7 @@ def run_bot():
         if elapsed > 30:  # 30 секунд на символ максимум
             logging.error(
                 "[run_bot] Symbol %s processing timeout (%.1fs), skipping to next",
-                symbol, elapsed
+                sym, elapsed
             )
             continue
 
@@ -7320,7 +7330,10 @@ def run_bot():
     # [ANCHOR:SAFETY_SWEEP_END_OF_CYCLE]
     sweep_closed_any = False
     for symbol in symbols:
-        closed_orders = safe_fetch_closed_orders(exchange, symbol, limit=10)
+        # обрабатываем закрытые ордера текущего инструмента
+        clean_symbol = symbol.split(':')[0]
+        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
+
 
         reverse_done = False  # не открывать больше одного реверса на символ за проход
 
