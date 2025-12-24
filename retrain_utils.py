@@ -156,25 +156,37 @@ def retrain_global_model(df_features, df_target, feature_cols):
     
     # Train XGBoost с более агрессивными параметрами
     model = XGBClassifier(
-        n_estimators=300,       # Больше деревьев
-        max_depth=6,            # Глубже деревья
-        learning_rate=0.1,      # Быстрее обучение
-        subsample=0.8,
-        colsample_bytree=0.8,
+        n_estimators=500,           # 🔥 Больше деревьев
+        max_depth=8,                # 🔥 Глубже (для 14 признаков это OK)
+        learning_rate=0.05,         # 🔥 Медленнее, но стабильнее
+        subsample=1.0,              # 🔥 Используем ВСЕ данные (их мало)
+        colsample_bytree=1.0,       # 🔥 Используем ВСЕ признаки (их 14)
         objective="multi:softprob",
         num_class=3,
         eval_metric="mlogloss",
-        tree_method="hist",
+        tree_method="auto",         # 🔥 Пусть XGBoost сам выберет
         random_state=42,
         use_label_encoder=False,
-        min_child_weight=1,     # Меньше ограничений
-        gamma=0,                # Нет регуляризации на начальном этапе
-        reg_alpha=0,
-        reg_lambda=1
+        min_child_weight=1,         # 🔥 Минимальные ограничения
+        gamma=0,                    # 🔥 Нет регуляризации на splits
+        reg_alpha=0,                # 🔥 Нет L1
+        reg_lambda=0.1,             # 🔥 Минимальная L2
+        scale_pos_weight=1.0,       # 🔥 Равный вес классам
     )
-    
     # Обучаем
     model.fit(X_scaled, df_target.values, verbose=False)
+
+    import numpy as np
+    logging.info(f"retrain | Model has {model.n_estimators} trees built")
+    logging.info(f"retrain | Model feature importances: {model.feature_importances_}")
+    logging.info(f"retrain | Non-zero importances: {np.count_nonzero(model.feature_importances_)}")
+
+    # Проверяем, что модель вообще училась
+    if hasattr(model, 'get_booster'):
+        booster = model.get_booster()
+        trees_text = booster.get_dump()
+        logging.info(f"retrain | First tree has {len(trees_text[0].split('leaf'))} leaves")
+
     # Проверяем, что модель действительно обучилась
     train_accuracy = (model.predict(X_scaled) == df_target.values).mean()
     logging.info(f"retrain | Train accuracy: {train_accuracy:.3f}")
