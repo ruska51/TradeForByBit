@@ -22,7 +22,14 @@ from logging_utils import setup_logging
 setup_logging()
 print("===== BOT START =====", flush=True)
 import logging
+# После строки 24:
 logging.info("boot | cwd=%s | root=%s", os.getcwd(), ROOT)
+
+# 🔥 КРИТИЧНО: Перезагружаем data_prep для применения исправлений
+import importlib
+import data_prep
+importlib.reload(data_prep)
+logging.info("boot | data_prep reloaded")
 
 import ccxt
 import pandas as pd
@@ -1023,17 +1030,17 @@ def _env_float(name: str, default: float) -> float:
 
 
 # Базовые и динамические фильтры вероятности/ADX
-BASE_PROBA_FILTER = 0.50
-PROBA_FILTER = _env_float("PROBA_FILTER", BASE_PROBA_FILTER)  # динамическое значение
+BASE_PROBA_FILTER = 0.35
+PROBA_FILTER = _env_float("PROBA_FILTER", 0.25)  # Временно понижен до 0.25 до этого был BASE_PROBA_FILTER
 # [ANCHOR:DYNA_THRESH_CONSTS]
 MIN_PROBA_FILTER = _env_float(
-    "MIN_PROBA_FILTER", min(0.4, float(PROBA_FILTER))
+    "MIN_PROBA_FILTER", min(0.25, float(PROBA_FILTER))
 )
 # Стратегия допускает сделки только при умеренном тренде
-BASE_ADX_THRESHOLD = 10.0  # Понижен базовый порог ADX для трендовых фильтров
+BASE_ADX_THRESHOLD = 5.0  # Понижен базовый порог ADX для трендовых фильтров
 ADX_THRESHOLD = _env_float("ADX_THRESHOLD", BASE_ADX_THRESHOLD)  # минимальный ADX для сделки
 MIN_ADX_THRESHOLD = _env_float(
-    "MIN_ADX_THRESHOLD", min(12.0, float(ADX_THRESHOLD))
+    "MIN_ADX_THRESHOLD", min(5.0, float(ADX_THRESHOLD))
 )
 RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 85.0)  # порог перекупленности для long
 RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 15.0)  # порог перепроданности для short
@@ -1611,15 +1618,39 @@ def calculate_indicators(df):
     tr2 = (df["high"] - df["close"].shift()).abs()
     tr3 = (df["low"] - df["close"].shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Защита от слишком малых значений (для монет < $1)
-    tr = tr.replace(0, np.nan)  # Заменяем 0 на NaN
+
+    # Защита от нулевых значений
+    tr = tr.replace(0, np.nan)
     df["atr"] = tr.rolling(14, min_periods=1).mean()
-    
-    # Если ATR всё равно 0, используем процент от цены
+
+    # Фоллбэк если ATR = 0
     if df["atr"].iloc[-1] == 0 or pd.isna(df["atr"].iloc[-1]):
-        fallback_atr = df["close"] * 0.02  # 2% от цены
+        fallback_atr = df["close"] * 0.02
         df["atr"] = df["atr"].fillna(fallback_atr)
+
+    # ADX - ИСПРАВЛЕННЫЙ РАСЧЁТ
+    plus_dm = (df["high"].diff()).clip(lower=0)
+    minus_dm = (-df["low"].diff()).clip(lower=0)
+
+    # EMA для сглаживания
+    atr_smooth = tr.ewm(span=14, adjust=False).mean()
+    atr_smooth = atr_smooth.replace(0, np.nan)
+
+    # Directional Indicators с защитой от деления на ноль
+    plus_di_raw = plus_dm.ewm(span=14, adjust=False).mean()
+    minus_di_raw = minus_dm.ewm(span=14, adjust=False).mean()
+
+    df["plus_di"] = 100 * (plus_di_raw / atr_smooth).fillna(0.0)
+    df["minus_di"] = 100 * (minus_di_raw / atr_smooth).fillna(0.0)
+
+    # ADX calculation с дополнительной защитой
+    di_sum = (df["plus_di"] + df["minus_di"]).replace(0, np.nan)
+    dx = 100 * ((df["plus_di"] - df["minus_di"]).abs() / di_sum)
+    df["adx"] = dx.ewm(span=14, adjust=False).mean().fillna(0.0)
+
+    # Финальная проверка: если ADX всё ещё 0, ставим минимум 0.1
+    if df["adx"].iloc[-1] == 0:
+        df.loc[df.index[-1], "adx"] = 0.1
     
     # Williams %R
     high_roll = df["high"].rolling(14, min_periods=1)
@@ -1668,24 +1699,6 @@ def calculate_indicators(df):
         100 * (df["close"] - low_min) / stoch_denom,
     )
     df["stoch_d"] = df["stoch_k"].rolling(3, min_periods=1).mean()
-    
-    # ADX - КРИТИЧНО ВАЖНО!
-    plus_dm = (df["high"].diff()).clip(lower=0)
-    minus_dm = (-df["low"].diff()).clip(lower=0)
-    
-    # ATR для ADX
-    atr_adx = tr.rolling(14, min_periods=1).mean().replace(0, np.nan)
-    
-    # Directional Indicators
-    plus_di = 100 * (plus_dm.rolling(14, min_periods=1).mean() / atr_adx)
-    minus_di = 100 * (minus_dm.rolling(14, min_periods=1).mean() / atr_adx)
-    
-    # ADX calculation
-    adx_denom = (plus_di + minus_di).replace(0, np.nan)
-    df["adx"] = 100 * (plus_di - minus_di).abs() / adx_denom
-    df["adx"] = df["adx"].fillna(0.0)
-    df["plus_di"] = plus_di.fillna(0.0)
-    df["minus_di"] = minus_di.fillna(0.0)
     
     # Lag features
     lag_periods = [1, 2, 3]
@@ -2034,6 +2047,15 @@ def ensure_model_loaded(adapter, symbols):
             df_features, df_target, feature_cols = fetch_and_prepare_training_data(
                 ADAPTER, symbols, base_tf="15m", limit=400
             )
+            # Добавлена диагностика перед обучением
+            logging.info(f"Training data: features={df_features.shape}, target={df_target.shape}")
+            logging.info(f"Class distribution: {Counter(df_target.tolist())}")
+            
+            # Убедимся что есть достаточно данных
+            if len(df_features) < 100:
+                logging.error(f"Not enough training data: {len(df_features)} rows")
+                raise ValueError("insufficient training data")
+
             GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
                 df_features, df_target, feature_cols
             )
@@ -2338,6 +2360,11 @@ def predict_signal(
 
     if hasattr(model, "predict_proba"):
         proba = model.predict_proba(Xs)
+
+        logging.info(f"DEBUG | {symbol} | proba_raw={proba[0]}")
+        logging.info(f"DEBUG | {symbol} | model.classes_={model.classes_}")
+        logging.info(f"DEBUG | {symbol} | X_scaled_sample={Xs[0][:5]}")
+
     elif hasattr(model, "predict") and getattr(model, "objective", "") == "multi:softprob":
         raw = model.predict(Xs)
         proba = np.asarray(raw).reshape(1, -1)
@@ -3363,21 +3390,20 @@ def run_trade(
         log(logging.ERROR, "trade", symbol, "unable to determine valid price; skipping order")
         log_decision(symbol, "price_unavailable")
         return False
+    
+
     detected_category = detect_market_category(exchange, symbol)
     category = str(detected_category or "").lower()
-    if category == "swap":
+
+    # Разрешаем swap и inverse контракты
+    if category in ("", "swap", "unknown"):
         category = "linear"
-    if category != "linear":
-        log_decision(
-            symbol,
-            "no_futures_contract",
-            detail=(
-                f"entry | {symbol} | skip: unsupported market category "
-                f"{category or 'unknown'}"
-            ),
-        )
+
+    # ВАЖНО: Проверяем что категория НЕ spot
+    if category == "spot":
+        log_decision(symbol, "spot_market_not_supported")
         return False
-   
+    
     # Проверка hedge mode перед входом
     from logging_utils import _force_hedge_mode_check
     

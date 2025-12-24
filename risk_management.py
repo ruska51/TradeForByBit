@@ -915,46 +915,27 @@ def confirm_trend(
     *,
     return_reason: bool = False,
 ):
-    """Validate trend alignment across multiple timeframes using majority vote.
+    """Validate trend alignment across multiple timeframes using majority vote."""
 
-    Returns either a boolean (default) or ``(bool, reason)`` when
-    ``return_reason`` is set to ``True``.  ``reason`` is ``"insufficient_data"``
-    when guard-rails detect empty or too short dataframes.
-    """
-
-# [ANCHOR:TREND_SAFE_BODY]
     side = (side or "").upper()
-    votes: list[str] = []  # "BULL" / "BEAR"
+    votes: list[str] = []
     reason: str | None = None
 
     ema_fast_len = 9
     ema_slow_len = 21
     adx_len = 14
-    atr_len = 14
-    needed = max(ema_fast_len, ema_slow_len, adx_len, atr_len)
+    needed = max(ema_fast_len, ema_slow_len, adx_len)
+    min_bars_required = max(needed, 20)
 
-    fetcher = globals().get("cached_fetch_ohlcv") or globals().get("fetch_ohlcv")
-
-    # dfs ожидается dict { "5m": df, "15m": df, ... }
     for tf, df in (data or {}).items():
         close = _valid_close(df)
-        if close is None or len(close) < needed:
-            if fetcher and symbol:
-                try:
-                    df = fetcher(symbol, tf, limit=needed)
-                    close = _valid_close(df)
-                except Exception:
-                    close = None
-            if close is None or len(close) < needed:
-                reason = "insufficient_data"
-                if symbol:
-                    try:
-                        from logging_utils import log_decision
-
-                        log_decision(symbol, reason)
-                    except Exception:
-                        pass
-                return (False, reason) if return_reason else False
+        
+        if close is None or len(close) < min_bars_required:
+            logging.debug(
+                f"confirm_trend | {symbol or '?'} | {tf} insufficient data "
+                f"(need {min_bars_required}, have {len(close) if close is not None else 0})"
+            )
+            continue
 
         ema_fast = _safe_ema(close, ema_fast_len)
         ema_slow = _safe_ema(close, ema_slow_len)
@@ -962,40 +943,41 @@ def confirm_trend(
         v_slow = _safe_series_tail_value(ema_slow)
 
         if v_fast is None or v_slow is None:
-            # короткий ряд — пропускаем ТФ
             continue
 
         bull = v_fast > v_slow
 
+        # ADX опционален - не блокируем если низкий
         adx_val = None
         try:
-            adx_val = _adx(df)
+            adx_val = _adx(df, adx_len)
             if pd.isna(adx_val):
                 adx_val = None
-        except Exception:
+        except Exception as exc:
+            logging.debug(
+                f"confirm_trend | {symbol or '?'} | {tf} ADX calc failed: {exc}"
+            )
             adx_val = None
-        if adx_val is not None and adx_val <= 20:
-            # низкий ADX — пропускаем ТФ
-            continue
+        
+        # Если ADX низкий - просто логируем, но не пропускаем
+        if adx_val is not None and adx_val <= 15:
+            logging.debug(
+                f"confirm_trend | {symbol or '?'} | {tf} weak ADX={adx_val:.1f}"
+            )
 
         votes.append("BULL" if bull else "BEAR")
 
+    # Если нет голосов - разрешаем сделку (не блокируем)
     if not votes:
-        reason = "weak_trend"
-        if symbol:
-            try:
-                from logging_utils import log_decision
-
-                log_decision(symbol, reason)
-            except Exception:
-                pass
-        logging.warning("confirm_trend: no valid TF votes; treating as weak_trend")
+        reason = "insufficient_timeframes"
+        logging.warning(
+            f"confirm_trend | {symbol or '?'} | no valid votes, allowing trade"
+        )
         return (True, reason) if return_reason else True
 
     bulls = votes.count("BULL")
     bears = votes.count("BEAR")
 
-    # большинство по голосам
     majority_bull = bulls > bears
     majority_bear = bears > bulls
 
@@ -1004,7 +986,6 @@ def confirm_trend(
     elif side == "SHORT":
         result = majority_bear
     else:
-        # если side не задан — достаточно наличия большинства в любую сторону
         result = majority_bull or majority_bear
 
     return (result, reason) if return_reason else result
