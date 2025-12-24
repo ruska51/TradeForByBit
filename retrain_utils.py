@@ -177,7 +177,6 @@ def retrain_global_model(df_features, df_target, feature_cols):
     model.fit(X_scaled, df_target.values, verbose=False)
 
     import numpy as np
-    logging.info(f"retrain | Model has {model.n_estimators} trees built")
     logging.info(f"retrain | Model feature importances: {model.feature_importances_}")
     logging.info(f"retrain | Non-zero importances: {np.count_nonzero(model.feature_importances_)}")
 

@@ -2398,7 +2398,7 @@ def predict_signal(
 
     proba_filter_adj = PROBA_FILTER
     if adx >= 18 or abs(returns_1h) > 0.01:
-        proba_filter_adj = max(0.35, PROBA_FILTER - 0.10)
+        proba_filter_adj = max(MIN_PROBA_FILTER, PROBA_FILTER - 0.10)
     if conf < proba_filter_adj and adx >= 20 and rsi_cross_from_extreme:
         conf += 0.05
 
