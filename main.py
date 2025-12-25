@@ -34,6 +34,7 @@ logging.info("boot | data_prep reloaded")
 import ccxt
 import pandas as pd
 import numpy as np
+import sklearn
 import time
 from datetime import datetime, timezone
 import asyncio
@@ -171,6 +172,23 @@ from pattern_detector import (
     BEARISH_PATTERNS as DETECTOR_BEARISH_PATTERNS,
     self_test as pattern_self_test,
 )
+
+
+def enter_ensure_filled_v2(exchange, symbol, side, qty, category, params=None):
+    """Обновленная версия функции входа с поддержкой SL/TP."""
+    cat = str(category or "linear").lower()
+    # Bybit специфичные параметры
+    extra = {"category": cat, "reduceOnly": False}
+    if params:
+        extra.update(params)
+    
+    # Пытаемся зайти по рынку для скорости (Market Order)
+    try:
+        res = exchange.create_order(symbol, "market", side, qty, None, extra)
+        return float(res.get("filled", qty))
+    except Exception as e:
+        logging.error(f"Entry failed for {symbol}: {e}")
+        return 0.0
 
 # Bybit requires explicit trigger direction values when placing conditional
 # orders.  The exchange expects the ``triggerDirection`` argument to be ``1``
@@ -707,7 +725,7 @@ def _health_check(symbols: list[str]) -> list[str]:
 
     for sym in symbols:
         try:
-            df = fetch_multi_ohlcv(sym, timeframes, limit=5, warn=False)
+            df = fetch_multi_ohlcv(sym, timeframes, limit=100, warn=False)
         except Exception as exc:  # pragma: no cover - defensive
             data_issues.append(f"{sym} ({exc})")
             continue
@@ -1149,7 +1167,7 @@ def update_dynamic_thresholds() -> None:
     ADX_THRESHOLD = max(MIN_ADX_THRESHOLD, ADX_THRESHOLD)
 
 # Thresholds for trade mode selection
-ATR_THRESHOLD = 0.005
+ATR_THRESHOLD = 0.002
 VOLUME_THRESHOLD = 1_000_000
 STRENGTH_THRESHOLD = 0.5
 VOLATILITY_5M_THRESHOLD = 0.01
@@ -1434,7 +1452,7 @@ ADAPTER_READY = False
 try:
     ADAPTER = ExchangeAdapter(
         config={
-            "sandbox": SANDBOX_MODE,
+            "sandbox": True,
             "futures": True,
             "apiKey": API_KEY,
             "secret": API_SECRET,
@@ -1966,7 +1984,7 @@ except Exception as e:
     logging.info("main | bundle not found yet: %s; retraining...", e)
     try:
         df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-            ADAPTER, symbols, base_tf="15m", limit=400
+            ADAPTER, symbols, base_tf="15m", limit=5000,
         )
         GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
             df_features, df_target, feature_cols
@@ -2045,7 +2063,7 @@ def ensure_model_loaded(adapter, symbols):
         )
         try:
             df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                ADAPTER, symbols, base_tf="15m", limit=400
+                ADAPTER, symbols, base_tf="15m", limit=5000,
             )
             # Добавлена диагностика перед обучением
             logging.info(f"Training data: features={df_features.shape}, target={df_target.shape}")
@@ -2073,7 +2091,7 @@ def ensure_model_loaded(adapter, symbols):
     except Exception:
         try:
             df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                ADAPTER, symbols, base_tf="15m", limit=400
+                ADAPTER, symbols, base_tf="15m", limit=5000,
             )
             GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
                 df_features, df_target, feature_cols
@@ -2328,94 +2346,83 @@ def train_model(symbol):
 
 def predict_signal(
     symbol: str,
-    X_last: pd.DataFrame,
+    recent_candles: pd.DataFrame, # Изменил аргумент: теперь передаем список свечей
     adx: float,
     rsi_cross_from_extreme: bool,
     returns_1h: float,
 ) -> tuple[str, float]:
     model = GLOBAL_MODEL
     scaler = GLOBAL_SCALER
-    features = list(GLOBAL_FEATURES or [])
+    features_names = list(GLOBAL_FEATURES or [])
     ts = datetime.now(timezone.utc).isoformat()
 
-    if not model or not scaler or not features:
+    # 1. Проверка модели
+    if not model or not scaler or not features_names:
         log(logging.WARNING, "predict", symbol, "model/scaler/features missing; fallback")
-        append_csv(
-            "decision_log.csv",
-            {"timestamp": ts, "symbol": symbol, "signal": "hold", "reason": "missing_model"},
-            ["timestamp", "symbol", "signal", "reason"],
-        )
         return "hold", 0.0
 
-    X = X_last.reindex(columns=features, fill_value=0.0)
-    if X.shape[1] != len(features):
-        log(logging.ERROR, "predict", symbol, f"feature mismatch {X.shape[1]} != {len(features)}; fallback")
-        append_csv(
-            "decision_log.csv",
-            {"timestamp": ts, "symbol": symbol, "signal": "hold", "reason": "feature_mismatch"},
-            ["timestamp", "symbol", "signal", "reason"],
-        )
+   # 2. Генерируем признаки (фичи) из свечей
+    df_feats = build_feature_dataframe(recent_candles, symbol=symbol)
+    
+    if df_feats.empty:
+        log(logging.ERROR, "predict", symbol, "features empty after build; need more candles")
         return "hold", 0.0
-    Xs = scaler.transform(X)
 
+    # 3. Берем только последнюю свечу и синхронизируем колонки
+    try:
+        # Импортируем список колонок напрямую из data_prep, 
+        # чтобы predict всегда видел то же самое, что и модель
+        from data_prep import GLOBAL_FEATURE_LIST
+        
+        # Берем последнюю строку и СТРОГО те 14 колонок
+        X_last = df_feats[GLOBAL_FEATURE_LIST].iloc[-1:] 
+    except (ImportError, KeyError) as e:
+        # Если GLOBAL_FEATURE_LIST не нашли, используем колонки самого датафрейма
+        log(logging.WARNING, "predict", symbol, f"Using df_feats columns due to: {e}")
+        X_last = df_feats.iloc[-1:]
+
+    # 4. Масштабируем данные
+    Xs = scaler.transform(X_last.values)
+
+    # 5. Получаем вероятности от модели
     if hasattr(model, "predict_proba"):
         proba = model.predict_proba(Xs)
-
-        logging.info(f"DEBUG | {symbol} | proba_raw={proba[0]}")
-        logging.info(f"DEBUG | {symbol} | model.classes_={model.classes_}")
-        logging.info(f"DEBUG | {symbol} | X_scaled_sample={Xs[0][:5]}")
-
     elif hasattr(model, "predict") and getattr(model, "objective", "") == "multi:softprob":
         raw = model.predict(Xs)
         proba = np.asarray(raw).reshape(1, -1)
     else:
-        log(logging.ERROR, "predict", symbol, "model lacks predict_proba; fallback")
-        append_csv(
-            "decision_log.csv",
-            {"timestamp": ts, "symbol": symbol, "signal": "hold", "reason": "no_predict_proba"},
-            ["timestamp", "symbol", "signal", "reason"],
-        )
+        log(logging.ERROR, "predict", symbol, "model lacks predict_proba")
         return "hold", 0.0
 
-    classes = GLOBAL_CLASSES
-    if classes is None or len(classes) < 3:
-        log(logging.ERROR, "predict", symbol, f"global classes invalid {classes}; fallback")
-        append_csv(
-            "decision_log.csv",
-            {"timestamp": ts, "symbol": symbol, "signal": "hold", "reason": "bad_classes"},
-            ["timestamp", "symbol", "signal", "reason"],
-        )
-        return "hold", 0.0
+    # Отладка в консоль (теперь тут не должно быть 0.33)
+    logging.info(f"DEBUG | {symbol} | proba_raw={proba[0]}")
 
-    i_hold = int(np.where(classes == 0)[0][0])
-    i_long = int(np.where(classes == 1)[0][0])
-    i_short = int(np.where(classes == 2)[0][0])
+    # 6. Распределяем вероятности по классам
+    # Классы модели: 0 (SELL), 1 (HOLD), 2 (BUY)
+    classes = model.classes_ 
+    p_sell = float(proba[0, np.where(classes == 0)[0][0]])
+    p_hold = float(proba[0, np.where(classes == 1)[0][0]])
+    p_buy  = float(proba[0, np.where(classes == 2)[0][0]])
 
-    p_hold = float(proba[0, i_hold])
-    p_long = float(proba[0, i_long])
-    p_short = float(proba[0, i_short])
-    conf = max(p_long, p_short)
-
+    # 7. Логика фильтрации 
+    conf = max(p_buy, p_sell)
     proba_filter_adj = PROBA_FILTER
+    
     if adx >= 18 or abs(returns_1h) > 0.01:
         proba_filter_adj = max(MIN_PROBA_FILTER, PROBA_FILTER - 0.10)
+    
     if conf < proba_filter_adj and adx >= 20 and rsi_cross_from_extreme:
         conf += 0.05
 
+    # 8. Финальное решение
     if conf < proba_filter_adj:
-        append_csv(
-            "decision_log.csv",
-            {"timestamp": ts, "symbol": symbol, "signal": "hold", "reason": "low_conf"},
-            ["timestamp", "symbol", "signal", "reason"],
-        )
+        append_csv("decision_log.csv", {"timestamp": ts, "symbol": symbol, "signal": "hold", "reason": "low_conf"}, ["timestamp", "symbol", "signal", "reason"])
         return "hold", conf
 
-    signal = "long" if p_long >= p_short else "short"
-    append_csv(
-        "decision_log.csv",
-        {"timestamp": ts, "symbol": symbol, "signal": signal, "reason": "model"},
-        ["timestamp", "symbol", "signal", "reason"],
-    )
+    signal = "long" if p_buy >= p_sell else "short"
+    
+    append_csv("decision_log.csv", {"timestamp": ts, "symbol": symbol, "signal": signal, "reason": "model"}, ["timestamp", "symbol", "signal", "reason"])
+    
     return signal, conf
 
 
@@ -2549,7 +2556,7 @@ def backtest(symbol, tf="15m", horizon: int | None = None):
                     pass
                 try:
                     df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                        ADAPTER, symbols, base_tf="15m", limit=400
+                        ADAPTER, symbols, base_tf="15m", limit=5000,
                     )
                     GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
                         df_features, df_target, feature_cols
@@ -3079,7 +3086,7 @@ def best_entry_moment(
         and adx >= ADX_THRESHOLD
     )
     lookback = 3 if relaxed else 1
-    price_tol = 0.005 if relaxed else 0.0025
+    price_tol = 0.002 if relaxed else 0.0025
     df = fetch_ohlcv(symbol, timeframe, limit=limit)
     if df is None or df.empty or len(df) < lookback + 1:
         fallback = fetch_ohlcv(symbol, "5m", limit=max(limit * 3, 10))
@@ -3675,14 +3682,28 @@ def run_trade(
     open_color_key = "open_short" if str(want_side).lower() in {"sell", "short"} else "open"
     logging.info(colorize(open_msg, open_color_key))
     order_id = None
+    # 1. Готовим параметры стопов для Bybit
+    bybit_params = {
+        "stopLoss": str(sl_price),
+        "takeProfit": str(tp_price),
+        "slTriggerBy": "LastPrice",
+        "tpTriggerBy": "LastPrice"
+    }
+
     try:
-        filled_qty = enter_ensure_filled(
+        # 2. Используем нашу новую функцию v2
+        filled_qty = enter_ensure_filled_v2(
             ADAPTER.x,
-            symbol,
-            want_side,
+            sym,
+            side,
             qty_target,
-            category=category,
+            category=cat,
+            params=bybit_params  # <--- Передаем стопы
         )
+        if filled_qty > 0:
+            logging.info(f"✅ Вход выполнен: {sym} {side} по цене {current_price}. SL: {sl_price}, TP: {tp_price}")
+
+
     except Exception as exc:
         logging.warning("entry | %s | ensure_filled failed: %s", symbol, exc)
         log_decision(symbol, "order_failed")
@@ -4117,14 +4138,27 @@ def attempt_direct_market_entry(
             sl_price = float(exchange.price_to_precision(symbol, safe_floor))
 
     order_id = None
+   # 1. Готовим параметры стопов для Bybit
+    bybit_params = {
+        "stopLoss": str(sl_price),
+        "takeProfit": str(tp_price),
+        "slTriggerBy": "LastPrice",
+        "tpTriggerBy": "LastPrice"
+    }
+
     try:
-        filled_qty = enter_ensure_filled(
+        # 2. Используем нашу новую функцию v2
+        filled_qty = enter_ensure_filled_v2(
             ADAPTER.x,
-            symbol,
+            sym,
             side,
             qty_target,
-            category=category,
+            category=cat,
+            params=bybit_params  # <--- Передаем стопы
         )
+        if filled_qty > 0:
+            logging.info(f"✅ Вход выполнен: {sym} {side} по цене {current_price}. SL: {sl_price}, TP: {tp_price}")
+
     except Exception as exc:
         log_once(
             "warning",
@@ -5403,7 +5437,7 @@ def run_bot():
                     pass
         try:
             df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                ADAPTER, symbols, base_tf="15m", limit=400
+                ADAPTER, symbols, base_tf="15m", limit=5000,
             )
             GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES = _retrain_checked(
                 df_features, df_target, feature_cols
@@ -5804,7 +5838,7 @@ def run_bot():
 
         # обрабатываем закрытые ордера текущего инструмента
         clean_symbol = symbol.split(':')[0]
-        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
+        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=100)
 
         
 
@@ -5856,14 +5890,14 @@ def run_bot():
             try:
                 # обрабатываем закрытые ордера текущего инструмента
                 clean_symbol = symbol.split(':')[0]
-                closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
+                closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=100)
             except Exception as exc:
                 # Если не нашли с нормализованным символом, пробуем оригинальный
                 if "does not have market symbol" in str(exc):
                     try:
                         # Убираем :USDT если есть
                         clean_symbol = sym.split(':')[0]
-                        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
+                        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=100)
                     except Exception:
                         closed_orders = []
                 else:
@@ -6404,12 +6438,24 @@ def run_bot():
             elif rsi_prev < 35 <= rsi_val:
                 rsi_cross_from_extreme = "long"
 
+        # Создаем копию для модели, переименовывая колонки 15м в стандартные
+        df_for_model = multi_df.copy()
+        rename_map = {
+            "open_15m": "open",
+            "high_15m": "high",
+            "low_15m": "low",
+            "close_15m": "close",
+            "volume_15m": "volume"
+        }
+        df_for_model = df_for_model.rename(columns=rename_map)
+
+        # Теперь вызываем предсказание с ПРАВИЛЬНЫМИ именами колонок
         model_signal, confidence = predict_signal(
-            sym,
-            X_last,
-            float(adx_val),
-            bool(rsi_cross_from_extreme),
-            float(returns_1h),
+            symbol, 
+            df_for_model,  # Передаем переименованный DF
+            adx_val, 
+            bool(rsi_cross_from_extreme), 
+            returns_1h
         )
         record_summary(
             sym,
@@ -6628,14 +6674,28 @@ def run_bot():
                                                 except Exception:
                                                     tp_price = float(tp_price_raw)
 
+                                                # 1. Готовим параметры стопов для Bybit
+                                                bybit_params = {
+                                                    "stopLoss": str(sl_price),
+                                                    "takeProfit": str(tp_price),
+                                                    "slTriggerBy": "LastPrice",
+                                                    "tpTriggerBy": "LastPrice"
+                                                }
+
                                                 try:
-                                                    filled_qty = enter_ensure_filled(
+                                                    # 2. Используем нашу новую функцию v2
+                                                    filled_qty = enter_ensure_filled_v2(
                                                         ADAPTER.x,
                                                         sym,
                                                         side,
                                                         qty_target,
                                                         category=cat,
+                                                        params=bybit_params  # <--- Передаем стопы
                                                     )
+                                                    if filled_qty > 0:
+                                                        logging.info(f"✅ Вход выполнен: {sym} {side} по цене {current_price}. SL: {sl_price}, TP: {tp_price}")
+
+
                                                 except Exception as exc:
                                                     logging.warning(
                                                         "pattern trade | %s | ensure_filled failed: %s",
@@ -7141,7 +7201,7 @@ def run_bot():
             emit_summary(symbol, "entry_failed")
         # обрабатываем закрытые ордера текущего инструмента
         clean_symbol = symbol.split(':')[0]
-        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
+        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=100)
 
         for order in reversed(closed_orders):
             oid = str(order.get("id") or "")
@@ -7226,8 +7286,24 @@ def run_bot():
                         rsi_cross_from_extreme = "short"
                     elif rsi_prev < 30 <= rsi_val:
                         rsi_cross_from_extreme = "long"
+            # Создаем копию для модели, переименовывая колонки 15м в стандартные
+            df_for_model = multi_df.copy()
+            rename_map = {
+                "open_15m": "open",
+                "high_15m": "high",
+                "low_15m": "low",
+                "close_15m": "close",
+                "volume_15m": "volume"
+            }
+            df_for_model = df_for_model.rename(columns=rename_map)
+
+            # Теперь вызываем предсказание с ПРАВИЛЬНЫМИ именами колонок
             model_signal, confidence = predict_signal(
-                symbol, X_last, adx_val, bool(rsi_cross_from_extreme), returns_1h
+                symbol, 
+                df_for_model,  # Передаем переименованный DF
+                adx_val, 
+                bool(rsi_cross_from_extreme), 
+                returns_1h
             )
             if model_signal == "hold":
                 continue
@@ -7358,7 +7434,7 @@ def run_bot():
     for symbol in symbols:
         # обрабатываем закрытые ордера текущего инструмента
         clean_symbol = symbol.split(':')[0]
-        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=5)
+        closed_orders = safe_fetch_closed_orders(exchange, clean_symbol, limit=100)
 
 
         reverse_done = False  # не открывать больше одного реверса на символ за проход
@@ -7457,34 +7533,51 @@ def run_bot_loop():
     if any(arg in ("--retrain", "retrain") for arg in sys.argv[1:]):
         logging.info("[run_bot_loop] Manual retrain requested via CLI flag")
         try:
-            df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                ADAPTER, symbols, base_tf="15m", limit=400
+            # 1. Создаем временный адаптер БЕЗ КЛЮЧЕЙ для реального рынка
+            from exchange_adapter import ExchangeAdapter
+            PUBLIC_ADAPTER = ExchangeAdapter("", "")
+            
+            logging.info("--- TRAINING ON REAL MARKET DATA (NO KEYS NEEDED) ---")
+            
+            # 2. Используем PUBLIC_ADAPTER вместо обычного ADAPTER
+            df_features, df_target, feature_cols = data_prep.fetch_and_prepare_training_data(
+                PUBLIC_ADAPTER, symbols, base_tf="15m", limit=2000,
             )
-            global GLOBAL_MODEL, GLOBAL_SCALER, GLOBAL_FEATURES, GLOBAL_CLASSES
-            (
-                GLOBAL_MODEL,
-                GLOBAL_SCALER,
-                GLOBAL_FEATURES,
-                GLOBAL_CLASSES,
-            ) = _retrain_checked(df_features, df_target, feature_cols)
+            
+            _retrain_checked(df_features, df_target, feature_cols)
+            logging.info("--- RETRAIN FINISHED SUCCESSFULLY ---")
+            
         except Exception as e:
-            logging.error("[run_bot_loop] Manual retrain failed: %s", e, exc_info=True)
+            logging.error(f"retrain failed: {e}")
     last_analysis = time.time()
     analysis_interval = 60 * 60 * 3  # 3 hours
     try:
+        
         while True:
             ensure_model_loaded(ADAPTER, symbols)
             try:
                 run_bot()
+                
+                # === ДОБАВЛЕНО: Сохранение кэша в файл после каждого прохода ===
+                try:
+                    data_prep.save_current_cache(ADAPTER)
+                except Exception as e:
+                    logging.error(f"Error saving data cache: {e}")
+                # =============================================================
+
             except Exception as e:
                 logging.error(f"Unhandled error in bot loop: {e}", exc_info=True)
+            
             global _cycle_counter
             _cycle_counter += 1
+            
             if _cycle_counter % SUMMARY_CYCLES == 0:
                 _summarize_events()
+            
             if _cycle_counter % PATTERN_HIT_LOG_CYCLES == 0 and pattern_hit_rates:
                 for sym, rate in pattern_hit_rates.items():
                     logging.info("pattern_hit_rate | %s | %.2f", sym, rate)
+            
             if time.time() - last_analysis >= analysis_interval:
                 logging.info("[run_bot_loop] Running scheduled trade analysis...")
                 try:
@@ -7496,9 +7589,17 @@ def run_bot_loop():
                 except Exception as e:
                     logging.error(f"Trade analysis error: {e}", exc_info=True)
                 last_analysis = time.time()
+
             logging.info("[LOOP] Sleeping 5 minutes...")
             time.sleep(60 * 5)
+            
     except KeyboardInterrupt:
+        # Принудительное сохранение при выходе (на всякий случай)
+        logging.info("Bot stopping... saving final cache...")
+        try:
+            data_prep.save_current_cache(ADAPTER)
+        except:
+            pass
         logging.info("Bot stopped by user")
 
 
@@ -7526,16 +7627,17 @@ def main() -> None:
         )
 
     if not BUNDLE_PATH.exists():
-        logging.warning(
-            "model | global model missing at startup: %s; retraining", BUNDLE_PATH
-        )
-        try:
-            df_features, df_target, feature_cols = fetch_and_prepare_training_data(
-                ADAPTER, symbols, base_tf="15m", limit=400
+            logging.warning(
+                "model | global model missing at startup: %s; retraining", BUNDLE_PATH
             )
-            _retrain_checked(df_features, df_target, feature_cols)
-        except Exception as e:
-            logging.error(f"retrain | global | initial retrain failed: {e}")
+            try:
+                # Исправленный вызов
+                df_features, df_target, feature_cols = data_prep.fetch_and_prepare_training_data(
+                    ADAPTER, symbols, base_tf="15m", limit=5000
+                )
+                _retrain_checked(df_features, df_target, feature_cols)
+            except Exception as e:
+                logging.error(f"retrain | global | initial retrain failed: {e}")
 
     _maybe_retrain_global()
 

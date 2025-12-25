@@ -382,27 +382,26 @@ def enter_ensure_filled(
     side: str,
     qty: float,
     category: str,
+    params: dict = None,  # Добавили возможность принимать параметры (SL/TP)
 ) -> float:
     """Place IOC limit near last, then market the remainder. Return filled qty."""
-
-    normalized_symbol = _normalize_bybit_symbol(exchange, symbol, category)
     
+    # 1. Подготовка параметров и режима хеджирования
+    normalized_symbol = _normalize_bybit_symbol(exchange, symbol, category)
     cat = str(category or "").lower()
     if cat in ("", "swap"):
         cat = "linear"
-    
-    # КРИТИЧНО: Принудительная проверка hedge mode
+
     is_hedge = _force_hedge_mode_check(exchange, normalized_symbol, cat)
     
-    # Определяем positionIdx для hedge mode
     position_idx = 0
     if is_hedge:
         position_idx = 1 if side.lower() == "buy" else 2
         logging.info(f"enter | {symbol} | hedge mode enabled, positionIdx={position_idx}")
     else:
         logging.info(f"enter | {symbol} | oneway mode")
-    
-    # Получаем текущую цену
+
+    # 2. Получение цены для лимитного IOC ордера
     ticker = exchange.fetch_ticker(normalized_symbol, params={"category": cat}) or {}
     last = float(
         ticker.get("last")
@@ -419,28 +418,30 @@ def enter_ensure_filled(
     except Exception:
         price = float(price)
 
-    # IOC ордер с hedge mode параметрами
-    params = {
+    # 3. ФОРМИРОВАНИЕ ПАРАМЕТРОВ ДЛЯ IOC
+    ioc_params = {
         "category": cat,
         "timeInForce": "IOC",
         "reduceOnly": False,
     }
-    
-    # КРИТИЧНО: всегда добавляем positionIdx если hedge
     if is_hedge:
-        params["positionIdx"] = position_idx
+        ioc_params["positionIdx"] = position_idx
     
+    # КРИТИЧНО: Примешиваем SL и TP из вызывающего кода
+    if params:
+        ioc_params.update(params)
+
     try:
-        r = exchange.create_order(normalized_symbol, "limit", side, qty, price, params)
+        r = exchange.create_order(normalized_symbol, "limit", side, qty, price, ioc_params)
         filled1 = float(r.get("filled") or 0.0) if isinstance(r, dict) else 0.0
         logging.info(f"enter | {symbol} | IOC filled {filled1}/{qty}")
     except Exception as e:
         logging.warning(f"enter | {symbol} | IOC failed: {e}")
         filled1 = 0.0
 
-    time.sleep(2.0)
+    time.sleep(1.5) # Немного уменьшили паузу для скорости
 
-    # Остаток маркет ордером
+    # 4. ФОРМИРОВАНИЕ ПАРАМЕТРОВ ДЛЯ MARKET (если IOC не исполнился полностью)
     remainder = max(0.0, qty - filled1)
     filled2 = 0.0
     if remainder > 0:
@@ -448,10 +449,12 @@ def enter_ensure_filled(
             "category": cat,
             "reduceOnly": False,
         }
-        
-        # КРИТИЧНО: всегда добавляем positionIdx если hedge
         if is_hedge:
             market_params["positionIdx"] = position_idx
+        
+        # КРИТИЧНО: Также добавляем SL и TP в маркетный ордер
+        if params:
+            market_params.update(params)
             
         try:
             r2 = exchange.create_order(
