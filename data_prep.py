@@ -117,9 +117,10 @@ def prepare_training_data(symbol_data, horizon: int = 5, threshold: float = 0.00
             X = features.loc[valid_idx]
             y_ret = future_return.loc[valid_idx]
 
-            y = pd.Series(1, index=valid_idx) # Hold
-            y[y_ret > threshold] = 2          # Buy
-            y[y_ret < -threshold] = 0         # Sell
+            actual_threshold = threshold if threshold > 0 else y_ret.std() 
+            y = pd.Series(1, index=valid_idx)
+            y[y_ret > actual_threshold] = 2
+            y[y_ret < -actual_threshold] = 0
             
             all_features.append(X)
             all_targets.append(y)
@@ -132,7 +133,10 @@ def prepare_training_data(symbol_data, horizon: int = 5, threshold: float = 0.00
     
     X_final = pd.concat(all_features)
     y_final = pd.concat(all_targets)
-    
+
+    class_counts = y.value_counts().to_dict()
+    logging.info(f"Распределение классов в обучении: {class_counts}")
+
     logging.info(f"🚀 ОБУЧЕНИЕ: {X_final.shape} строк | Классы: {y_final.value_counts().to_dict()}")
     return X_final, y_final
 

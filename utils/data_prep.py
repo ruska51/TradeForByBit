@@ -78,8 +78,12 @@ def build_feature_dataframe(df_ohlcv: pd.DataFrame, symbol: str, thr: float = 0.
 
     df["volume_sma_20"] = df["volume"].rolling(20).mean()
     df["volume_ratio"] = df["volume"] / (df["volume_sma_20"] + 1e-9)
-    # Target: 1 (long) если ret_5 > thr, 2 (short) если ret_5 < -thr, иначе 0
-    target = np.where(df["ret_5"] > thr, 1, np.where(df["ret_5"] < -thr, 2, 0))
+
+    # ===  КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильный таргет - смотрим ВПЕРЁД на 5 свечей ===
+    # Расчёт будущей доходности (через 5 свечей от текущей)
+    future_ret_5 = df["close"].shift(-5) / df["close"] - 1
+    # Target: 1 (long) если будущая доходность > thr, 2 (short) если < -thr, иначе 0 (hold)
+    target = np.where(future_ret_5 > thr, 1, np.where(future_ret_5 < -thr, 2, 0))
     feats = df[
         [
             "ret_1",

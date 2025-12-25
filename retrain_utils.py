@@ -117,29 +117,67 @@ def retrain_global_model(df_features: pd.DataFrame, df_target: pd.Series, featur
         logging.warning(f"! [retrain] Could not compute weights ({e}), training without them")
 
     # 4. Обучение XGBoost
+    logging.info(f"retrain | Training on {X_scaled.shape} samples...")
+
+    # Вычисляем веса классов
+    from collections import Counter
+    c = Counter(y)
+    total = len(y)
+    weights_map = {cls: total / (count * len(c)) for cls, count in c.items()}
+    sample_weights = np.array([weights_map[label] for label in y])
+    logging.info(f"retrain | Class weights: {weights_map}")
+
+    # Создаём и обучаем модель
     model = XGBClassifier(
-        n_estimators=500,
-        max_depth=7,
-        learning_rate=0.03,
+        n_estimators=100,  # Уменьшили для скорости
+        max_depth=5,
+        learning_rate=0.1,
         objective="multi:softprob",
         num_class=3,
-        tree_method="hist",
-        random_state=42
+        random_state=42,
+        n_jobs=1,  # Используем 1 поток для отладки
+        verbosity=1,  # Включаем логи XGBoost
     )
 
-    logging.info(f"retrain | Training on {X_scaled.shape} samples...")
-    
-    if sample_weights is not None:
-        model.fit(X_scaled, y, sample_weight=sample_weights)
-    else:
-        model.fit(X_scaled, y)
-    
+    logging.info(f"retrain | Starting XGBoost fit...")
+    try:
+        model.fit(
+            X_scaled,
+            y,
+            sample_weight=sample_weights,
+            verbose=True,  # Логируем процесс обучения
+        )
+        logging.info(f"retrain | XGBoost fit completed!")
+    except Exception as e:
+        logging.error(f"retrain | XGBoost fit FAILED: {e}", exc_info=True)
+        raise
+
+    # Проверка что модель обучена
+    if not hasattr(model, '_Booster') and not hasattr(model, 'get_booster'):
+        logging.error("retrain | Model has no booster - training failed!")
+        raise RuntimeError("XGBoost model not trained properly")
+
     # Проверка вероятностей в середине данных
     idx = len(X_scaled) // 2
     sample_preds = model.predict_proba(X_scaled[idx:idx+3])
-    logging.info(f"retrain | Probabilities sample:\n{sample_preds}")
-    
-    model.classes_ = np.array([0, 1, 2])
+    logging.info(f"retrain | Probabilities sample (mid-training-data):\n{sample_preds}")
+
+    # Проверка на первых 3 сэмплах
+    first_preds = model.predict_proba(X_scaled[:3])
+    logging.info(f"retrain | Probabilities sample (first 3):\n{first_preds}")
+
+    # Проверяем что вероятности НЕ равномерные
+    avg_std = np.mean([np.std(p) for p in sample_preds])
+    if avg_std < 0.01:
+        logging.warning(f"retrain | WARNING: Model predictions too uniform (std={avg_std:.4f})")
+        logging.warning(f"retrain | This indicates training failed or data has no signal")
+    else:
+        logging.info(f"retrain | Model predictions variance OK (std={avg_std:.4f})")
+
+    # НЕ перезаписываем classes_, используем то что XGBoost установил
+    if not hasattr(model, 'classes_'):
+        logging.warning("retrain | Model has no classes_, setting manually")
+        model.classes_ = np.array([0, 1, 2])
     save_global_bundle(model, scaler, feature_cols, model.classes_)
     
     logging.info("retrain | SUCCESS! Model saved.")
