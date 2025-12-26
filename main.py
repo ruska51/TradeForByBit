@@ -3699,9 +3699,13 @@ def run_trade(
     logging.info(colorize(open_msg, open_color_key))
     order_id = None
     # 1. Готовим параметры стопов для Bybit
+    # ИСПРАВЛЕНО 2025-12-26: используем форматирование вместо str() для избежания научной нотации
+    # DEBUG: логируем значения
+    logging.info(f"DEBUG | {symbol} | run_trade SL/TP: price={price:.8f}, sl_final={sl_price:.8f}, tp_final={tp_price:.8f}")
+
     bybit_params = {
-        "stopLoss": str(sl_price),
-        "takeProfit": str(tp_price),
+        "stopLoss": f"{sl_price:.8f}",  # Формат с 8 знаками после запятой
+        "takeProfit": f"{tp_price:.8f}",
         "slTriggerBy": "LastPrice",
         "tpTriggerBy": "LastPrice"
     }
@@ -4168,17 +4172,20 @@ def attempt_direct_market_entry(
 
     order_id = None
    # 1. Готовим параметры стопов для Bybit
+    # ИСПРАВЛЕНО 2025-12-26: используем форматирование вместо str()
+    # DEBUG: логируем значения перед отправкой
+    logging.info(f"DEBUG | {symbol} | SL/TP calculation: price={last_price:.8f}, atr={atr_val:.8f}, sl_raw={sl_price_raw:.8f}, tp_raw={tp_price_raw:.8f}, sl_final={sl_price:.8f}, tp_final={tp_price:.8f}")
+
     bybit_params = {
-        "stopLoss": str(sl_price),
-        "takeProfit": str(tp_price),
+        "stopLoss": f"{sl_price:.8f}",
+        "takeProfit": f"{tp_price:.8f}",
         "slTriggerBy": "LastPrice",
         "tpTriggerBy": "LastPrice"
     }
 
     try:
         # 2. Используем нашу новую функцию v2
-        # ИСПРАВЛЕНО 2025-12-26: используем want_side вместо undefined side
-        side = want_side
+        # side уже определён на строке 3899, want_side не существует здесь!
         filled_qty = enter_ensure_filled_v2(
             ADAPTER.x,
             sym,
@@ -5595,7 +5602,8 @@ def run_bot():
         if not sym or contracts <= 0:
             continue
         if sym not in active_symbols:
-            logging.warning(
+            # ИСПРАВЛЕНО 2025-12-26: изменён уровень с WARNING на INFO (это нормально)
+            logging.info(
                 "[run_bot] Found open position on %s not in active list – will manage it.",
                 sym,
             )
@@ -5613,7 +5621,8 @@ def run_bot():
             if not sym or contracts <= 0:
                 continue
             if sym not in active_symbols:
-                logging.warning(
+                # ИСПРАВЛЕНО 2025-12-26: изменён уровень с WARNING на INFO
+                logging.info(
                     "[run_bot] Found open position on %s not in active list — will manage it.",
                     sym,
                 )
@@ -7687,7 +7696,16 @@ def main() -> None:
             ADAPTER.x.set_position_mode(False, sym, params={"category": "linear"})
             logging.info(f"position_mode | {sym} | set to ONE-WAY")
         except Exception as e:
-            logging.warning(f"position_mode | {sym} | failed to set ONE-WAY: {e}")
+            # Проверяем код ошибки - 110025 означает что mode уже установлен
+            error_str = str(e)
+            if "110025" in error_str or "not modified" in error_str:
+                logging.debug(f"position_mode | {sym} | already in ONE-WAY mode")
+            elif "110074" in error_str or "not live" in error_str:
+                logging.debug(f"position_mode | {sym} | contract not available on testnet")
+            elif "110024" in error_str or "existing position" in error_str:
+                logging.info(f"position_mode | {sym} | has open position, mode cannot be changed")
+            else:
+                logging.warning(f"position_mode | {sym} | failed to set ONE-WAY: {e}")
 
     # Clean up any leftover open orders at startup but keep those linked to active positions
     for sym in symbols:
