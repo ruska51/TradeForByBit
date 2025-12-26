@@ -1072,12 +1072,13 @@ ALLOW_MARKET_FALLBACK = True  # switch to market order if limit rejected
 MAX_PERCENT_DIFF = 0.0015  # max deviation from best price for limit orders
 RISK_PER_TRADE = 0.03  # 3% of equity risked per trade
 # базовые пороги объёма для фильтра ликвидности
-VOLUME_RATIO_MIN = float(os.getenv("VOLUME_RATIO_MIN", "1.0"))
-VOLUME_RATIO_ENTRY = float(os.getenv("VOLUME_RATIO_ENTRY", "1.0"))
+# ИСПРАВЛЕНО 2025-12-26: Понижен с 1.0 до 0.2 для testnet (низкая ликвидность)
+VOLUME_RATIO_MIN = float(os.getenv("VOLUME_RATIO_MIN", "0.2"))
+VOLUME_RATIO_ENTRY = float(os.getenv("VOLUME_RATIO_ENTRY", "0.25"))
 
 # PATCH NOTES:
 # Что изменено:
-# 1) RISK_PER_TRADE по умолчанию снижен до 3%, а VOLUME_RATIO_MIN/VOLUME_RATIO_ENTRY теперь >= 1.0.
+# 1) RISK_PER_TRADE по умолчанию снижен до 3%, а VOLUME_RATIO_MIN/VOLUME_RATIO_ENTRY понижены до 0.2/0.25 для testnet.
 # 2) run_trade снижает риск при vol_missing и пропускает сделки при vol_low перед расчётом объёма.
 # Почему безопасно:
 # 1) Пороговые значения переопределяются ENV/конфигом, а log_once защищает от спама при частых проверках.
@@ -1160,9 +1161,11 @@ def update_dynamic_thresholds() -> None:
     if trades_per_hour < 1:
         PROBA_FILTER = max(MIN_PROBA_FILTER, PROBA_FILTER - 0.03)
         ADX_THRESHOLD = max(MIN_ADX_THRESHOLD, ADX_THRESHOLD - 2)
-        VOLUME_RATIO_MIN = max(1.0, VOLUME_RATIO_MIN)
+        # ИСПРАВЛЕНО 2025-12-26: Не поднимать VOLUME_RATIO_MIN до 1.0 (слишком строго для testnet)
+        VOLUME_RATIO_MIN = max(0.15, VOLUME_RATIO_MIN)
     else:
-        VOLUME_RATIO_MIN = max(1.0, VOLUME_RATIO_MIN)
+        # ИСПРАВЛЕНО 2025-12-26: Не поднимать VOLUME_RATIO_MIN до 1.0
+        VOLUME_RATIO_MIN = max(0.2, VOLUME_RATIO_MIN)
     PROBA_FILTER = max(MIN_PROBA_FILTER, PROBA_FILTER)
     ADX_THRESHOLD = max(MIN_ADX_THRESHOLD, ADX_THRESHOLD)
 
@@ -3421,14 +3424,11 @@ def run_trade(
         log_decision(symbol, "spot_market_not_supported")
         return False
     
-    # Проверка hedge mode перед входом
-    from logging_utils import _force_hedge_mode_check
-    
-    is_hedge_mode = _force_hedge_mode_check(exchange, symbol, category)
-    logging.info(
-        f"trade | {symbol} | mode={'HEDGE' if is_hedge_mode else 'ONEWAY'} category={category} leverage={lev}x"
-    )
-    
+    # ИСПРАВЛЕНО 2025-12-26: Отключён hedge mode (всегда ONE-WAY)
+    # from logging_utils import _force_hedge_mode_check
+    # is_hedge_mode = _force_hedge_mode_check(exchange, symbol, category)
+    is_hedge_mode = False  # Всегда ONE-WAY mode
+
     want_side = "buy" if signal == "long" else "sell"
     qty_signed, qty_abs = has_open_position(exchange, symbol, category)
     if qty_abs > 0 and (
@@ -3458,7 +3458,13 @@ def run_trade(
         )
         return False
 
+    # ИСПРАВЛЕНО 2025-12-26: lev должен быть определён ДО использования в logging
     lev = LEVERAGE if leverage is None else leverage
+
+    # Теперь можем логировать с использованием lev
+    logging.info(
+        f"trade | {symbol} | mode={'HEDGE' if is_hedge_mode else 'ONEWAY'} category={category} leverage={lev}x"
+    )
     atr_val = safe_atr(df_trend["atr"] if "atr" in df_trend.columns else None, key=symbol) or 0.0
     if entry_ctx is None:
         entry_ctx = {}
@@ -3702,12 +3708,14 @@ def run_trade(
 
     try:
         # 2. Используем нашу новую функцию v2
+        # ИСПРАВЛЕНО 2025-12-26: используем want_side вместо undefined side
+        side = want_side
         filled_qty = enter_ensure_filled_v2(
             ADAPTER.x,
             sym,
             side,
             qty_target,
-            category=cat,
+            category=category,  # ИСПРАВЛЕНО 2025-12-26: было cat
             params=bybit_params  # <--- Передаем стопы
         )
         if filled_qty > 0:
@@ -4169,12 +4177,14 @@ def attempt_direct_market_entry(
 
     try:
         # 2. Используем нашу новую функцию v2
+        # ИСПРАВЛЕНО 2025-12-26: используем want_side вместо undefined side
+        side = want_side
         filled_qty = enter_ensure_filled_v2(
             ADAPTER.x,
             sym,
             side,
             qty_target,
-            category=cat,
+            category=category,  # ИСПРАВЛЕНО 2025-12-26: было cat
             params=bybit_params  # <--- Передаем стопы
         )
         if filled_qty > 0:
@@ -5226,11 +5236,10 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
     if amount_val <= 0:
         return
 
-    # Проверяем hedge mode
-    is_hedge = _force_hedge_mode_check(exchange, norm_symbol, cat)
-    position_idx = 0
-    if is_hedge:
-        position_idx = 1 if qty_signed > 0 else 2
+    # ИСПРАВЛЕНО 2025-12-26: Отключён hedge mode (всегда ONE-WAY)
+    # is_hedge = _force_hedge_mode_check(exchange, norm_symbol, cat)
+    is_hedge = False
+    position_idx = 0  # Всегда 0 для ONE-WAY mode
 
     params = {"category": cat, "orderFilter": "StopOrder"}
     fetch_open_orders = getattr(exchange, "fetch_open_orders", None)
@@ -6718,7 +6727,7 @@ def run_bot():
                                                         sym,
                                                         side,
                                                         qty_target,
-                                                        category=cat,
+                                                        category=category,  # ИСПРАВЛЕНО 2025-12-26: было cat
                                                         params=bybit_params  # <--- Передаем стопы
                                                     )
                                                     if filled_qty > 0:
@@ -7669,6 +7678,16 @@ def main() -> None:
                 logging.error(f"retrain | global | initial retrain failed: {e}")
 
     _maybe_retrain_global()
+
+    # ИСПРАВЛЕНО 2025-12-26: Устанавливаем ONE-WAY mode для всех символов
+    logging.info("=== Setting ONE-WAY position mode ===")
+    for sym in symbols:
+        try:
+            # Установка ONE-WAY mode через Bybit API
+            ADAPTER.x.set_position_mode(False, sym, params={"category": "linear"})
+            logging.info(f"position_mode | {sym} | set to ONE-WAY")
+        except Exception as e:
+            logging.warning(f"position_mode | {sym} | failed to set ONE-WAY: {e}")
 
     # Clean up any leftover open orders at startup but keep those linked to active positions
     for sym in symbols:
