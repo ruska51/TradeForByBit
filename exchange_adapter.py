@@ -757,37 +757,42 @@ class ExchangeAdapter:
             if key in self.config and self.config[key]:
                 cfg[key] = self.config[key]
 
+        # ИСПРАВЛЕНО 2025-12-27: Увеличиваем recvWindow до 20 секунд
+        # для компенсации разницы времени между клиентом и сервером Bybit
+        if self.exchange_id == "bybit":
+            cfg.setdefault("options", {})
+            cfg["options"]["recvWindow"] = 20000  # 20 секунд вместо 5
+
         last_err: Exception | None = None
         tried: list[str] = []
         for name, ctor in candidates:
             tried.append(name)
             try:
-                ex = ctor({**cfg, "options": options})
+                # Объединяем options с сохранением recvWindow
+                merged_options = {**options}
+                if "options" in cfg:
+                    merged_options.update(cfg["options"])
+                ex = ctor({**cfg, "options": merged_options})
                 if str(getattr(ex, "id", "") or "").lower() == "bybit":
                     current_options = dict(getattr(ex, "options", {}) or {})
                     current_options["defaultType"] = "future"
+                    # Сохраняем recvWindow при обновлении options
+                    if "recvWindow" in merged_options:
+                        current_options["recvWindow"] = merged_options["recvWindow"]
                     ex.options = current_options
                 if hasattr(ex, "set_sandbox_mode"):
                     ex.set_sandbox_mode(self.sandbox)
 
                 mkts: dict[str, Any] = {}
-                for _ in range(3):
+                for attempt in range(3):
                     try:
                         mkts = ex.load_markets(True) or {}
                         break
                     except Exception as exc:  # pragma: no cover - logging only
-                        logging.warning("adapter | %s load_markets failed: %s", name, exc)
-                        if self.sandbox and hasattr(ex, "set_sandbox_mode"):
-                            try:
-                                ex.set_sandbox_mode(False)
-                                mkts = ex.load_markets(True) or {}
-                            except Exception as exc2:  # pragma: no cover - logging only
-                                logging.warning(
-                                    "adapter | %s load_markets(nosandbox) failed: %s", name, exc2
-                                )
-                                mkts = {}
-                            finally:
-                                ex.set_sandbox_mode(self.sandbox)
+                        # ИСПРАВЛЕНО 2025-12-27: Не пытаемся переключаться на production
+                        # если явно запрошен sandbox - API ключи разные!
+                        logging.warning("adapter | %s load_markets failed (attempt %d/3): %s", name, attempt + 1, exc)
+                        # Убрали fallback на production - это вызывает ошибки с неверным API ключом
                         time.sleep(0.5)
                 if not mkts:
                     logging.warning(
@@ -860,7 +865,6 @@ class ExchangeAdapter:
             params_base = dict(params or {})
             params_base.setdefault("category", "linear")
             params_base.setdefault("tpSlMode", "Full")
-            params_base.setdefault("triggerBy", "LastPrice")
             params_base.setdefault("positionIdx", 0)
 
             ccxt_symbol = _ccxt_symbol(symbol)
@@ -870,15 +874,20 @@ class ExchangeAdapter:
             if takeProfitPrice is not None:
                 try:
                     tp_precise = self_ex.price_to_precision(symbol, takeProfitPrice)
-                    params_base["takeProfit"] = float(tp_precise)
+                    params_base["takeProfit"] = str(tp_precise)  # Bybit требует строку
                 except Exception:
-                    params_base["takeProfit"] = takeProfitPrice
+                    params_base["takeProfit"] = str(takeProfitPrice)
+                # tpTriggerBy должен быть отдельным полем
+                params_base.setdefault("tpTriggerBy", "LastPrice")
+
             if stopLossPrice is not None:
                 try:
                     sl_precise = self_ex.price_to_precision(symbol, stopLossPrice)
-                    params_base["stopLoss"] = float(sl_precise)
+                    params_base["stopLoss"] = str(sl_precise)  # Bybit требует строку
                 except Exception:
-                    params_base["stopLoss"] = stopLossPrice
+                    params_base["stopLoss"] = str(stopLossPrice)
+                # slTriggerBy должен быть отдельным полем
+                params_base.setdefault("slTriggerBy", "LastPrice")
 
             return trading_stop_call(params_base)
 

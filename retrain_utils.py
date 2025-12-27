@@ -15,26 +15,26 @@ try:
     # Пытаемся импортировать калибровку отдельно
     try:
         from sklearn.calibration import CalibratedClassifierCV
-        logging.info("✓ [retrain_utils] CalibratedClassifierCV loaded")
+        logging.info("[OK] [retrain_utils] CalibratedClassifierCV loaded")
     except ImportError:
-        logging.warning("! [retrain_utils] Calibration missing, using raw ensemble")
-        CalibratedClassifierCV = None 
+        logging.warning("[WARN] [retrain_utils] Calibration missing, using raw ensemble")
+        CalibratedClassifierCV = None
 
     SKLEARN_OK = True
     try:
         import sklearn.base
-        logging.info("✓ [retrain_utils] Sklearn base detected")
+        logging.info("[OK] [retrain_utils] Sklearn base detected")
     except:
-        logging.info("✓ [retrain_utils] Sklearn detected")
+        logging.info("[OK] [retrain_utils] Sklearn detected")
 except ImportError as e:
-    logging.warning(f"✗ [retrain_utils] Core Sklearn import failed: {e}")
+    logging.warning(f"[ERROR] [retrain_utils] Core Sklearn import failed: {e}")
 
 try:
     from xgboost import XGBClassifier
     XGB_OK = True
-    logging.info("✓ [retrain_utils] XGBoost loaded")
+    logging.info("[OK] [retrain_utils] XGBoost loaded")
 except ImportError:
-    logging.warning("✗ [retrain_utils] XGBoost unavailable")
+    logging.warning("[ERROR] [retrain_utils] XGBoost unavailable")
 # ===============================
 from model_utils import save_global_bundle, SimpleScaler, REQUIRED_CLASSES
 
@@ -112,9 +112,9 @@ def retrain_global_model(df_features: pd.DataFrame, df_target: pd.Series, featur
     try:
         from sklearn.utils.class_weight import compute_sample_weight
         sample_weights = compute_sample_weight(class_weight='balanced', y=y)
-        logging.info("✓ [retrain] Sample weights computed successfully")
+        logging.info("[OK] [retrain] Sample weights computed successfully")
     except Exception as e:
-        logging.warning(f"! [retrain] Could not compute weights ({e}), training without them")
+        logging.warning(f"[WARN] [retrain] Could not compute weights ({e}), training without them")
 
     # 4. Обучение XGBoost
     logging.info(f"retrain | Training on {X_scaled.shape} samples...")

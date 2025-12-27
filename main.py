@@ -127,6 +127,8 @@ from logging_utils import (
     record_pattern,
     record_error,
     place_conditional_exit,
+    set_position_tp_sl,
+    check_position_has_sltp,
     enter_ensure_filled,
     wait_position_after_entry,
     has_pending_entry,
@@ -177,15 +179,34 @@ from pattern_detector import (
 def enter_ensure_filled_v2(exchange, symbol, side, qty, category, params=None):
     """Обновленная версия функции входа с поддержкой SL/TP."""
     cat = str(category or "linear").lower()
+
+    # ИСПРАВЛЕНО 2025-12-26: Округляем qty ПЕРЕД отправкой ордера
+    # Это критично для предотвращения ошибки "Qty invalid"
+    from logging_utils import _round_qty
+    qty_rounded = _round_qty(exchange, symbol, float(qty))
+
+    if qty_rounded <= 0:
+        logging.error(f"Entry failed for {symbol}: qty after rounding is {qty_rounded} (original: {qty})")
+        return 0.0
+
+    # ВСЕГДА логируем округление qty (уровень INFO для отладки)
+    logging.info(f"entry | {symbol} | qty rounding: {qty:.6f} -> {qty_rounded:.6f}")
+
     # Bybit специфичные параметры
     extra = {"category": cat, "reduceOnly": False}
-    if params:
-        extra.update(params)
-    
+    # КРИТИЧНО: НЕ ПЕРЕДАЕМ stopLoss/takeProfit в create_order!
+    # Bybit V5 API НЕ ПОДДЕРЖИВАЕТ их в Market Orders.
+    # SL/TP устанавливаются ПОСЛЕ через place_conditional_exit()
+    # if params:
+    #     extra.update(params)  # ОТКЛЮЧЕНО - вызывает ошибки!
+
     # Пытаемся зайти по рынку для скорости (Market Order)
     try:
-        res = exchange.create_order(symbol, "market", side, qty, None, extra)
-        return float(res.get("filled", qty))
+        res = exchange.create_order(symbol, "market", side, qty_rounded, None, extra)
+        filled = res.get("filled", qty_rounded) if isinstance(res, dict) else qty_rounded
+        if filled is None:
+            filled = qty_rounded  # Fallback to requested qty
+        return float(filled) if filled is not None else 0.0
     except Exception as e:
         logging.error(f"Entry failed for {symbol}: {e}")
         return 0.0
@@ -1073,7 +1094,7 @@ MAX_PERCENT_DIFF = 0.0015  # max deviation from best price for limit orders
 RISK_PER_TRADE = 0.03  # 3% of equity risked per trade
 # базовые пороги объёма для фильтра ликвидности
 # ИСПРАВЛЕНО 2025-12-26: Понижен с 1.0 до 0.2 для testnet (низкая ликвидность)
-VOLUME_RATIO_MIN = float(os.getenv("VOLUME_RATIO_MIN", "0.2"))
+VOLUME_RATIO_MIN = float(os.getenv("VOLUME_RATIO_MIN", "0.05"))  # TESTNET: снижено с 0.2 до 0.05 (реальные объемы 0.08-0.14)
 VOLUME_RATIO_ENTRY = float(os.getenv("VOLUME_RATIO_ENTRY", "0.25"))
 
 # PATCH NOTES:
@@ -1504,16 +1525,16 @@ except Exception as e:  # pragma: no cover - unexpected init failure
 def initialize_symbols() -> list[str]:
     """Return list of tradable pairs. Market scanning is currently disabled."""
     default = [
-        "BTC/USDT",
-        "ETH/USDT",
-        "SOL/USDT",
+        "BTC/USDT",  # ✅ ВКЛЮЧЕНО: исправлено округление через qtyStep
+        "ETH/USDT",  # ✅ ВКЛЮЧЕНО: исправлено округление через qtyStep
+        "SOL/USDT",  # ✅ ВКЛЮЧЕНО: исправлено округление через qtyStep
         "BNB/USDT",
         "ADA/USDT",
         "XRP/USDT",
-        "LTC/USDT",
+        # "LTC/USDT",  # ОТКЛЮЧЕНО: "This contract is not live" в testnet
         "NEAR/USDT",
         "SUI/USDT",
-        "TON/USDT",
+        # "TON/USDT",  # ОТКЛЮЧЕНО: "This contract is not live" в testnet
         "TRX/USDT",
     ]
     # Удаляем возможные дубликаты, сохраняя порядок
@@ -3117,15 +3138,15 @@ def best_entry_moment(
             f"not enough candles for {timeframe} confirmation - proceeding",
         )
         return True
-    # ИСПРАВЛЕНО 2025-12-26: Понижен порог объёма с 1.0 до 0.2-0.25 на основе research
+    # ИСПРАВЛЕНО 2025-12-26: Понижен порог объёма с 1.0 до 0.05-0.08 для TESTNET
     # Источник: CryptoProfitCalc 2025 Guide показывает что 20-50% от среднего объёма достаточно
-    # Дополнительное снижение с 0.3/0.4 до 0.2/0.25 т.к. реальные объёмы 0.08-0.28
+    # TESTNET FIX: Дополнительное снижение до 0.05/0.08 т.к. реальные объёмы в testnet 0.08-0.14
     if vol_ratio is not None:
-        thr = 0.2 if source == "fallback" else 0.25  # Было: 0.3/0.4, ещё ниже для testnet
+        thr = 0.05 if source == "fallback" else 0.08  # TESTNET: было 0.2/0.25, снижено для низкой ликвидности
         if vol_ratio < thr:
             logging.info(f"entry_timing | {symbol} | volume too low: {vol_ratio:.3f} < {thr:.3f}")
             return False
-        if source == "fallback" and trend_ok and vol_ratio >= 0.2:
+        if source == "fallback" and trend_ok and vol_ratio >= 0.05:  # TESTNET: было 0.2
             log(logging.INFO, "entry_timing_relaxed", symbol, "fallback volume ok")
             return True
 
@@ -3371,10 +3392,31 @@ def run_trade(
     if state is None:
         state = risk_state.get(symbol, PairState())
 
+    # ВАЖНО: Сначала получаем категорию для нормализации символа
+    detected_category = detect_market_category(exchange, symbol)
+    category = str(detected_category or "").lower()
+
+    # Разрешаем swap и inverse контракты
+    if category in ("", "swap", "unknown"):
+        category = "linear"
+
+    # ИСПРАВЛЕНО 2025-12-26: На testnet категория может определяться неправильно
+    # Если символ оканчивается на /USDT - это ВСЕГДА futures (linear), не spot
+    if category == "spot" and symbol.endswith("/USDT"):
+        logging.info(f"entry | {symbol} | overriding spot->linear for {symbol}")
+        category = "linear"
+    elif category == "spot":
+        log_decision(symbol, "spot_market_not_supported")
+        return False
+
+    # КРИТИЧНО 2025-12-26: Нормализуем символ ПЕРЕД любыми API вызовами
+    symbol_norm = _normalize_bybit_symbol(exchange, symbol, category)
+    logging.info(f"trade | {symbol} | normalized to {symbol_norm} (category={category})")
+
     price: float | None = None
     ticker: dict | None = None
     try:
-        ticker = exchange.fetch_ticker(symbol)
+        ticker = exchange.fetch_ticker(symbol_norm)
     except Exception as exc:
         log_once("warning", f"trade | {symbol} | fetch_ticker failed: {exc}")
         ticker = None
@@ -3406,31 +3448,14 @@ def run_trade(
         log(logging.ERROR, "trade", symbol, "unable to determine valid price; skipping order")
         log_decision(symbol, "price_unavailable")
         return False
-    
 
-    detected_category = detect_market_category(exchange, symbol)
-    category = str(detected_category or "").lower()
-
-    # Разрешаем swap и inverse контракты
-    if category in ("", "swap", "unknown"):
-        category = "linear"
-
-    # ИСПРАВЛЕНО 2025-12-26: На testnet категория может определяться неправильно
-    # Если символ оканчивается на /USDT - это ВСЕГДА futures (linear), не spot
-    if category == "spot" and symbol.endswith("/USDT"):
-        logging.info(f"entry | {symbol} | overriding spot->linear for {symbol}")
-        category = "linear"
-    elif category == "spot":
-        log_decision(symbol, "spot_market_not_supported")
-        return False
-    
     # ИСПРАВЛЕНО 2025-12-26: Отключён hedge mode (всегда ONE-WAY)
     # from logging_utils import _force_hedge_mode_check
     # is_hedge_mode = _force_hedge_mode_check(exchange, symbol, category)
     is_hedge_mode = False  # Всегда ONE-WAY mode
 
     want_side = "buy" if signal == "long" else "sell"
-    qty_signed, qty_abs = has_open_position(exchange, symbol, category)
+    qty_signed, qty_abs = has_open_position(exchange, symbol_norm, category)
     if qty_abs > 0 and (
         (want_side == "buy" and qty_signed > 0)
         or (want_side == "sell" and qty_signed < 0)
@@ -3441,7 +3466,7 @@ def run_trade(
             detail=f"entry | {symbol} | skip: position already open (qty={qty_signed:.4f})",
         )
         return False
-    if has_pending_entry(exchange, symbol, want_side, category):
+    if has_pending_entry(exchange, symbol_norm, want_side, category):
         log_decision(
             symbol,
             "pending_entry_exists",
@@ -3474,7 +3499,7 @@ def run_trade(
     balance = float((totals or {}).get("USDT", 0.0))
     available_margin = float((frees or totals or {}).get("USDT", 0.0))
     equity = balance
-    market = exchange.market(symbol)
+    market = exchange.market(symbol_norm)
     precision = market.get("precision", {}).get("amount", 0)
     precision_step = 1 / (10**precision) if precision else 1.0
     min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.0) or 0.0
@@ -3517,8 +3542,15 @@ def run_trade(
                 ),
             )
             return False
-    sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
-    tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
+
+    # ЗАЩИТА: проверяем что calc_sl_tp вернул валидные значения
+    if sl_price_raw is None or tp_price_raw is None:
+        logging.error(f"entry | {symbol} | calc_sl_tp returned None: sl={sl_price_raw}, tp={tp_price_raw}")
+        log_decision(symbol, "order_failed")
+        return False
+
+    sl_price = float(exchange.price_to_precision(symbol_norm, sl_price_raw))
+    tp_price = float(exchange.price_to_precision(symbol_norm, tp_price_raw))
     if signal == "short" and tp_price <= min_tick:
         log_decision(
             symbol,
@@ -3542,9 +3574,9 @@ def run_trade(
     if sl_price <= safe_floor:
         fallback_sl = price * (1 - SL_PCT) if signal == "long" else price * (1 + SL_PCT)
         fallback_sl = max(fallback_sl, safe_floor)
-        sl_price = float(exchange.price_to_precision(symbol, fallback_sl))
+        sl_price = float(exchange.price_to_precision(symbol_norm, fallback_sl))
         if sl_price <= safe_floor:
-            sl_price = float(exchange.price_to_precision(symbol, safe_floor))
+            sl_price = float(exchange.price_to_precision(symbol_norm, safe_floor))
 
     sizing_price = price
     if ticker is not None:
@@ -3590,7 +3622,7 @@ def run_trade(
             window_sec=300.0,
         )
 
-    symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
+    # symbol_norm уже определён выше, не нужно дублировать
     qty_target = _compute_entry_qty(
         symbol,
         want_side,
@@ -3677,7 +3709,7 @@ def run_trade(
             new_qty,
         )
         try:
-            qty_target = float(exchange.amount_to_precision(symbol, new_qty))
+            qty_target = float(exchange.amount_to_precision(symbol_norm, new_qty))
         except Exception:
             qty_target = float(new_qty)
         if qty_target <= 0:
@@ -3699,13 +3731,15 @@ def run_trade(
     logging.info(colorize(open_msg, open_color_key))
     order_id = None
     # 1. Готовим параметры стопов для Bybit
-    # ИСПРАВЛЕНО 2025-12-26: используем форматирование вместо str() для избежания научной нотации
-    # DEBUG: логируем значения
-    logging.info(f"DEBUG | {symbol} | run_trade SL/TP: price={price:.8f}, sl_final={sl_price:.8f}, tp_final={tp_price:.8f}")
+    # ЗАЩИТА: проверяем на None ПЕРЕД любым использованием
+    if sl_price is None or tp_price is None or price is None:
+        logging.error(f"entry | {symbol} | SL or TP or price is None: sl={sl_price}, tp={tp_price}, price={price}")
+        log_decision(symbol, "order_failed")
+        return False
 
     bybit_params = {
-        "stopLoss": f"{sl_price:.8f}",  # Формат с 8 знаками после запятой
-        "takeProfit": f"{tp_price:.8f}",
+        "stopLoss": float(sl_price),  # Передаем как число
+        "takeProfit": float(tp_price),  # Передаем как число
         "slTriggerBy": "LastPrice",
         "tpTriggerBy": "LastPrice"
     }
@@ -3716,14 +3750,15 @@ def run_trade(
         side = want_side
         filled_qty = enter_ensure_filled_v2(
             ADAPTER.x,
-            sym,
+            symbol_norm,  # БЫЛО: sym (глобальная переменная!)
             side,
             qty_target,
             category=category,  # ИСПРАВЛЕНО 2025-12-26: было cat
             params=bybit_params  # <--- Передаем стопы
         )
         if filled_qty > 0:
-            logging.info(f"✅ Вход выполнен: {sym} {side} по цене {current_price}. SL: {sl_price}, TP: {tp_price}")
+            # ИСПРАВЛЕНО 2025-12-26: используем price (существует в run_trade), а не undefined переменную
+            logging.info(f"✅ Вход выполнен: {symbol} {side} по цене {price}. SL: {sl_price}, TP: {tp_price}")
 
 
     except Exception as exc:
@@ -3749,76 +3784,31 @@ def run_trade(
     entry_price = get_position_entry_price(exchange, symbol, category) or price
 
     want_long = signal == "long"
-    try:
-        sl_pct_eff = abs((sl_price / entry_price) - 1) if entry_price else SL_PCT
-    except Exception:
-        sl_pct_eff = SL_PCT
-    if not sl_pct_eff or not math.isfinite(sl_pct_eff):
-        sl_pct_eff = SL_PCT
-    try:
-        tp_pct_eff = abs((tp_price / entry_price) - 1) if entry_price else TP_PCT
-    except Exception:
-        tp_pct_eff = TP_PCT
-    if not tp_pct_eff or not math.isfinite(tp_pct_eff):
-        tp_pct_eff = TP_PCT
+    order_id = None  # order_id больше не используется для tracking stop, но оставляем для совместимости
+
+    # ИСПРАВЛЕНО 2025-12-26: используем set_position_tp_sl вместо place_conditional_exit
+    # Это устанавливает SL/TP как "trading stop" привязанные к позиции, а не как отдельные ордера
 
     try:
-        _, err = place_conditional_exit(
+        success, err = set_position_tp_sl(
             ADAPTER.x,
             symbol,
-            "buy" if want_long else "sell",
-            entry_price,
-            price,
-            sl_pct_eff,
-            category,
-            is_tp=False,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            category=category,
+            side_open=want_side,
         )
-        if err:
-            log_once("warning", f"Failed to set SL for {symbol}: {err}")
-    except RuntimeError as exc:
-        log_once("warning", f"Failed to set SL for {symbol}: {exc}")
-    except Exception as exc:
-        log_once("warning", f"Failed to set SL for {symbol}: {exc}")
-
-    try:
-        order_id, err = place_conditional_exit(
-            ADAPTER.x,
-            symbol,
-            "buy" if want_long else "sell",
-            entry_price,
-            price,
-            tp_pct_eff,
-            category,
-            is_tp=True,
-        )
-    except RuntimeError as exc:
-        err_lower = str(exc).lower()
-        if not (
-            err_lower.startswith("exit skipped")
-            or err_lower.startswith("exit postponed")
-            or "нет позиции" in err_lower
-        ):
-            log_once(
-                "warning",
-                f"Failed to set TP (conditional) for {symbol}: {exc}",
-            )
-    except Exception as exc:
-        log_once("warning", f"Failed to set TP (conditional) for {symbol}: {exc}")
-    else:
-        if err and not (
-            str(err).lower().startswith("exit skipped")
-            or str(err).lower().startswith("exit postponed")
-        ):
-            log_once(
-                "warning",
-                f"Failed to set TP (conditional) for {symbol}: {err}",
-            )
-        elif order_id:
+        if success:
             logging.info(
-                "exit | %s | Take-profit conditional order placed at %.4f",
+                "exit | %s | ✅ Trading stop set: SL=%.4f, TP=%.4f",
                 symbol,
+                sl_price,
                 tp_price,
             )
+        else:
+            log_once("warning", f"Failed to set trading stop for {symbol}: {err}")
+    except Exception as exc:
+        log_once("warning", f"Failed to set trading stop for {symbol}: {exc}")
 
     qty = float(pos_abs_after or detected_qty or filled_qty)
     try:
@@ -3901,6 +3891,31 @@ def attempt_direct_market_entry(
 
     side = "buy" if direction == "long" else "sell"
 
+    # КРИТИЧНО 2025-12-26: Определяем категорию и нормализуем символ В НАЧАЛЕ функции
+    # КРИТИЧНО: ВСЕГДА используем "linear" для /USDT символов в testnet
+    # Bybit testnet некорректно определяет категорию как "spot"
+    if symbol.endswith("/USDT"):
+        category = "linear"
+        logging.info(f"entry | {symbol} | forced category=linear (testnet)")
+    else:
+        category = detect_market_category(ADAPTER.x, symbol) or "linear"
+        category = str(category or "").lower()
+        logging.info(f"entry | {symbol} | detected category={category}")
+        if category in ("", "swap", "spot"):
+            category = "linear"
+        elif category and category not in {"linear", "inverse"}:
+            log_decision(
+                symbol,
+                "no_futures_contract",
+                detail=f"entry | {symbol} | skip: unsupported market category {category or 'unknown'}",
+            )
+            return False
+        logging.info(f"entry | {symbol} | using default category=linear for {symbol}")
+
+    # Нормализуем символ СРАЗУ после определения категории
+    symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
+    logging.info(f"fallback | {symbol} | normalized to {symbol_norm} (category={category})")
+
     price_candidates: list[float] = []
     if price_hint is not None:
         price_candidates.append(price_hint)
@@ -3927,7 +3942,7 @@ def attempt_direct_market_entry(
     if last_price is None or last_price <= 0:
         ticker = None
         try:
-            ticker = exchange.fetch_ticker(symbol)
+            ticker = exchange.fetch_ticker(symbol_norm)
         except Exception as exc:
             log_once(
                 "warning",
@@ -3957,30 +3972,9 @@ def attempt_direct_market_entry(
         log_decision(symbol, "price_unavailable")
         return False
 
-    category = detect_market_category(ADAPTER.x, symbol) or "linear"
-    category = str(category or "").lower()
-    logging.info(f"entry | {symbol} | detected category={category}")
-    if category in ("", "swap"):
-        category = "linear"
-    # ИСПРАВЛЕНО 2025-12-26: Разрешаем также "swap" и пустые категории (testnet)
-    # На testnet Bybit категория может быть не определена или "swap"
-    # Override spot->linear для /USDT символов (это всегда futures)
-    if category == "spot" and symbol.endswith("/USDT"):
-        logging.info(f"entry | {symbol} | overriding spot->linear (testnet)")
-        category = "linear"
-    elif category and category not in {"linear", "inverse", "swap", ""}:
-        log_decision(
-            symbol,
-            "no_futures_contract",
-            detail=f"entry | {symbol} | skip: unsupported market category {category or 'unknown'}",
-        )
-        return False
-    # Если категория не определена или swap - используем linear
-    if not category or category == "swap":
-        category = "linear"
-        logging.info(f"entry | {symbol} | using default category=linear for {symbol}")
+    # category и symbol_norm уже определены в начале функции
     side_norm = str(side or "").lower()
-    qty_signed, qty_abs = has_open_position(ADAPTER.x, symbol, category)
+    qty_signed, qty_abs = has_open_position(ADAPTER.x, symbol_norm, category)
     if qty_abs > 0 and (
         (side_norm == "buy" and qty_signed > 0)
         or (side_norm == "sell" and qty_signed < 0)
@@ -3991,7 +3985,7 @@ def attempt_direct_market_entry(
             detail=f"entry | {symbol} | skip: position already open (qty={qty_signed:.4f})",
         )
         return False
-    if has_pending_entry(ADAPTER.x, symbol, side, category):
+    if has_pending_entry(ADAPTER.x, symbol_norm, side, category):
         log_decision(
             symbol,
             "pending_entry_exists",
@@ -4022,7 +4016,7 @@ def attempt_direct_market_entry(
             f"fallback trade | {symbol} | fetch_balance failed: {exc}",
         )
     try:
-        market = exchange.market(symbol) or {}
+        market = exchange.market(symbol_norm) or {}
     except Exception as exc:
         log_once(
             "warning",
@@ -4033,7 +4027,7 @@ def attempt_direct_market_entry(
         ((market.get("limits") or {}).get("amount") or {}).get("min", 0.0) or 0.0
     )
 
-    symbol_norm = _normalize_bybit_symbol(ADAPTER.x, symbol, category)
+    # symbol_norm уже определён выше
     qty_target = _compute_entry_qty(
         symbol,
         side,
@@ -4136,14 +4130,26 @@ def attempt_direct_market_entry(
             )
             return False
 
+    # ЗАЩИТА: проверяем что calc_sl_tp вернул валидные значения
+    if sl_price_raw is None or tp_price_raw is None:
+        logging.error(f"fallback trade | {symbol} | calc_sl_tp returned None: sl={sl_price_raw}, tp={tp_price_raw}")
+        log_decision(symbol, "order_failed")
+        return False
+
     try:
         sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
     except Exception:
-        sl_price = float(sl_price_raw)
+        sl_price = float(sl_price_raw) if sl_price_raw is not None else None
     try:
         tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
     except Exception:
-        tp_price = float(tp_price_raw)
+        tp_price = float(tp_price_raw) if tp_price_raw is not None else None
+
+    # Дополнительная проверка после преобразования
+    if sl_price is None or tp_price is None:
+        logging.error(f"fallback trade | {symbol} | price_to_precision returned None: sl={sl_price}, tp={tp_price}")
+        log_decision(symbol, "order_failed")
+        return False
     if direction == "short" and tp_price <= min_tick:
         log_decision(
             symbol,
@@ -4172,13 +4178,18 @@ def attempt_direct_market_entry(
 
     order_id = None
    # 1. Готовим параметры стопов для Bybit
-    # ИСПРАВЛЕНО 2025-12-26: используем форматирование вместо str()
-    # DEBUG: логируем значения перед отправкой
+    # ЗАЩИТА: проверяем на None ПЕРЕД любым использованием
+    if sl_price is None or tp_price is None or last_price is None:
+        logging.error(f"fallback trade | {symbol} | SL or TP or price is None: sl={sl_price}, tp={tp_price}, last_price={last_price}")
+        log_decision(symbol, "order_failed")
+        return False
+
+    # DEBUG: логируем значения (ПОСЛЕ проверки на None!)
     logging.info(f"DEBUG | {symbol} | SL/TP calculation: price={last_price:.8f}, atr={atr_val:.8f}, sl_raw={sl_price_raw:.8f}, tp_raw={tp_price_raw:.8f}, sl_final={sl_price:.8f}, tp_final={tp_price:.8f}")
 
     bybit_params = {
-        "stopLoss": f"{sl_price:.8f}",
-        "takeProfit": f"{tp_price:.8f}",
+        "stopLoss": float(sl_price),
+        "takeProfit": float(tp_price),
         "slTriggerBy": "LastPrice",
         "tpTriggerBy": "LastPrice"
     }
@@ -4188,14 +4199,14 @@ def attempt_direct_market_entry(
         # side уже определён на строке 3899, want_side не существует здесь!
         filled_qty = enter_ensure_filled_v2(
             ADAPTER.x,
-            sym,
+            symbol_norm,  # БЫЛО: sym (глобальная переменная!)
             side,
             qty_target,
             category=category,  # ИСПРАВЛЕНО 2025-12-26: было cat
             params=bybit_params  # <--- Передаем стопы
         )
         if filled_qty > 0:
-            logging.info(f"✅ Вход выполнен: {sym} {side} по цене {current_price}. SL: {sl_price}, TP: {tp_price}")
+            logging.info(f"✅ Вход выполнен: {symbol} {side} по цене {last_price}. SL: {sl_price}, TP: {tp_price}")
 
     except Exception as exc:
         log_once(
@@ -4244,7 +4255,7 @@ def attempt_direct_market_entry(
                 symbol,
                 "buy" if want_long else "sell",
                 entry_price,
-                price,
+                last_price,
                 sl_pct_eff,
                 category,
                 is_tp=False,
@@ -4263,7 +4274,7 @@ def attempt_direct_market_entry(
                 symbol,
                 "buy" if want_long else "sell",
                 entry_price,
-                price,
+                last_price,
                 tp_pct_eff,
                 category,
                 is_tp=True,
@@ -4441,10 +4452,10 @@ def cancel_stale_orders(symbol: str) -> int:
         cnt, ids = ADAPTER.cancel_open_orders(symbol)
     except Exception as exc:
         # если вернулось одно значение или None, обрабатываем это
-        logger.error(f"cancel_stale_orders failed: {exc}")
+        logging.error(f"cancel_stale_orders failed: {exc}")
         return 0
     if cnt > 0:
-        logger.info(f"Cancelled {cnt} stale orders for {symbol}")
+        logging.info(f"Cancelled {cnt} stale orders for {symbol}")
     return cnt
 
 
@@ -4974,28 +4985,14 @@ def ensure_exit_orders(
                 return str(cand).lower()
         return ""
 
-    has_stop = any("stop" in _order_type(o) for o in orders)
-    has_tp = any(
-        (
-            "take_profit" in _order_type(o)
-            or _order_type(o) == "tp"
-        )
-        or (
-            str(o.get("type") or "").lower() == "limit"
-            and str(o.get("side") or "").lower() == exit_side
-            and (
-                (
-                    isinstance(o.get("info"), dict)
-                    and bool(o.get("info", {}).get("reduceOnly"))
-                )
-                or bool(o.get("reduceOnly"))
-            )
-        )
-        for o in orders
-    )
+    # ИСПРАВЛЕНО 2025-12-26: Trading stops - это атрибуты позиции, а не отдельные ордера.
+    # Поэтому мы ВСЕГДА должны пытаться их установить, если есть sl_price/tp_price,
+    # независимо от наличия старых conditional orders.
+    # Проверка has_stop/has_tp была актуальна для старого подхода с conditional orders,
+    # но сейчас она мешает установке trading stops на переоткрытые позиции.
 
-    need_sl = sl_price is not None and not has_stop
-    need_tp = tp_price is not None and not has_tp
+    need_sl = sl_price is not None
+    need_tp = tp_price is not None
     if not need_sl and not need_tp:
         return
 
@@ -5006,8 +5003,9 @@ def ensure_exit_orders(
     _, pos_qty = logging_utils.has_open_position(exchange_obj, symbol, cat)
 
     if pos_qty <= 0:
-        for _ in range(3):
-            time.sleep(0.2)
+        # ИСПРАВЛЕНО 2025-12-27: увеличено количество попыток и задержка для учета задержки появления позиции
+        for _ in range(10):
+            time.sleep(0.5)
             _, pos_qty = logging_utils.has_open_position(exchange_obj, symbol, cat)
             if pos_qty > 0:
                 break
@@ -5021,8 +5019,30 @@ def ensure_exit_orders(
         )
         return
 
+    ctx = open_trade_ctx.get(symbol, {})
+
+    # ИСПРАВЛЕНО 2025-12-27: проверяем наличие SL/TP НА БИРЖЕ, а не только в контексте!
+    # Если SL/TP пропали с биржи - устанавливаем их заново
+    has_sl_on_exchange, has_tp_on_exchange = check_position_has_sltp(
+        exchange_obj, symbol, cat
+    )
+
     last_q = _last_exit_qty.get(symbol)
-    if last_q and abs(last_q - pos_qty) < 1e-12:
+    has_sl_in_ctx = ctx.get("sl_price") is not None and sl_price is not None
+    has_tp_in_ctx = ctx.get("tp_price") is not None and tp_price is not None
+
+    # Проверяем:
+    # 1. Количество не изменилось
+    # 2. SL/TP есть в контексте
+    # 3. SL/TP есть на БИРЖЕ (новая проверка!)
+    if (
+        last_q
+        and abs(last_q - pos_qty) < 1e-12
+        and has_sl_in_ctx
+        and has_tp_in_ctx
+        and has_sl_on_exchange
+        and has_tp_on_exchange
+    ):
         logging.info(
             "exit_guard | %s | exits up-to-date (qty=%s), skip re-place",
             symbol,
@@ -5030,7 +5050,21 @@ def ensure_exit_orders(
         )
         return
 
-    ctx = open_trade_ctx.get(symbol, {})
+    # Логируем, если SL/TP отсутствуют в контексте ИЛИ на бирже
+    if not has_sl_in_ctx or not has_tp_in_ctx:
+        logging.info(
+            "exit_guard | %s | missing SL/TP in context (has_sl=%s, has_tp=%s), attempting to set",
+            symbol,
+            has_sl_in_ctx,
+            has_tp_in_ctx,
+        )
+    elif not has_sl_on_exchange or not has_tp_on_exchange:
+        logging.warning(
+            "exit_guard | %s | SL/TP missing on exchange! (has_sl=%s, has_tp=%s), re-setting",
+            symbol,
+            has_sl_on_exchange,
+            has_tp_on_exchange,
+        )
     try:
         entry_price = float(ctx.get("entry_price") or 0.0)
     except (TypeError, ValueError):
@@ -5071,104 +5105,54 @@ def ensure_exit_orders(
         return default
 
     side_open = "buy" if side_norm == "long" else "sell"
-    sl_base = entry_price if entry_price > 0 else (float(sl_price) if sl_price else 0.0)
-    tp_base = entry_price if entry_price > 0 else (float(tp_price) if tp_price else sl_base)
 
-    if need_sl and sl_price is not None:
-        sl_pct = _pct(sl_price)
-        entry_for_exit = entry_price if entry_price > 0 else float(sl_base or 0.0)
-        if entry_for_exit <= 0 and sl_price is not None:
-            entry_for_exit = float(sl_price)
-        last_for_exit = last_price if last_price and last_price > 0 else entry_for_exit
+    # ИСПРАВЛЕНО 2025-12-26: используем set_position_tp_sl вместо place_conditional_exit
+    # Это устанавливает SL/TP как "trading stop" привязанные к позиции, а не как отдельные ордера
+    if need_sl or need_tp:
         try:
-            order_id, err = place_conditional_exit(
+            success, err = set_position_tp_sl(
                 exchange_obj,
                 symbol,
-                side_open,
-                entry_for_exit,
-                last_for_exit,
-                sl_pct,
-                cat,
-                is_tp=False,
+                tp_price=tp_price if need_tp else None,
+                sl_price=sl_price if need_sl else None,
+                category=cat,
+                side_open=side_open,
             )
-        except RuntimeError as exc:
-            err_lower = str(exc).lower()
-            if (
-                err_lower.startswith("exit skipped")
-                or err_lower.startswith("exit postponed")
-                or "нет позиции" in err_lower
-            ):
-                pass
-            else:
-                log_once(
-                    "warning",
-                    f"exit_guard | {symbol} | stop order rejected: {exc}",
+            if success:
+                placed_any = True
+                if need_sl and sl_price is not None:
+                    ctx["sl_price"] = float(sl_price)
+                if need_tp and tp_price is not None:
+                    ctx["tp_price"] = float(tp_price)
+                logging.info(
+                    "exit_guard | %s | Trading stop set: SL=%s, TP=%s",
+                    symbol,
+                    sl_price if need_sl else "unchanged",
+                    tp_price if need_tp else "unchanged",
                 )
+            else:
+                # ИСПРАВЛЕНО 2025-12-27: игнорируем ошибку "not modified"
+                # Это означает что SL/TP уже установлены с теми же значениями
+                if err and "not modified" in str(err).lower():
+                    # SL/TP уже установлены - это не ошибка!
+                    placed_any = True
+                    if need_sl and sl_price is not None:
+                        ctx["sl_price"] = float(sl_price)
+                    if need_tp and tp_price is not None:
+                        ctx["tp_price"] = float(tp_price)
+                    logging.debug(
+                        f"exit_guard | {symbol} | SL/TP already set (not modified)"
+                    )
+                else:
+                    log_once(
+                        "warning",
+                        f"exit_guard | {symbol} | set_position_tp_sl failed: {err}",
+                    )
         except Exception as exc:
             log_once(
                 "warning",
-                f"exit_guard | {symbol} | stop order rejected: {exc}",
+                f"exit_guard | {symbol} | set_position_tp_sl failed: {exc}",
             )
-        else:
-            if err and not (
-                str(err).lower().startswith("exit skipped")
-                or str(err).lower().startswith("exit postponed")
-            ):
-                log_once(
-                    "warning",
-                    f"exit_guard | {symbol} | stop order rejected: {err}",
-                )
-            elif order_id:
-                placed_any = True
-                ctx["sl_price"] = float(sl_price)
-
-    if need_tp and tp_price is not None:
-        tp_pct = _pct(tp_price, default=0.04)
-        entry_for_exit = entry_price if entry_price > 0 else float(tp_base or 0.0)
-        if entry_for_exit <= 0 and tp_price is not None:
-            entry_for_exit = float(tp_price)
-        last_for_exit = last_price if last_price and last_price > 0 else entry_for_exit
-        try:
-            order_id, err = place_conditional_exit(
-                exchange_obj,
-                symbol,
-                side_open,
-                entry_for_exit,
-                last_for_exit,
-                tp_pct,
-                cat,
-                is_tp=True,
-            )
-        except RuntimeError as exc:
-            err_lower = str(exc).lower()
-            if (
-                err_lower.startswith("exit skipped")
-                or err_lower.startswith("exit postponed")
-                or "нет позиции" in err_lower
-            ):
-                pass
-            else:
-                log_once(
-                    "warning",
-                    f"exit_guard | {symbol} | take-profit rejected: {exc}",
-                )
-        except Exception as exc:
-            log_once(
-                "warning",
-                f"exit_guard | {symbol} | take-profit rejected: {exc}",
-            )
-        else:
-            if err and not (
-                str(err).lower().startswith("exit skipped")
-                or str(err).lower().startswith("exit postponed")
-            ):
-                log_once(
-                    "warning",
-                    f"exit_guard | {symbol} | take-profit rejected: {err}",
-                )
-            elif order_id:
-                placed_any = True
-                ctx["tp_price"] = float(tp_price)
 
     if placed_any:
         ctx["qty"] = float(qty_value)
@@ -6691,7 +6675,7 @@ def run_bot():
                                             max_pos_qty = get_max_position_qty(symbol, leverage_val, current_price)
                                             if max_pos_qty:
                                                 qty_target = min(qty_target, max_pos_qty)
-                                            qty_target = _round_qty(ADAPTER.x, sym_norm, qty_target)
+                                            qty_target = _round_qty(ADAPTER.x, symbol_norm, qty_target)
                                             if qty_target <= 0:
                                                 log_decision(symbol, "qty_insufficient")
                                             else:
@@ -6712,52 +6696,59 @@ def run_bot():
                                                     "long" if model_signal == "long" else "short",
                                                     tick_size=tick_size,
                                                 )
+                                                # ЗАЩИТА: проверяем на None перед преобразованием
                                                 try:
-                                                    sl_price = float(exchange.price_to_precision(symbol, sl_price_raw))
+                                                    sl_price = float(exchange.price_to_precision(symbol, sl_price_raw)) if sl_price_raw is not None else None
                                                 except Exception:
-                                                    sl_price = float(sl_price_raw)
+                                                    sl_price = float(sl_price_raw) if sl_price_raw is not None else None
                                                 try:
-                                                    tp_price = float(exchange.price_to_precision(symbol, tp_price_raw))
+                                                    tp_price = float(exchange.price_to_precision(symbol, tp_price_raw)) if tp_price_raw is not None else None
                                                 except Exception:
-                                                    tp_price = float(tp_price_raw)
+                                                    tp_price = float(tp_price_raw) if tp_price_raw is not None else None
 
                                                 # 1. Готовим параметры стопов для Bybit
-                                                bybit_params = {
-                                                    "stopLoss": str(sl_price),
-                                                    "takeProfit": str(tp_price),
-                                                    "slTriggerBy": "LastPrice",
-                                                    "tpTriggerBy": "LastPrice"
-                                                }
-
-                                                try:
-                                                    # 2. Используем нашу новую функцию v2
-                                                    filled_qty = enter_ensure_filled_v2(
-                                                        ADAPTER.x,
-                                                        sym,
-                                                        side,
-                                                        qty_target,
-                                                        category=category,  # ИСПРАВЛЕНО 2025-12-26: было cat
-                                                        params=bybit_params  # <--- Передаем стопы
-                                                    )
-                                                    if filled_qty > 0:
-                                                        logging.info(f"✅ Вход выполнен: {sym} {side} по цене {current_price}. SL: {sl_price}, TP: {tp_price}")
-
-
-                                                except Exception as exc:
-                                                    logging.warning(
-                                                        "pattern trade | %s | ensure_filled failed: %s",
-                                                        sym,
-                                                        exc,
-                                                    )
+                                                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: float вместо str
+                                                # ЗАЩИТА: проверяем на None перед преобразованием
+                                                if sl_price is None or tp_price is None:
+                                                    logging.error(f"pattern trade | {symbol} | SL or TP is None: sl={sl_price}, tp={tp_price}")
                                                     log_decision(symbol, "order_failed")
-                                                    filled_qty = 0.0
+                                                else:
+                                                    bybit_params = {
+                                                        "stopLoss": float(sl_price),
+                                                        "takeProfit": float(tp_price),
+                                                        "slTriggerBy": "LastPrice",
+                                                        "tpTriggerBy": "LastPrice"
+                                                    }
 
-                                                if (filled_qty or 0.0) <= 0:
-                                                    log_decision(symbol, "order_failed")
-                                                    return False
+                                                    try:
+                                                        # 2. Используем нашу новую функцию v2
+                                                        filled_qty = enter_ensure_filled_v2(
+                                                            ADAPTER.x,
+                                                            sym,
+                                                            side,
+                                                            qty_target,
+                                                            category=category,  # ИСПРАВЛЕНО 2025-12-26: было cat
+                                                            params=bybit_params  # <--- Передаем стопы
+                                                        )
+                                                        if filled_qty > 0:
+                                                            logging.info(f"✅ Вход выполнен: {sym} {side} по цене {current_price}. SL: {sl_price}, TP: {tp_price}")
 
-                                                # entry guard (анти-дубль входа в одном 5-мин баре)
-                                                _entry_guard[symbol] = {"bar": now_bar5, "side": side}
+
+                                                    except Exception as exc:
+                                                        logging.warning(
+                                                            "pattern trade | %s | ensure_filled failed: %s",
+                                                            sym,
+                                                            exc,
+                                                        )
+                                                        log_decision(symbol, "order_failed")
+                                                        filled_qty = 0.0
+
+                                                    if (filled_qty or 0.0) <= 0:
+                                                        log_decision(symbol, "order_failed")
+                                                        return False
+
+                                                    # entry guard (анти-дубль входа в одном 5-мин баре)
+                                                    _entry_guard[symbol] = {"bar": now_bar5, "side": side}
 
                                                 # Ждём появления позиции
                                                 detected_qty = wait_position_after_entry(

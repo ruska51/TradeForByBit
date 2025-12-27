@@ -248,11 +248,17 @@ def calc_sl_tp(
         sl_price = price * (1 + sl_pct)
         tp_price = price * (1 - tp_pct)
 
-    min_tick = tick_size if tick_size and tick_size > 0 else 1e-6
+    # ИСПРАВЛЕНО 2025-12-27: НЕ используем tick_size для округления SL/TP в calc_sl_tp!
+    # Проблема: если tick_size неправильно определен (например, 0.999 вместо 0.0001),
+    # то округление приводит к тому, что SL и TP становятся одинаковыми!
+    # Округление до биржевого precision должно происходить ПОСЛЕ через price_to_precision.
+    #
+    # СТАРЫЙ КОД (НЕПРАВИЛЬНЫЙ):
+    # if tick_size:
+    #     sl_price = round(tick_size * round(sl_price / tick_size), 8)
+    #     tp_price = round(tick_size * round(tp_price / tick_size), 8)
 
-    if tick_size:
-        sl_price = round(tick_size * round(sl_price / tick_size), 8)
-        tp_price = round(tick_size * round(tp_price / tick_size), 8)
+    min_tick = tick_size if tick_size and tick_size > 0 else 1e-6
 
     if sl_price <= 0:
         sl_price = min_tick

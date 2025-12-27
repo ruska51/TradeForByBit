@@ -162,6 +162,57 @@ def _price_qty_to_precision(ex, symbol, price=None, amount=None):
 def _min_step_qty(ex, symbol: str) -> tuple[float, float]:
     """Return market ``(min_qty, step_qty)``; ``0.0`` when unavailable."""
 
+    # ИСПРАВЛЕНО 2025-12-26: Hardcoded fallback значения для известных символов
+    # На testnet market info ВСЕГДА некорректна! API возвращает qtyStep=0.000001 вместо 0.001
+    # КРИТИЧНО: Используем fallback для ВСЕХ символов, НЕ доверяем testnet API!
+    # Поддерживаем ОБА формата: с слешем (ADA/USDT) и без (ADAUSDT)
+    FALLBACK_QTY_STEPS = {
+        # Формат со слешем (для compatibility)
+        "BTC/USDT": {"min": 0.001, "step": 0.001},
+        "ETH/USDT": {"min": 0.01, "step": 0.01},
+        "SOL/USDT": {"min": 0.1, "step": 0.1},
+        "BNB/USDT": {"min": 0.01, "step": 0.01},
+        "ADA/USDT": {"min": 1.0, "step": 1.0},
+        "XRP/USDT": {"min": 1.0, "step": 1.0},
+        "DOGE/USDT": {"min": 1.0, "step": 1.0},
+        "MATIC/USDT": {"min": 1.0, "step": 1.0},
+        "DOT/USDT": {"min": 0.1, "step": 0.1},
+        "AVAX/USDT": {"min": 0.1, "step": 0.1},
+        "LINK/USDT": {"min": 0.1, "step": 0.1},
+        "UNI/USDT": {"min": 0.1, "step": 0.1},
+        "ATOM/USDT": {"min": 0.1, "step": 0.1},
+        "LTC/USDT": {"min": 0.01, "step": 0.01},
+        "NEAR/USDT": {"min": 0.1, "step": 0.1},
+        "FIL/USDT": {"min": 0.1, "step": 0.1},
+        "APT/USDT": {"min": 0.1, "step": 0.1},
+        "ARB/USDT": {"min": 1.0, "step": 1.0},
+        "OP/USDT": {"min": 0.1, "step": 0.1},
+        "SUI/USDT": {"min": 1.0, "step": 1.0},
+        "INJ/USDT": {"min": 0.1, "step": 0.1},
+        # Формат БЕЗ слеша (для linear контрактов)
+        "BTCUSDT": {"min": 0.001, "step": 0.001},
+        "ETHUSDT": {"min": 0.01, "step": 0.01},
+        "SOLUSDT": {"min": 0.1, "step": 0.1},
+        "BNBUSDT": {"min": 0.01, "step": 0.01},
+        "ADAUSDT": {"min": 1.0, "step": 1.0},
+        "XRPUSDT": {"min": 1.0, "step": 1.0},
+        "DOGEUSDT": {"min": 1.0, "step": 1.0},
+        "MATICUSDT": {"min": 1.0, "step": 1.0},
+        "DOTUSDT": {"min": 0.1, "step": 0.1},
+        "AVAXUSDT": {"min": 0.1, "step": 0.1},
+        "LINKUSDT": {"min": 0.1, "step": 0.1},
+        "UNIUSDT": {"min": 0.1, "step": 0.1},
+        "ATOMUSDT": {"min": 0.1, "step": 0.1},
+        "LTCUSDT": {"min": 0.01, "step": 0.01},
+        "NEARUSDT": {"min": 0.1, "step": 0.1},
+        "FILUSDT": {"min": 0.1, "step": 0.1},
+        "APTUSDT": {"min": 0.1, "step": 0.1},
+        "ARBUSDT": {"min": 1.0, "step": 1.0},
+        "OPUSDT": {"min": 0.1, "step": 0.1},
+        "SUIUSDT": {"min": 1.0, "step": 1.0},
+        "INJUSDT": {"min": 0.1, "step": 0.1},
+    }
+
     try:
         market = ex.market(symbol)
     except Exception:
@@ -186,17 +237,69 @@ def _min_step_qty(ex, symbol: str) -> tuple[float, float]:
         except Exception:
             step = 0.0
 
+    # КРИТИЧНО 2025-12-26: Testnet API ВСЕГДА возвращает херню (qtyStep=0.000001)
+    # Поэтому ВСЕГДА используем fallback для известных символов!
+    # Игнорируем API данные полностью для этих символов
+    if symbol in FALLBACK_QTY_STEPS:
+        fallback = FALLBACK_QTY_STEPS[symbol]
+        import logging
+        logging.info(f"_min_step_qty | {symbol} | using HARDCODED fallback: min={fallback['min']}, step={fallback['step']}")
+        return (fallback["min"], fallback["step"])
+
+    # Для остальных символов используем API данные
+    if step <= 0 or min_qty <= 0:
+        import logging
+        logging.warning(f"_min_step_qty | {symbol} | API returned invalid values: min={min_qty}, step={step}")
+
     return (max(min_qty, 0.0), max(step, 0.0))
 
 
 def _round_qty(ex, symbol: str, qty: float) -> float:
     """Return *qty* rounded to precision and raised to ``min_qty`` when needed."""
+    import logging
+    import math
 
-    _, adjusted = _price_qty_to_precision(ex, symbol, price=None, amount=qty)
-    min_qty, _step = _min_step_qty(ex, symbol)
-    if min_qty and (adjusted or 0) < min_qty:
+    if qty <= 0:
+        return 0.0
+
+    min_qty, step = _min_step_qty(ex, symbol)
+
+    # DEBUG: всегда логируем исходные параметры
+    logging.info(f"_round_qty | {symbol} | input: qty={qty:.8f}, min_qty={min_qty}, step={step}")
+
+    # КРИТИЧНО: Используем qtyStep для правильного округления
+    # qtyStep определяет минимальный шаг изменения количества (например, 0.01 для ETH)
+    if step and step > 0:
+        # Округляем до ближайшего кратного qtyStep
+        adjusted = round(qty / step) * step
+        logging.info(f"_round_qty | {symbol} | after step rounding: {adjusted:.8f}")
+        # Обеспечиваем минимальное количество
+        if adjusted < min_qty and min_qty > 0:
+            adjusted = min_qty
+            logging.info(f"_round_qty | {symbol} | raised to min_qty: {adjusted:.8f}")
+    elif min_qty and qty < min_qty:
         adjusted = min_qty
-    _, adjusted = _price_qty_to_precision(ex, symbol, price=None, amount=adjusted)
+        logging.info(f"_round_qty | {symbol} | raised to min_qty (no step): {adjusted:.8f}")
+    else:
+        adjusted = qty
+        logging.info(f"_round_qty | {symbol} | no adjustment needed: {adjusted:.8f}")
+
+    # Финальное преобразование в правильную точность через amount_to_precision
+    # ИСПРАВЛЕНО 2025-12-26: Применяем amount_to_precision ПОСЛЕ округления по step
+    try:
+        precision_result = float(ex.amount_to_precision(symbol, adjusted))
+        logging.info(f"_round_qty | {symbol} | after amount_to_precision: {precision_result:.8f}")
+        adjusted = precision_result
+    except Exception as exc:
+        # Fallback: если amount_to_precision не работает, используем округление
+        logging.warning(f"_round_qty | {symbol} | amount_to_precision failed: {exc}, using manual rounding")
+        # Определяем количество знаков после запятой из step
+        if step and step > 0:
+            decimals = max(0, -int(math.floor(math.log10(step))))
+            adjusted = round(adjusted, decimals)
+            logging.info(f"_round_qty | {symbol} | manual rounding to {decimals} decimals: {adjusted:.8f}")
+
+    logging.info(f"_round_qty | {symbol} | final result: {adjusted:.8f}")
     return float(adjusted or 0.0)
 
 
@@ -340,40 +443,50 @@ def _bybit_position_idx(
 
 def _force_hedge_mode_check(exchange, symbol: str, category: str) -> bool:
     """Проверяет, действительно ли включен hedge mode для символа."""
+    import logging
+
     if not _is_bybit_exchange(exchange):
         return False
-    
+
     cat = str(category or "").lower()
     if cat in ("", "swap"):
         cat = "linear"
-    
+
+    # КРИТИЧНО: Bybit API требует формат БЕЗ слеша и БЕЗ :USDT суффикса!
+    # CCXT: XRP/USDT:USDT -> Bybit API: XRPUSDT
+    api_symbol = symbol.replace("/", "").split(":")[0]
+
     try:
         # Прямой запрос к API для проверки режима
         response = exchange.private_get_v5_position_list({
             "category": cat,
-            "symbol": symbol,
+            "symbol": api_symbol,  # Используем формат Bybit API!
         })
-        
+
         positions = response.get("result", {}).get("list", [])
-        
+
         # Если есть хотя бы одна позиция с idx=1 или 2, значит hedge mode
         for pos in positions:
             idx = pos.get("positionIdx")
+            logging.info(f"hedge_check | {symbol} | positionIdx={idx}")
             if idx in (1, 2, "1", "2"):
+                logging.info(f"hedge_check | {symbol} | HEDGE MODE detected")
                 return True
-        
-        # Если позиций нет, но опции указывают на hedge
-        options = getattr(exchange, "options", {}) or {}
-        mode = options.get("defaultPositionMode", "").lower()
-        if "hedge" in mode or "both" in mode:
-            return True
-            
+
+        # Если positionIdx=0, это ONE-WAY mode
+        if positions:
+            logging.info(f"hedge_check | {symbol} | ONE-WAY MODE detected (positionIdx=0)")
+            return False
+
+        # Если позиций нет - возвращаем False (oneway по умолчанию)
+        logging.info(f"hedge_check | {symbol} | no positions, defaulting to ONE-WAY")
+        return False
+
     except Exception as e:
-        logging.debug(f"hedge_check | {symbol} | {e}")
-        # В случае ошибки предполагаем hedge, так как вы его включили
-        return True
-    
-    return False  # Если не смогли определить, считаем oneway
+        logging.warning(f"hedge_check | {symbol} | API error: {e}, defaulting to ONE-WAY")
+        # КРИТИЧНО: При ошибке НЕ ПРЕДПОЛАГАЕМ hedge mode!
+        # Возвращаем False (oneway), т.к. биржа настроена на ONE-WAY
+        return False
 
 
 def enter_ensure_filled(
@@ -850,17 +963,45 @@ def _normalize_bybit_symbol(
     category_norm = str(category or "").lower()
     if category_norm in ("", "swap"):
         category_norm = "linear"
-    
-    # Для линейных контрактов используем формат "BTC/USDT"
+
+    # КРИТИЧНО 2025-12-26: CCXT Bybit использует РАЗНЫЕ форматы символов:
+    # - Spot: "SOL/USDT" (обычный формат)
+    # - Linear (futures/perpetual): "SOL/USDT:USDT" (с :USDT суффиксом!)
+    # CCXT определяет тип контракта ПО ФОРМАТУ СИМВОЛА, не только по параметру category!
+
     if category_norm in ("linear", "inverse"):
-        if "/" not in symbol:
-            # Преобразуем BTCUSDT -> BTC/USDT
-            for quote in ["USDT", "USDC", "USD"]:
-                if symbol.endswith(quote):
-                    base = symbol[:-len(quote)]
-                    return f"{base}/{quote}"
+        # Для linear/inverse contracts в CCXT используется формат с :USDT суффиксом!
+        # Примеры: SOL/USDT:USDT, BTC/USDT:USDT
+        if ":" in symbol:
+            # Уже правильный формат (SOL/USDT:USDT)
+            import logging
+            logging.info(f"_normalize_bybit_symbol | {symbol} unchanged (already has :USDT suffix)")
+            return symbol
+        elif "/" in symbol:
+            # Преобразуем SOL/USDT -> SOL/USDT:USDT
+            if symbol.endswith("/USDT"):
+                norm = f"{symbol}:USDT"
+                import logging
+                logging.info(f"_normalize_bybit_symbol | {symbol} -> {norm} (category={category_norm})")
+                return norm
+            elif symbol.endswith("/USDC"):
+                norm = f"{symbol}:USDC"
+                import logging
+                logging.info(f"_normalize_bybit_symbol | {symbol} -> {norm} (category={category_norm})")
+                return norm
+        # Если другой формат - возвращаем как есть
+        import logging
+        logging.info(f"_normalize_bybit_symbol | {symbol} unchanged (unexpected format for linear)")
         return symbol
-    
+
+    # Для spot используем формат со слешем
+    if "/" not in symbol:
+        # Преобразуем BTCUSDT -> BTC/USDT
+        for quote in ["USDT", "USDC", "USD"]:
+            if symbol.endswith(quote):
+                base = symbol[:-len(quote)]
+                return f"{base}/{quote}"
+
     return symbol
 
     def _finalize(value: str | None) -> str:
@@ -1252,16 +1393,11 @@ def has_open_position(exchange, symbol: str, category: str = "linear") -> tuple[
     if not callable(fetch_positions):
         return 0.0, 0.0
 
-    def _strip_suffix(value):
-        if isinstance(value, str) and ":" in value:
-            return value.split(":", 1)[0]
-        return value
-
+    # КРИТИЧНО: НЕ убираем :USDT суффикс для Bybit!
+    # fetch_positions требует ПОЛНЫЙ формат: SUI/USDT:USDT, а не SUI/USDT
     primary_symbol = _normalize_bybit_symbol(exchange, symbol, request_cat or category)
-    primary_symbol = _strip_suffix(primary_symbol) or symbol
 
     alt_symbol = _resolve_ccxt_symbol(exchange, symbol)
-    alt_symbol = _strip_suffix(alt_symbol) or symbol
 
     def _invoke(arg):
         params = {"category": request_cat} if request_cat else None
@@ -3514,12 +3650,19 @@ def place_conditional_exit(
     is_tp: bool,
 ):
     """Place a conditional market exit (TP/SL) for Bybit when a position exists."""
+    import logging
 
     cat = str(category or "").lower()
-    if cat in ("", "swap"):
+    # ИСПРАВЛЕНО 2025-12-26: на testnet категория может быть "spot" для futures символов
+    # Если символ заканчивается на /USDT - это ВСЕГДА futures (linear), не spot
+    if cat == "spot" and symbol.endswith("/USDT"):
+        logging.info(f"place_conditional_exit | {symbol} | overriding spot->linear")
+        cat = "linear"
+    elif cat in ("", "swap"):
         cat = "linear"
 
     norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+    logging.info(f"place_conditional_exit | {symbol} | norm_symbol={norm_symbol}, cat={cat}")
 
     # Проверка hedge mode
     is_hedge = _force_hedge_mode_check(exchange, norm_symbol, cat)
@@ -3681,15 +3824,24 @@ def place_conditional_exit(
     params = {
         "category": cat,
         "triggerPrice": float(trig_val),
-        "triggerDirection": direction,
         "triggerBy": "LastPrice",
         "reduceOnly": True,
         "closeOnTrigger": True,
     }
-    
-    # КРИТИЧНО: всегда добавляем positionIdx если hedge
+
+    # КРИТИЧНО: triggerDirection НЕ поддерживается для spot рынков!
+    # Добавляем только для linear/inverse
+    if cat in ("linear", "inverse"):
+        params["triggerDirection"] = direction
+
+    # КРИТИЧНО: positionIdx ОБЯЗАТЕЛЕН для Bybit V5 API!
+    # ONE-WAY mode: positionIdx=0
+    # HEDGE mode: positionIdx=1 (Long) или 2 (Short)
     if is_hedge:
         params["positionIdx"] = position_idx
+    else:
+        # ONE-WAY mode - всегда используем positionIdx=0
+        params["positionIdx"] = 0
 
     order_type = "Market"
     try:
@@ -3707,8 +3859,11 @@ def place_conditional_exit(
         return None, str(exc)
 
     order_id = None
-    if isinstance(resp, dict):
+    if resp and isinstance(resp, dict):
         order_id = resp.get("id") or resp.get("orderId")
+    elif not resp:
+        logging.warning(f"exit | {symbol} | create_order returned None")
+        return None, "create_order returned None"
     
     logging.info(
         "exit | %s | %s conditional order placed @ %.6f (positionIdx=%s)",
@@ -3719,6 +3874,178 @@ def place_conditional_exit(
     )
     
     return order_id, None
+
+
+def set_position_tp_sl(
+    exchange,
+    symbol: str,
+    tp_price: float | None = None,
+    sl_price: float | None = None,
+    category: str = "linear",
+    side_open: str | None = None,
+) -> tuple[bool, str | None]:
+    """
+    Устанавливает SL/TP на СУЩЕСТВУЮЩУЮ позицию через set_trading_stop API.
+
+    Args:
+        exchange: CCXT exchange объект
+        symbol: Символ торговой пары
+        tp_price: Цена take-profit (опционально)
+        sl_price: Цена stop-loss (опционально)
+        category: Категория рынка ("linear", "inverse", "spot")
+        side_open: Направление открытой позиции ("buy"/"long" или "sell"/"short")
+
+    Returns:
+        Tuple[bool, str | None]: (success, error_message)
+    """
+    import logging
+
+    # DEBUG: логируем входные параметры
+    logging.info(
+        f"set_position_tp_sl | {symbol} | CALLED with: tp_price={tp_price}, "
+        f"sl_price={sl_price}, side_open={side_open}"
+    )
+
+    cat = str(category or "").lower()
+    if cat == "spot" and symbol.endswith("/USDT"):
+        logging.info(f"set_position_tp_sl | {symbol} | overriding spot->linear")
+        cat = "linear"
+    elif cat in ("", "swap"):
+        cat = "linear"
+
+    norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+
+    # Проверяем наличие позиции
+    qty_signed, qty_abs = has_open_position(exchange, norm_symbol, cat)
+    try:
+        qty_val = float(qty_abs)
+    except (TypeError, ValueError):
+        qty_val = 0.0
+
+    if qty_val <= 0:
+        return False, "No open position"
+
+    # Проверка hedge mode
+    is_hedge = _force_hedge_mode_check(exchange, norm_symbol, cat)
+
+    # Определяем positionIdx
+    position_idx = 0
+    if is_hedge:
+        if side_open:
+            position_idx = 1 if side_open.lower() in ("buy", "long") else 2
+        else:
+            # Определяем по знаку qty
+            position_idx = 1 if qty_signed > 0 else 2
+        logging.info(f"set_position_tp_sl | {symbol} | hedge mode, positionIdx={position_idx}")
+    else:
+        logging.info(f"set_position_tp_sl | {symbol} | oneway mode")
+
+    # Проверяем наличие метода set_trading_stop
+    set_trading_stop_fn = getattr(exchange, "set_trading_stop", None) or getattr(
+        exchange, "setTradingStop", None
+    )
+    if not callable(set_trading_stop_fn):
+        return False, "set_trading_stop method not available"
+
+    # Округляем цены до precision
+    tp_final = None
+    sl_final = None
+
+    if tp_price is not None:
+        try:
+            tp_final = float(exchange.price_to_precision(norm_symbol, tp_price))
+        except Exception:
+            tp_final = float(tp_price)
+
+    if sl_price is not None:
+        try:
+            sl_final = float(exchange.price_to_precision(norm_symbol, sl_price))
+        except Exception:
+            sl_final = float(sl_price)
+
+    # Формируем параметры
+    # ВАЖНО: tpTriggerBy и slTriggerBy будут добавлены автоматически в патче _patched_trading_stop
+    params = {
+        "category": cat,
+        "positionIdx": position_idx,
+        "tpSlMode": "Full",  # Full = весь размер позиции
+    }
+
+    try:
+        # Вызываем set_trading_stop
+        response = set_trading_stop_fn(
+            norm_symbol,
+            takeProfitPrice=tp_final,
+            stopLossPrice=sl_final,
+            params=params,
+        )
+
+        logging.info(
+            f"set_position_tp_sl | {symbol} | ✅ Success: TP={tp_final}, SL={sl_final}, positionIdx={position_idx}"
+        )
+        return True, None
+
+    except Exception as exc:
+        error_msg = str(exc)
+        logging.error(f"set_position_tp_sl | {symbol} | ❌ Failed: {error_msg}")
+        return False, error_msg
+
+
+def check_position_has_sltp(
+    exchange,
+    symbol: str,
+    category: str = "linear",
+) -> tuple[bool, bool]:
+    """
+    Проверяет наличие SL/TP на БИРЖЕ для открытой позиции.
+
+    Returns:
+        (has_sl, has_tp): кортеж из двух булевых значений
+    """
+    import logging
+
+    cat = str(category or "").lower()
+    if cat == "spot" and symbol.endswith("/USDT"):
+        cat = "linear"
+    elif cat in ("", "swap"):
+        cat = "linear"
+
+    norm_symbol = _normalize_bybit_symbol(exchange, symbol, cat)
+
+    try:
+        # Получаем позицию с биржи
+        positions = exchange.fetch_positions([norm_symbol], params={"category": cat})
+
+        if not positions or len(positions) == 0:
+            return False, False
+
+        for pos in positions:
+            if isinstance(pos, dict):
+                size = float(pos.get("contracts", 0) or pos.get("size", 0))
+                if size > 0:
+                    # Проверяем наличие SL/TP в данных позиции
+                    info = pos.get("info", {})
+
+                    # Bybit V5 возвращает SL/TP в полях takeProfit и stopLoss
+                    tp_price = info.get("takeProfit") or info.get("tpPrice")
+                    sl_price = info.get("stopLoss") or info.get("slPrice")
+
+                    has_tp = tp_price is not None and str(tp_price) != "" and str(tp_price) != "0"
+                    has_sl = sl_price is not None and str(sl_price) != "" and str(sl_price) != "0"
+
+                    logging.debug(
+                        f"check_position_has_sltp | {symbol} | "
+                        f"tp_price={tp_price}, sl_price={sl_price}, has_tp={has_tp}, has_sl={has_sl}"
+                    )
+
+                    return has_sl, has_tp
+
+        return False, False
+
+    except Exception as exc:
+        logging.warning(f"check_position_has_sltp | {symbol} | failed: {exc}")
+        return False, False
+
 
 def wait_position_after_entry(
     exchange,
