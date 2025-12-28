@@ -354,10 +354,22 @@ def compute_order_qty(
         logging.warning("risk | %s | unable to determine valid price for sizing", symbol)
         return None
 
+    # ИСПРАВЛЕНО 2025-12-28: Нормализуем символ для market lookup
+    symbol_for_market = symbol
     try:
-        market = exchange.market(symbol) or {}
+        from logging_utils import _normalize_bybit_symbol, detect_market_category
+        cat = detect_market_category(exchange, symbol)
+        if cat:
+            symbol_for_market = _normalize_bybit_symbol(exchange, symbol, cat)
+    except Exception:
+        pass  # Используем оригинальный символ если нормализация не удалась
+
+    try:
+        market = exchange.market(symbol_for_market) or {}
     except Exception as exc:
-        logging.warning("risk | %s | market lookup failed: %s", symbol, exc)
+        # Не логируем как WARNING если это просто отсутствие символа
+        if "does not have market symbol" not in str(exc):
+            logging.debug("risk | %s | market lookup failed: %s", symbol, exc)
         market = {}
 
     precision = (market.get("precision") or {}) if isinstance(market, dict) else {}

@@ -19,6 +19,7 @@ def normalize_symbol_for_exchange(exchange, symbol: str, markets_cache: dict) ->
 
     if not markets_cache.get("loaded"):
         markets_cache["by_name"] = set(getattr(exchange, "markets", {}) or {})
+        markets_cache["loaded"] = True
         # вместо ошибочного [str, str] = {} используйте безопасную инициализацию
         raw_mb = getattr(exchange, "markets_by_id", {})
 

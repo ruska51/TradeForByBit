@@ -167,49 +167,62 @@ def _min_step_qty(ex, symbol: str) -> tuple[float, float]:
     # КРИТИЧНО: Используем fallback для ВСЕХ символов, НЕ доверяем testnet API!
     # Поддерживаем ОБА формата: с слешем (ADA/USDT) и без (ADAUSDT)
     FALLBACK_QTY_STEPS = {
-        # Формат со слешем (для compatibility)
+        # === ACTIVE PAIRS (2025-12-28) ===
         "BTC/USDT": {"min": 0.001, "step": 0.001},
         "ETH/USDT": {"min": 0.01, "step": 0.01},
-        "SOL/USDT": {"min": 0.1, "step": 0.1},
-        "BNB/USDT": {"min": 0.01, "step": 0.01},
-        "ADA/USDT": {"min": 1.0, "step": 1.0},
-        "XRP/USDT": {"min": 1.0, "step": 1.0},
+        "LINK/USDT": {"min": 0.1, "step": 0.1},
+        "1000PEPE/USDT": {"min": 1000.0, "step": 1000.0},
+        "MNT/USDT": {"min": 1.0, "step": 1.0},
+        # === RESERVE PAIRS ===
         "DOGE/USDT": {"min": 1.0, "step": 1.0},
+        "OP/USDT": {"min": 0.1, "step": 0.1},
+        "UNI/USDT": {"min": 0.1, "step": 0.1},
+        "ETC/USDT": {"min": 0.1, "step": 0.1},
+        "FIL/USDT": {"min": 0.1, "step": 0.1},
         "MATIC/USDT": {"min": 1.0, "step": 1.0},
         "DOT/USDT": {"min": 0.1, "step": 0.1},
-        "AVAX/USDT": {"min": 0.1, "step": 0.1},
-        "LINK/USDT": {"min": 0.1, "step": 0.1},
-        "UNI/USDT": {"min": 0.1, "step": 0.1},
+        # === REMOVED PAIRS (2025-12-28) - kept for reference ===
+        # "SOL/USDT": {"min": 0.1, "step": 0.1},  # REMOVED: -$148, 50% liquidations
+        # "BNB/USDT": {"min": 0.01, "step": 0.01},  # REMOVED: -$76
+        # "ADA/USDT": {"min": 1.0, "step": 1.0},  # REMOVED: low volume
+        # "XRP/USDT": {"min": 1.0, "step": 1.0},  # REMOVED: 72% liquidations
+        # "AVAX/USDT": {"min": 0.1, "step": 0.1},  # REMOVED: symbol errors
+        # "NEAR/USDT": {"min": 0.1, "step": 0.1},  # REMOVED: low volume
+        # "APT/USDT": {"min": 0.1, "step": 0.1},  # REMOVED: low volume
+        # "SUI/USDT": {"min": 1.0, "step": 1.0},  # REMOVED: -$17
+        # === OTHER PAIRS (legacy) ===
         "ATOM/USDT": {"min": 0.1, "step": 0.1},
         "LTC/USDT": {"min": 0.01, "step": 0.01},
-        "NEAR/USDT": {"min": 0.1, "step": 0.1},
-        "FIL/USDT": {"min": 0.1, "step": 0.1},
-        "APT/USDT": {"min": 0.1, "step": 0.1},
         "ARB/USDT": {"min": 1.0, "step": 1.0},
-        "OP/USDT": {"min": 0.1, "step": 0.1},
-        "SUI/USDT": {"min": 1.0, "step": 1.0},
         "INJ/USDT": {"min": 0.1, "step": 0.1},
         # Формат БЕЗ слеша (для linear контрактов)
+        # === ACTIVE PAIRS ===
         "BTCUSDT": {"min": 0.001, "step": 0.001},
         "ETHUSDT": {"min": 0.01, "step": 0.01},
-        "SOLUSDT": {"min": 0.1, "step": 0.1},
-        "BNBUSDT": {"min": 0.01, "step": 0.01},
-        "ADAUSDT": {"min": 1.0, "step": 1.0},
-        "XRPUSDT": {"min": 1.0, "step": 1.0},
+        "LINKUSDT": {"min": 0.1, "step": 0.1},
+        "1000PEPEUSDT": {"min": 1000.0, "step": 1000.0},
+        "MNTUSDT": {"min": 1.0, "step": 1.0},
+        # === RESERVE PAIRS ===
         "DOGEUSDT": {"min": 1.0, "step": 1.0},
+        "OPUSDT": {"min": 0.1, "step": 0.1},
+        "UNIUSDT": {"min": 0.1, "step": 0.1},
+        "ETCUSDT": {"min": 0.1, "step": 0.1},
+        "FILUSDT": {"min": 0.1, "step": 0.1},
         "MATICUSDT": {"min": 1.0, "step": 1.0},
         "DOTUSDT": {"min": 0.1, "step": 0.1},
-        "AVAXUSDT": {"min": 0.1, "step": 0.1},
-        "LINKUSDT": {"min": 0.1, "step": 0.1},
-        "UNIUSDT": {"min": 0.1, "step": 0.1},
+        # === REMOVED PAIRS (2025-12-28) - kept for reference ===
+        # "SOLUSDT": {"min": 0.1, "step": 0.1},  # REMOVED: -$148, 50% liquidations
+        # "BNBUSDT": {"min": 0.01, "step": 0.01},  # REMOVED: -$76
+        # "ADAUSDT": {"min": 1.0, "step": 1.0},  # REMOVED: low volume
+        # "XRPUSDT": {"min": 1.0, "step": 1.0},  # REMOVED: 72% liquidations
+        # "AVAXUSDT": {"min": 0.1, "step": 0.1},  # REMOVED: symbol errors
+        # "NEARUSDT": {"min": 0.1, "step": 0.1},  # REMOVED: low volume
+        # "APTUSDT": {"min": 0.1, "step": 0.1},  # REMOVED: low volume
+        # "SUIUSDT": {"min": 1.0, "step": 1.0},  # REMOVED: -$17
+        # === OTHER PAIRS (legacy) ===
         "ATOMUSDT": {"min": 0.1, "step": 0.1},
         "LTCUSDT": {"min": 0.01, "step": 0.01},
-        "NEARUSDT": {"min": 0.1, "step": 0.1},
-        "FILUSDT": {"min": 0.1, "step": 0.1},
-        "APTUSDT": {"min": 0.1, "step": 0.1},
         "ARBUSDT": {"min": 1.0, "step": 1.0},
-        "OPUSDT": {"min": 0.1, "step": 0.1},
-        "SUIUSDT": {"min": 1.0, "step": 1.0},
         "INJUSDT": {"min": 0.1, "step": 0.1},
     }
 
@@ -286,13 +299,24 @@ def _round_qty(ex, symbol: str, qty: float) -> float:
 
     # Финальное преобразование в правильную точность через amount_to_precision
     # ИСПРАВЛЕНО 2025-12-26: Применяем amount_to_precision ПОСЛЕ округления по step
+    # ИСПРАВЛЕНО 2025-12-28: Нормализуем символ для amount_to_precision
+    symbol_for_precision = symbol
     try:
-        precision_result = float(ex.amount_to_precision(symbol, adjusted))
+        cat = detect_market_category(ex, symbol)
+        if cat:
+            symbol_for_precision = _normalize_bybit_symbol(ex, symbol, cat)
+    except Exception:
+        pass
+
+    try:
+        precision_result = float(ex.amount_to_precision(symbol_for_precision, adjusted))
         logging.info(f"_round_qty | {symbol} | after amount_to_precision: {precision_result:.8f}")
         adjusted = precision_result
     except Exception as exc:
         # Fallback: если amount_to_precision не работает, используем округление
-        logging.warning(f"_round_qty | {symbol} | amount_to_precision failed: {exc}, using manual rounding")
+        # Не логируем как WARNING если это просто отсутствие символа
+        if "does not have market symbol" not in str(exc):
+            logging.debug(f"_round_qty | {symbol} | amount_to_precision failed: {exc}, using manual rounding")
         # Определяем количество знаков после запятой из step
         if step and step > 0:
             decimals = max(0, -int(math.floor(math.log10(step))))
@@ -955,11 +979,9 @@ def _normalize_bybit_symbol(
     if not _is_bybit_exchange(exchange):
         return symbol.split(":", 1)[0] if for_leverage and ":" in symbol else symbol
 
-    # КРИТИЧНО: Убираем :USDT суффикс для Bybit
-    # Bybit использует формат "BTC/USDT" или "BTCUSDT", но НЕ "BTC/USDT:USDT"
-    if symbol.endswith(":USDT"):
-        symbol = symbol.split(":")[0]
-    
+    # ИСПРАВЛЕНО 2025-12-28: НЕ удаляем :USDT суффикс на входе
+    # Вместо этого обрабатываем его ниже для каждого случая
+
     category_norm = str(category or "").lower()
     if category_norm in ("", "swap"):
         category_norm = "linear"
@@ -972,29 +994,33 @@ def _normalize_bybit_symbol(
     if category_norm in ("linear", "inverse"):
         # Для linear/inverse contracts в CCXT используется формат с :USDT суффиксом!
         # Примеры: SOL/USDT:USDT, BTC/USDT:USDT
-        if ":" in symbol:
+        if ":" in symbol and (symbol.endswith(":USDT") or symbol.endswith(":USDC")):
             # Уже правильный формат (SOL/USDT:USDT)
             import logging
-            logging.info(f"_normalize_bybit_symbol | {symbol} unchanged (already has :USDT suffix)")
+            logging.debug(f"_normalize_bybit_symbol | {symbol} unchanged (already has settlement suffix)")
             return symbol
         elif "/" in symbol:
             # Преобразуем SOL/USDT -> SOL/USDT:USDT
             if symbol.endswith("/USDT"):
                 norm = f"{symbol}:USDT"
                 import logging
-                logging.info(f"_normalize_bybit_symbol | {symbol} -> {norm} (category={category_norm})")
+                logging.debug(f"_normalize_bybit_symbol | {symbol} -> {norm} (category={category_norm})")
                 return norm
             elif symbol.endswith("/USDC"):
                 norm = f"{symbol}:USDC"
                 import logging
-                logging.info(f"_normalize_bybit_symbol | {symbol} -> {norm} (category={category_norm})")
+                logging.debug(f"_normalize_bybit_symbol | {symbol} -> {norm} (category={category_norm})")
                 return norm
         # Если другой формат - возвращаем как есть
         import logging
-        logging.info(f"_normalize_bybit_symbol | {symbol} unchanged (unexpected format for linear)")
+        logging.debug(f"_normalize_bybit_symbol | {symbol} unchanged (unexpected format for linear)")
         return symbol
 
-    # Для spot используем формат со слешем
+    # Для spot используем формат со слешем (БЕЗ суффикса :USDT)
+    # Если symbol имеет :USDT, убираем его для spot
+    if symbol.endswith(":USDT") or symbol.endswith(":USDC"):
+        symbol = symbol.split(":")[0]
+
     if "/" not in symbol:
         # Преобразуем BTCUSDT -> BTC/USDT
         for quote in ["USDT", "USDC", "USD"]:
@@ -3947,6 +3973,31 @@ def set_position_tp_sl(
     if not callable(set_trading_stop_fn):
         return False, "set_trading_stop method not available"
 
+    # ИСПРАВЛЕНО 2025-12-28: Проверяем текущие значения SL/TP на бирже
+    # чтобы избежать ошибки "not modified" (retCode=34040)
+    try:
+        positions = exchange.fetch_positions([norm_symbol], params={"category": cat})
+        current_tp = None
+        current_sl = None
+
+        for pos in positions:
+            if isinstance(pos, dict):
+                size = float(pos.get("contracts", 0) or pos.get("size", 0))
+                if size > 0:
+                    info = pos.get("info", {})
+                    tp_str = info.get("takeProfit") or info.get("tpPrice") or ""
+                    sl_str = info.get("stopLoss") or info.get("slPrice") or ""
+
+                    if tp_str and str(tp_str) not in ("0", "0.0", ""):
+                        current_tp = float(tp_str)
+                    if sl_str and str(sl_str) not in ("0", "0.0", ""):
+                        current_sl = float(sl_str)
+                    break
+    except Exception as e:
+        logging.debug(f"set_position_tp_sl | {symbol} | failed to fetch current SL/TP: {e}")
+        current_tp = None
+        current_sl = None
+
     # Округляем цены до precision
     tp_final = None
     sl_final = None
@@ -3962,6 +4013,32 @@ def set_position_tp_sl(
             sl_final = float(exchange.price_to_precision(norm_symbol, sl_price))
         except Exception:
             sl_final = float(sl_price)
+
+    # Проверяем, нужно ли обновлять (сравниваем с допуском 0.01%)
+    tp_needs_update = False
+    sl_needs_update = False
+
+    if tp_final is not None:
+        if current_tp is None:
+            tp_needs_update = True
+        else:
+            # Сравниваем с допуском
+            diff_pct = abs(tp_final - current_tp) / current_tp * 100 if current_tp != 0 else 100
+            tp_needs_update = diff_pct > 0.01
+
+    if sl_final is not None:
+        if current_sl is None:
+            sl_needs_update = True
+        else:
+            diff_pct = abs(sl_final - current_sl) / current_sl * 100 if current_sl != 0 else 100
+            sl_needs_update = diff_pct > 0.01
+
+    # Если ничего не нужно обновлять, возвращаем успех
+    if not tp_needs_update and not sl_needs_update:
+        logging.info(
+            f"set_position_tp_sl | {symbol} | Already set: TP={current_tp}, SL={current_sl} (no change needed)"
+        )
+        return True, None
 
     # Формируем параметры
     # ВАЖНО: tpTriggerBy и slTriggerBy будут добавлены автоматически в патче _patched_trading_stop
@@ -3987,8 +4064,13 @@ def set_position_tp_sl(
 
     except Exception as exc:
         error_msg = str(exc)
-        logging.error(f"set_position_tp_sl | {symbol} | ❌ Failed: {error_msg}")
-        return False, error_msg
+        # ИСПРАВЛЕНО 2025-12-28: Не логируем как ERROR если это "not modified"
+        if "34040" in error_msg or "not modified" in error_msg.lower():
+            logging.info(f"set_position_tp_sl | {symbol} | Already set (retCode=34040): TP={tp_final}, SL={sl_final}")
+            return True, None  # Считаем успехом, т.к. значения уже установлены
+        else:
+            logging.error(f"set_position_tp_sl | {symbol} | ❌ Failed: {error_msg}")
+            return False, error_msg
 
 
 def check_position_has_sltp(
@@ -4195,13 +4277,33 @@ def safe_set_leverage(exchange, symbol: str, leverage: int, attempts: int = 2) -
                     log(logging.INFO, "leverage", symbol, f"Leverage set to {leverage}x")
                     return True
             except Exception as exc:
-                message = str(exc).lower()
+                error_str = str(exc)
+                # ИСПРАВЛЕНО 2025-12-28: Обрабатываем специфичные ошибки Bybit в fallback
+                if "10001" in error_str and "leverage invalid" in error_str.lower():
+                    log(logging.DEBUG, "leverage", symbol, f"Leverage already set or invalid (fallback): {exc}")
+                    return True
+                elif "110043" in error_str and "leverage not modified" in error_str.lower():
+                    log(logging.DEBUG, "leverage", symbol, "Leverage already set (fallback, not modified)")
+                    return True
+
                 if attempt < attempts - 1:
                     time.sleep(2)
                     continue
                 log_once("warning", f"leverage | {symbol} | Failed to set leverage: {exc}", window_sec=30.0)
                 return False
         except Exception as exc:
+            error_str = str(exc)
+            # ИСПРАВЛЕНО 2025-12-28: Обрабатываем специфичные ошибки Bybit
+            if "10001" in error_str and "leverage invalid" in error_str.lower():
+                # retCode 10001 "buy leverage invalid" или "sell leverage invalid"
+                # Это значит, что плечо уже установлено или недопустимо для данного символа
+                log(logging.DEBUG, "leverage", symbol, f"Leverage already set or invalid: {exc}")
+                return True  # Считаем успехом, т.к. это не критичная ошибка
+            elif "110043" in error_str and "leverage not modified" in error_str.lower():
+                # retCode 110043 "leverage not modified" - плечо уже установлено
+                log(logging.DEBUG, "leverage", symbol, "Leverage already set (not modified)")
+                return True
+
             if attempt < attempts - 1:
                 time.sleep(2)
                 continue

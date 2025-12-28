@@ -1069,20 +1069,20 @@ def _env_float(name: str, default: float) -> float:
 
 
 # Базовые и динамические фильтры вероятности/ADX
-BASE_PROBA_FILTER = 0.35
-PROBA_FILTER = _env_float("PROBA_FILTER", 0.25)  # Временно понижен до 0.25 до этого был BASE_PROBA_FILTER
+BASE_PROBA_FILTER = 0.45  # ИСПРАВЛЕНО 2025-12-28: повышен для уверенных сигналов
+PROBA_FILTER = _env_float("PROBA_FILTER", 0.45)  # Только уверенные сигналы
 # [ANCHOR:DYNA_THRESH_CONSTS]
 MIN_PROBA_FILTER = _env_float(
-    "MIN_PROBA_FILTER", min(0.25, float(PROBA_FILTER))
+    "MIN_PROBA_FILTER", min(0.45, float(PROBA_FILTER))
 )
-# Стратегия допускает сделки только при умеренном тренде
-BASE_ADX_THRESHOLD = 5.0  # Понижен базовый порог ADX для трендовых фильтров
+# Стратегия допускает сделки только при сильном тренде
+BASE_ADX_THRESHOLD = 20.0  # ИСПРАВЛЕНО 2025-12-28: только сильный тренд
 ADX_THRESHOLD = _env_float("ADX_THRESHOLD", BASE_ADX_THRESHOLD)  # минимальный ADX для сделки
 MIN_ADX_THRESHOLD = _env_float(
-    "MIN_ADX_THRESHOLD", min(5.0, float(ADX_THRESHOLD))
+    "MIN_ADX_THRESHOLD", min(20.0, float(ADX_THRESHOLD))
 )
-RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 85.0)  # порог перекупленности для long
-RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 15.0)  # порог перепроданности для short
+RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 75.0)  # ИСПРАВЛЕНО 2025-12-28: фильтр работает
+RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 25.0)  # ИСПРАВЛЕНО 2025-12-28: фильтр работает
 RSI_OVERBOUGHT_MAX = max(RSI_OVERBOUGHT, _env_float("RSI_OVERBOUGHT_MAX", 80.0))
 RSI_OVERSOLD_MIN = min(RSI_OVERSOLD, _env_float("RSI_OVERSOLD_MIN", 20.0))
 PRED_HORIZON = 3  # число свечей вперёд для прогноза и бэктеста
@@ -1525,17 +1525,21 @@ except Exception as e:  # pragma: no cover - unexpected init failure
 def initialize_symbols() -> list[str]:
     """Return list of tradable pairs. Market scanning is currently disabled."""
     default = [
-        "BTC/USDT",  # ✅ ВКЛЮЧЕНО: исправлено округление через qtyStep
-        "ETH/USDT",  # ✅ ВКЛЮЧЕНО: исправлено округление через qtyStep
-        "SOL/USDT",  # ✅ ВКЛЮЧЕНО: исправлено округление через qtyStep
-        "BNB/USDT",
-        "ADA/USDT",
-        "XRP/USDT",
-        # "LTC/USDT",  # ОТКЛЮЧЕНО: "This contract is not live" в testnet
-        "NEAR/USDT",
-        "SUI/USDT",
-        # "TON/USDT",  # ОТКЛЮЧЕНО: "This contract is not live" в testnet
-        "TRX/USDT",
+        "BTC/USDT",      # 241M volume, proven +$296
+        "ETH/USDT",      # 7.168B volume, proven +$376
+        "LINK/USDT",     # 62.55M volume, stable
+        "MNT/USDT",      # 774.61K volume, new test
+
+        # === REMOVED PAIRS (2025-12-28) ===
+        # "1000PEPE/USDT" - REMOVED: high volatility, unstable (2025-12-28)
+        # "AVAX/USDT" - REMOVED: symbol errors, API inconsistencies
+        # "SOL/USDT" - REMOVED: -$148 profit, 50% liquidation rate
+        # "BNB/USDT" - REMOVED: -$76 profit
+        # "XRP/USDT" - REMOVED: 72% liquidation rate
+        # "ADA/USDT" - REMOVED: low volume
+        # "SUI/USDT" - REMOVED: -$17 profit
+        # "NEAR/USDT" - REMOVED: low volume
+        # "TRX/USDT" - REMOVED: underperforming
     ]
     # Удаляем возможные дубликаты, сохраняя порядок
     seen: set[str] = set()
@@ -1544,9 +1548,12 @@ def initialize_symbols() -> list[str]:
         if s not in seen:
             seen.add(s)
             unique.append(s)
-    # PATCH NOTES:
-    # - Обновлён основной список (BTC, ETH, SOL, BNB, ADA, XRP, LTC, NEAR, SUI, TON, TRX) для параллельного анализа.
-    # - Резервные пары и лимит max_open_trades обновлены под расширенный охват (10 одновременных позиций).
+    # PATCH NOTES (2025-12-28):
+    # - УДАЛЁН 1000PEPE/USDT из-за высокой волатильности
+    # - Обновлён основной список на стабильные пары: BTC, ETH, LINK, MNT
+    # - Удалены неэффективные пары (SOL, BNB, XRP, ADA, SUI, NEAR, TRX) с причинами
+    # - AVAX полностью удалён из-за багов API
+    # - Резервные пары обновлены в risk_config.json
     # - Безопасно: filter_supported_symbols убирает неподдерживаемые рынки и обновляет BASE_SYMBOL_COUNT.
     # - Критерии: initialize_symbols содержит только активные линейные пары без контрактов без OHLCV.
     # Scanning for new symbols is temporarily disabled.
@@ -4375,6 +4382,8 @@ def open_reverse_position_with_reduced_risk(
 
 
 def param_grid_search(symbols=["ETH/USDT", "SOL/USDT", "BNB/USDT", "SUI/USDT", "TON/USDT", "XRP/USDT", "TRX/USDT"]):
+    # NOTE: Default symbols parameter NOT updated intentionally (legacy test function)
+    # Active trading pairs configured in initialize_symbols() - see line 1525
     # Сетка параметров для перебора
     THRESHOLDS = [0.0005, 0.001, 0.0015, 0.002]
     SL_PCTS = [0.01, 0.015, 0.02, 0.03]
@@ -5283,8 +5292,33 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
         except Exception:
             continue
 
+    # ИСПРАВЛЕНО 2025-12-28: Добавляем валидацию триггерной цены
+    # Получаем текущую цену для проверки направления
+    current_price = None
+    try:
+        ticker = exchange.fetch_ticker(norm_symbol)
+        current_price = float(ticker.get("last") or ticker.get("close") or 0)
+    except Exception:
+        current_price = None
+
     trigger_direction = BYBIT_TRIGGER_DIRECTIONS["falling" if qty_signed > 0 else "rising"]
-    
+
+    # Валидация: для LONG (falling) trigger_price должен быть < current_price
+    # Для SHORT (rising) trigger_price должен быть > current_price
+    if current_price and current_price > 0:
+        if qty_signed > 0 and trigger_price >= current_price:
+            # LONG позиция: стоп-лосс должен быть НИЖЕ текущей цены
+            logging.warning(
+                f"order | {symbol} | Invalid SL for LONG: trigger_price={trigger_price} >= current={current_price}, skipping"
+            )
+            return
+        elif qty_signed < 0 and trigger_price <= current_price:
+            # SHORT позиция: стоп-лосс должен быть ВЫШЕ текущей цены
+            logging.warning(
+                f"order | {symbol} | Invalid SL for SHORT: trigger_price={trigger_price} <= current={current_price}, skipping"
+            )
+            return
+
     sl_params = {
         "category": cat,
         "triggerPrice": trigger_price,
@@ -5293,7 +5327,7 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
         "reduceOnly": True,
         "closeOnTrigger": True,
     }
-    
+
     # КРИТИЧНО: добавляем positionIdx для hedge mode
     if is_hedge:
         sl_params["positionIdx"] = position_idx
@@ -5308,6 +5342,13 @@ def update_stop_loss(symbol: str, new_sl: float) -> None:
             sl_params,
         )
     except Exception as exc:
+        error_str = str(exc)
+        # ИСПРАВЛЕНО 2025-12-28: Не логируем как WARNING если это expect Falling/Rising ошибка
+        # Это означает, что SL уже на нужном уровне или рынок двигается слишком быстро
+        if "110093" in error_str or "expect Falling" in error_str or "expect Rising" in error_str:
+            logging.info(f"order | {symbol} | stop-loss already optimal or market moved: {exc}")
+            return
+
         log_once(
             "warning",
             f"order | {symbol} | stop-loss update failed: {exc}",
@@ -6604,14 +6645,18 @@ def run_bot():
                                     sym,
                                     exc,
                                 )
+                            # ИСПРАВЛЕНО 2025-12-28: Используем нормализованный символ для market lookup
                             try:
-                                market = exchange.market(symbol) or {}
+                                symbol_norm_for_market = _normalize_bybit_symbol(ADAPTER.x, sym, cat)
+                                market = exchange.market(symbol_norm_for_market) or {}
                             except Exception as exc:
-                                logging.warning(
-                                    "pattern trade | %s | market lookup failed: %s",
-                                    sym,
-                                    exc,
-                                )
+                                # Не логируем как WARNING если это просто отсутствие символа
+                                if "does not have market symbol" not in str(exc):
+                                    logging.debug(
+                                        "pattern trade | %s | market lookup failed: %s",
+                                        sym,
+                                        exc,
+                                    )
                                 market = {}
                             min_qty = float(
                                 ((market.get("limits") or {}).get("amount") or {}).get("min", 0.0) or 0.0
@@ -7683,8 +7728,10 @@ def main() -> None:
     logging.info("=== Setting ONE-WAY position mode ===")
     for sym in symbols:
         try:
+            # ИСПРАВЛЕНО 2025-12-28: Нормализуем символ для Bybit linear market
+            norm_sym = _normalize_bybit_symbol(ADAPTER.x, sym, "linear")
             # Установка ONE-WAY mode через Bybit API
-            ADAPTER.x.set_position_mode(False, sym, params={"category": "linear"})
+            ADAPTER.x.set_position_mode(False, norm_sym, params={"category": "linear"})
             logging.info(f"position_mode | {sym} | set to ONE-WAY")
         except Exception as e:
             # Проверяем код ошибки - 110025 означает что mode уже установлен
@@ -7695,6 +7742,9 @@ def main() -> None:
                 logging.debug(f"position_mode | {sym} | contract not available on testnet")
             elif "110024" in error_str or "existing position" in error_str:
                 logging.info(f"position_mode | {sym} | has open position, mode cannot be changed")
+            elif "does not have market symbol" in error_str:
+                # Символ не найден даже после нормализации - логируем как debug
+                logging.debug(f"position_mode | {sym} | symbol not found: {e}")
             else:
                 logging.warning(f"position_mode | {sym} | failed to set ONE-WAY: {e}")
 
