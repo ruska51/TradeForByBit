@@ -165,6 +165,8 @@ from risk_management import (
     StatsTracker,
     confirm_trend,
 )
+# ADDED 2025-12-28: Trailing Stop Manager for automatic profit protection
+from trailing_stop import TrailingStopManager
 from memory_utils import memory_manager, normalize_param_keys
 from pattern_detector import (
     REAL_PATTERNS,
@@ -1081,10 +1083,10 @@ ADX_THRESHOLD = _env_float("ADX_THRESHOLD", BASE_ADX_THRESHOLD)  # минима�
 MIN_ADX_THRESHOLD = _env_float(
     "MIN_ADX_THRESHOLD", min(20.0, float(ADX_THRESHOLD))
 )
-RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 75.0)  # ИСПРАВЛЕНО 2025-12-28: фильтр работает
-RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 25.0)  # ИСПРАВЛЕНО 2025-12-28: фильтр работает
-RSI_OVERBOUGHT_MAX = max(RSI_OVERBOUGHT, _env_float("RSI_OVERBOUGHT_MAX", 80.0))
-RSI_OVERSOLD_MIN = min(RSI_OVERSOLD, _env_float("RSI_OVERSOLD_MIN", 20.0))
+RSI_OVERBOUGHT = _env_float("RSI_OVERBOUGHT", 85.0)  # ИСПРАВЛЕНО 2025-12-28: фильтр работает
+RSI_OVERSOLD = _env_float("RSI_OVERSOLD", 15.0)  # ИСПРАВЛЕНО 2025-12-28: фильтр работает
+RSI_OVERBOUGHT_MAX = max(RSI_OVERBOUGHT, _env_float("RSI_OVERBOUGHT_MAX", 85.0))
+RSI_OVERSOLD_MIN = min(RSI_OVERSOLD, _env_float("RSI_OVERSOLD_MIN", 15.0))
 PRED_HORIZON = 3  # число свечей вперёд для прогноза и бэктеста
 MAX_LOSS_ROI = 0.10  # допустимый убыток по позиции (10% ROI)
 ROI_TARGET_PCT = 1.5  # целевой ROI для автофиксации прибыли (в процентах)
@@ -1443,7 +1445,7 @@ def adjust_filters_for_inactivity(
 
     # [ANCHOR:DYNA_THRESH_LOG]
     logging.info(
-        "adj | %s | inactive %.1fh → PROBA %.2f, ADX %.1f, RSI %.1f/%.1f",
+        "adj | %s | inactive %.1fh -> PROBA %.2f, ADX %.1f, RSI %.1f/%.1f",
         symbol,
         inactivity,
         adj_proba,
@@ -1527,7 +1529,7 @@ def initialize_symbols() -> list[str]:
     default = [
         "BTC/USDT",      # 241M volume, proven +$296
         "ETH/USDT",      # 7.168B volume, proven +$376
-        "LINK/USDT",     # 62.55M volume, stable
+        # "LINK/USDT",   # REMOVED 2025-12-29: symbol does not exist on Bybit (testnet/mainnet)
         "MNT/USDT",      # 774.61K volume, new test
 
         # === REMOVED PAIRS (2025-12-28) ===
@@ -1540,6 +1542,7 @@ def initialize_symbols() -> list[str]:
         # "SUI/USDT" - REMOVED: -$17 profit
         # "NEAR/USDT" - REMOVED: low volume
         # "TRX/USDT" - REMOVED: underperforming
+        # "LINK/USDT" - REMOVED 2025-12-29: bybit does not have market symbol LINK/USDT
     ]
     # Удаляем возможные дубликаты, сохраняя порядок
     seen: set[str] = set()
@@ -2241,7 +2244,7 @@ def prepare_profit_dataset(symbol: str, profit_csv: str = "profit_report.csv") -
 
 def train_optuna_model(symbol: str, n_trials: int = 20):
     """Train a single global model using historical trade outcomes."""
-    logging.info(f"model | training for {symbol}…")
+    logging.info(f"model | training for {symbol}...")
 
     df = prepare_profit_dataset(symbol)
     if df.empty:
@@ -2363,7 +2366,7 @@ def train_optuna_model(symbol: str, n_trials: int = 20):
     globals()["GLOBAL_FEATURES"] = list(features)
     globals()["GLOBAL_CLASSES"] = classes
     logging.info(
-        "model | %s | ✅ model retrained (%d features)",
+        "model | %s | model retrained (%d features)",
         symbol,
         len(features),
     )
@@ -3014,8 +3017,11 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
             tuned["sl_mult"] *= float(normalized["SL_PCT"]) / sl_ref
         if tp_ref > 0 and isinstance(normalized.get("TP_PCT"), (int, float)):
             tuned["tp_mult"] *= float(normalized["TP_PCT"]) / tp_ref
-        if isinstance(normalized.get("HORIZON"), (int, float)):
-            tuned["horizon"] = int(normalized["HORIZON"])
+        # ИСПРАВЛЕНО 2025-12-29: НЕ перезаписываем horizon из best_params
+        # Каждый режим (scalp/intraday/swing) имеет свой оптимальный horizon
+        # Перезапись одним значением убивает градацию режимов
+        # if isinstance(normalized.get("HORIZON"), (int, float)):
+        #     tuned["horizon"] = int(normalized["HORIZON"])
         return tuned
 
     perf = _trade_memory_profile(symbol)
@@ -3050,31 +3056,39 @@ def select_trade_mode(symbol: str, df_trend: pd.DataFrame) -> tuple[str, dict, s
     ):
         mode = "scalp"
 
+    # ПЕРЕРАБОТАНО 2025-12-29 (v3): Градация с безопасным margin loss < 25%
+    # Принципы:
+    # - scalp: узкие стопы, быстрый profit, умеренный leverage (12x)
+    # - intraday: средние стопы/targets, средний leverage (12x)
+    # - swing: широкие стопы, большие targets, консервативный leverage (8x)
+    # - Все margin loss < 25% для надёжной защиты
     params_map = {
         "scalp": {
-            "sl_mult": 1.0,
-            "tp_mult": 2.0,
-            "lev": 40,
-            "horizon": 6,
-            "trailing_start": 0.004,
-            "partial_tp": 0.3,
-            "partial_tp_mult": 1.0,
-        },
-        "swing": {
-            "sl_mult": 3.0,
-            "tp_mult": 6.0,
-            "lev": 10,
-            "horizon": 25,
-            "partial_tp": 0.5,
-            "partial_tp_mult": 1.2,
+            "sl_mult": 0.8,   # Узкий SL (быстрый выход при ошибке)
+            "tp_mult": 2.5,   # Агрессивный TP (быстрая прибыль)
+            "lev": 12,        # СНИЖЕНО с 15x → 12x (margin loss: 2.08% SL × 12 = 25%)
+            "horizon": 4,     # Макс 4 часа (быстрые сделки)
+            "trailing_start": 0.003,  # Трейлинг с 0.3% (плотный)
+            "partial_tp": 0.4,  # Закрываем 40% на первом TP (фиксируем быструю прибыль)
+            "partial_tp_mult": 0.8,  # Первый TP ближе (80% от основного)
         },
         "intraday": {
-            "sl_mult": 2.0,
-            "tp_mult": 4.0,
-            "lev": 20,
-            "horizon": 10,
-            "partial_tp": 0.4,
-            "partial_tp_mult": 1.1,
+            "sl_mult": 1.5,   # Средний SL (баланс между риском и пространством)
+            "tp_mult": 3.5,   # Средний TP
+            "lev": 12,        # Средний leverage (margin loss: 2.08% SL × 12 = 25%)
+            "horizon": 12,    # Макс 12 часов
+            "trailing_start": 0.005,  # Трейлинг с 0.5%
+            "partial_tp": 0.35,  # Закрываем 35% на первом TP
+            "partial_tp_mult": 1.0,  # Первый TP = основной TP
+        },
+        "swing": {
+            "sl_mult": 2.5,   # Широкий SL (даём цене "дышать")
+            "tp_mult": 5.0,   # Большой TP (ждём крупное движение)
+            "lev": 8,         # Консервативный leverage (margin loss: 3.13% SL × 8 = 25%)
+            "horizon": 48,    # Макс 48 часов (долгие позиции)
+            "trailing_start": 0.008,  # Трейлинг с 0.8%
+            "partial_tp": 0.3,  # Закрываем 30% на первом TP
+            "partial_tp_mult": 1.3,  # Первый TP дальше (130% от основного)
         },
     }
 
@@ -3148,9 +3162,11 @@ def best_entry_moment(
     # ИСПРАВЛЕНО 2025-12-26: Понижен порог объёма с 1.0 до 0.05-0.08 для TESTNET
     # Источник: CryptoProfitCalc 2025 Guide показывает что 20-50% от среднего объёма достаточно
     # TESTNET FIX: Дополнительное снижение до 0.05/0.08 т.к. реальные объёмы в testnet 0.08-0.14
+    # ИСПРАВЛЕНО 2025-12-31: Используем <= вместо < для учета погрешности округления
     if vol_ratio is not None:
         thr = 0.05 if source == "fallback" else 0.08  # TESTNET: было 0.2/0.25, снижено для низкой ликвидности
-        if vol_ratio < thr:
+        # Разрешаем небольшой допуск для погрешности округления (0.001)
+        if vol_ratio < thr - 0.001:
             logging.info(f"entry_timing | {symbol} | volume too low: {vol_ratio:.3f} < {thr:.3f}")
             return False
         if source == "fallback" and trend_ok and vol_ratio >= 0.05:  # TESTNET: было 0.2
@@ -3526,7 +3542,11 @@ def run_trade(
         mode_params,
         "long" if signal == "long" else "short",
         tick_size=tick_size,
+        symbol=symbol,  # ADDED 2025-12-28: For leverage-aware SL
+        leverage=lev,   # ADDED 2025-12-28: For safe margin calculation
     )
+    # DEBUG: логируем значения SL/TP с leverage
+    logging.info(f"DEBUG | {symbol} | SL/TP calc_sl_tp returned: price={price:.8f}, atr={atr_val:.8f}, leverage={lev}, sl_raw={sl_price_raw:.8f}, tp_raw={tp_price_raw:.8f}, sl_pct={sl_pct:.4%}")
     min_tick = tick_size if tick_size and tick_size > 0 else 1e-6
     if signal == "short":
         if sl_price_raw >= price * 1.9:
@@ -3747,8 +3767,8 @@ def run_trade(
     bybit_params = {
         "stopLoss": float(sl_price),  # Передаем как число
         "takeProfit": float(tp_price),  # Передаем как число
-        "slTriggerBy": "LastPrice",
-        "tpTriggerBy": "LastPrice"
+        "slTriggerBy": "MarkPrice",  # ИСПРАВЛЕНО 2025-12-29: MarkPrice для защиты от манипуляций
+        "tpTriggerBy": "MarkPrice"   # ИСПРАВЛЕНО 2025-12-29: MarkPrice для защиты от манипуляций
     }
 
     try:
@@ -3765,7 +3785,7 @@ def run_trade(
         )
         if filled_qty > 0:
             # ИСПРАВЛЕНО 2025-12-26: используем price (существует в run_trade), а не undefined переменную
-            logging.info(f"✅ Вход выполнен: {symbol} {side} по цене {price}. SL: {sl_price}, TP: {tp_price}")
+            logging.info(f"Вход выполнен: {symbol} {side} по цене {price}. SL: {sl_price}, TP: {tp_price}")
 
 
     except Exception as exc:
@@ -3807,11 +3827,27 @@ def run_trade(
         )
         if success:
             logging.info(
-                "exit | %s | ✅ Trading stop set: SL=%.4f, TP=%.4f",
+                "exit | %s | Trading stop set: SL=%.4f, TP=%.4f",
                 symbol,
                 sl_price,
                 tp_price,
             )
+
+            # НОВОЕ 2025-12-29: Устанавливаем нативный trailing stop после SL/TP
+            try:
+                from native_trailing_stop import set_native_trailing_stop
+                trail_success, trail_err = set_native_trailing_stop(
+                    ADAPTER.x,
+                    symbol,
+                    category=category
+                )
+                if trail_success:
+                    logging.info(f"exit | {symbol} | Native trailing stop SET")
+                elif trail_err and "not modified" not in str(trail_err).lower():
+                    logging.debug(f"exit | {symbol} | Trailing stop: {trail_err}")
+            except Exception as trail_exc:
+                logging.debug(f"exit | {symbol} | Trailing stop failed: {trail_exc}")
+
         else:
             log_once("warning", f"Failed to set trading stop for {symbol}: {err}")
     except Exception as exc:
@@ -4113,6 +4149,8 @@ def attempt_direct_market_entry(
         mode_params_calc,
         "long" if direction == "long" else "short",
         tick_size=tick_size,
+        symbol=symbol,      # ADDED 2025-12-28: For leverage-aware SL
+        leverage=leverage,  # ADDED 2025-12-28: For safe margin calculation
     )
     min_tick = tick_size if tick_size and tick_size > 0 else 1e-6
     if direction == "short":
@@ -4192,13 +4230,13 @@ def attempt_direct_market_entry(
         return False
 
     # DEBUG: логируем значения (ПОСЛЕ проверки на None!)
-    logging.info(f"DEBUG | {symbol} | SL/TP calculation: price={last_price:.8f}, atr={atr_val:.8f}, sl_raw={sl_price_raw:.8f}, tp_raw={tp_price_raw:.8f}, sl_final={sl_price:.8f}, tp_final={tp_price:.8f}")
+    logging.info(f"DEBUG | {symbol} | SL/TP calculation: price={last_price:.8f}, atr={atr_val:.8f}, leverage={leverage}, sl_raw={sl_price_raw:.8f}, tp_raw={tp_price_raw:.8f}, sl_final={sl_price:.8f}, tp_final={tp_price:.8f}")
 
     bybit_params = {
         "stopLoss": float(sl_price),
         "takeProfit": float(tp_price),
-        "slTriggerBy": "LastPrice",
-        "tpTriggerBy": "LastPrice"
+        "slTriggerBy": "MarkPrice",  # ИСПРАВЛЕНО 2025-12-29: MarkPrice для защиты от манипуляций
+        "tpTriggerBy": "MarkPrice"   # ИСПРАВЛЕНО 2025-12-29: MarkPrice для защиты от манипуляций
     }
 
     try:
@@ -4213,7 +4251,7 @@ def attempt_direct_market_entry(
             params=bybit_params  # <--- Передаем стопы
         )
         if filled_qty > 0:
-            logging.info(f"✅ Вход выполнен: {symbol} {side} по цене {last_price}. SL: {sl_price}, TP: {tp_price}")
+            logging.info(f"Вход выполнен: {symbol} {side} по цене {last_price}. SL: {sl_price}, TP: {tp_price}")
 
     except Exception as exc:
         log_once(
@@ -4254,44 +4292,16 @@ def attempt_direct_market_entry(
     if not tp_pct_eff or not math.isfinite(tp_pct_eff):
         tp_pct_eff = TP_PCT
 
-    if pos_abs_after > 0:
-        time.sleep(2.0)
-        try:
-            sl_order_id, sl_err = place_conditional_exit(
-                ADAPTER.x,
-                symbol,
-                "buy" if want_long else "sell",
-                entry_price,
-                last_price,
-                sl_pct_eff,
-                category,
-                is_tp=False,
-            )
-            if sl_err:
-                log_once("warning", f"exit | {symbol} | SL setup failed: {sl_err}")
-            elif sl_order_id:
-                logging.info("exit | %s | Stop-loss placed (order_id=%s)", symbol, sl_order_id)
-        except Exception as exc:
-            log_once("warning", f"exit | {symbol} | SL exception: {exc}")
-            
+    # УДАЛЕНО 2025-12-28: Старая логика с conditional orders больше НЕ используется
+    # Теперь используем ТОЛЬКО set_position_tp_sl() через exit_guard
+    # (conditional orders конфликтуют с trading stops и создают дубликаты)
 
-        try:
-            tp_order_id, tp_err = place_conditional_exit(
-                ADAPTER.x,
-                symbol,
-                "buy" if want_long else "sell",
-                entry_price,
-                last_price,
-                tp_pct_eff,
-                category,
-                is_tp=True,
-            )
-            if tp_err:
-                log_once("warning", f"exit | {symbol} | TP setup failed: {tp_err}")
-            elif tp_order_id:
-                logging.info("exit | %s | Take-profit placed (order_id=%s)", symbol, tp_order_id)
-        except Exception as exc:
-            log_once("warning", f"exit | {symbol} | TP exception: {exc}")          
+    # if pos_abs_after > 0:
+    #     time.sleep(2.0)
+    #     try:
+    #         sl_order_id, sl_err = place_conditional_exit(...)
+    #     ...
+    # СТАРЫЙ КОД УДАЛЁН - используем exit_guard + set_position_tp_sl          
 
 
 
@@ -5044,6 +5054,7 @@ def ensure_exit_orders(
     # 1. Количество не изменилось
     # 2. SL/TP есть в контексте
     # 3. SL/TP есть на БИРЖЕ (новая проверка!)
+    # КРИТИЧНО: Если TP/SL отсутствуют на бирже - ОБЯЗАТЕЛЬНО переустанавливаем!
     if (
         last_q
         and abs(last_q - pos_qty) < 1e-12
@@ -5059,20 +5070,24 @@ def ensure_exit_orders(
         )
         return
 
-    # Логируем, если SL/TP отсутствуют в контексте ИЛИ на бирже
+    # КРИТИЧЕСКИ ВАЖНО: Если SL/TP отсутствуют на бирже - переустанавливаем их,
+    # даже если они есть в контексте (могли быть отменены внешне или по ошибке)
+    if not has_sl_on_exchange or not has_tp_on_exchange:
+        logging.warning(
+            "exit_guard | %s | SL/TP missing on exchange! (has_sl=%s, has_tp=%s), FORCING re-set",
+            symbol,
+            has_sl_on_exchange,
+            has_tp_on_exchange,
+        )
+        # НЕ ВЫХОДИМ - продолжаем установку TP/SL
+
+    # Логируем, если SL/TP отсутствуют в контексте
     if not has_sl_in_ctx or not has_tp_in_ctx:
         logging.info(
             "exit_guard | %s | missing SL/TP in context (has_sl=%s, has_tp=%s), attempting to set",
             symbol,
             has_sl_in_ctx,
             has_tp_in_ctx,
-        )
-    elif not has_sl_on_exchange or not has_tp_on_exchange:
-        logging.warning(
-            "exit_guard | %s | SL/TP missing on exchange! (has_sl=%s, has_tp=%s), re-setting",
-            symbol,
-            has_sl_on_exchange,
-            has_tp_on_exchange,
         )
     try:
         entry_price = float(ctx.get("entry_price") or 0.0)
@@ -5114,6 +5129,14 @@ def ensure_exit_orders(
         return default
 
     side_open = "buy" if side_norm == "long" else "sell"
+
+    # ИСПРАВЛЕНО 2025-12-28: Проверяем что позиция ВСЁ ЕЩЁ открыта перед установкой SL/TP
+    # (между первой проверкой и этим моментом позиция могла закрыться по TP/SL)
+    _, current_qty = logging_utils.has_open_position(exchange_obj, symbol, cat)
+    if current_qty <= 0:
+        logging.debug(f"exit_guard | {symbol} | Position closed between checks, skipping SL/TP")
+        _last_exit_qty.pop(symbol, None)
+        return
 
     # ИСПРАВЛЕНО 2025-12-26: используем set_position_tp_sl вместо place_conditional_exit
     # Это устанавливает SL/TP как "trading stop" привязанные к позиции, а не как отдельные ордера
@@ -5662,7 +5685,12 @@ def run_bot():
         for sym in active_symbols:
             # Убираем :USDT суффикс если есть
             clean_sym = sym.split(":")[0] if ":" in sym else sym
-            
+
+            # ИСПРАВЛЕНО 2025-12-29: Игнорируем TRX полностью
+            if "TRX" in clean_sym.upper():
+                logging.info(f"[run_bot] Skipped TRX symbol: {sym} (ignored by user request)")
+                continue
+
             if clean_sym not in seen:
                 normalized_symbols.append(clean_sym)
                 seen.add(clean_sym)
@@ -6124,6 +6152,29 @@ def run_bot():
                     "sl_mult": float(ctx.get("sl_mult") or 2.0),
                     "tp_mult": float(ctx.get("tp_mult") or 4.0),
                 }
+                # ADDED 2025-12-28: Extract leverage for safe SL calculation
+                pos_leverage = float(pos.get("leverage") or ctx.get("leverage") or LEVERAGE)
+
+                # ИСПРАВЛЕНО 2025-12-28: Для существующих позиций без контекста - рассчитываем ATR
+                # Это происходит когда позиция была открыта вне текущей сессии бота
+                logging.info(f"exit_guard | {symbol} | Initial atr_ctx={atr_ctx}, has_sl={ctx.get('sl_price')}, has_tp={ctx.get('tp_price')}")
+                if atr_ctx <= 0:
+                    try:
+                        df_5m = _cached_fetch_ohlcv("5m", limit=100)
+                        if df_5m is not None and not df_5m.empty and "atr_14" in df_5m.columns:
+                            atr_ctx = float(df_5m["atr_14"].iloc[-1])
+                            if atr_ctx > 0:
+                                ctx["atr"] = atr_ctx
+                                logging.info(
+                                    f"exit_guard | {symbol} | Calculated ATR for existing position: {atr_ctx:.2f}"
+                                )
+                            else:
+                                logging.warning(f"exit_guard | {symbol} | ATR calculation result is 0 or negative")
+                        else:
+                            logging.warning(f"exit_guard | {symbol} | No ATR data in dataframe")
+                    except Exception as e:
+                        logging.warning(f"exit_guard | {symbol} | Failed to calculate ATR: {e}")
+
                 sl_price_ctx = ctx.get("sl_price")
                 tp_price_ctx = ctx.get("tp_price")
                 price_for_calc = entry_price if entry_price > 0 else last_price
@@ -6136,6 +6187,8 @@ def run_bot():
                         mode_params_ctx,
                         "long" if side == "LONG" else "short",
                         tick_size=tick_size,
+                        symbol=symbol,          # ADDED 2025-12-28: For leverage-aware SL
+                        leverage=pos_leverage,  # ADDED 2025-12-28: For safe margin calculation
                     )
                     if sl_price_ctx is None:
                         sl_price_ctx = sl_new
@@ -6163,17 +6216,54 @@ def run_bot():
 
                 roi = 0.0
                 roi_commission = 0.0
+                # ИСПРАВЛЕНО 2025-12-30: Используем фиксированную комиссию для расчёта ROI
+                # Глобальная переменная commission может быть перезаписана в других местах!
+                TRADING_FEE = 0.0006  # 0.06% (вход+выход)
                 if entry_price > 0:
                     if side == "LONG":
                         roi = (last_price - entry_price) / entry_price
                     else:
                         roi = (entry_price - last_price) / entry_price
-                    roi_commission = roi - commission
+                    roi_commission = roi - TRADING_FEE
+
+                    # DEBUG: Логируем детали расчёта ROI
+                    logging.info(
+                        f"roi | {symbol} | DEBUG: side={side}, entry={entry_price:.2f}, "
+                        f"current={last_price:.2f}, roi={roi:.4f}, commission={TRADING_FEE:.4f}"
+                    )
                     logging.info(
                         f"roi | {symbol} | ROI with commission: {roi_commission:.2%}"
                     )
 
                 pnl_pct = roi_commission * 100.0
+
+                # [ANCHOR:MAX_DRAWDOWN_PROTECTION] - КРИТИЧЕСКАЯ ЗАЩИТА от огромных убытков
+                # Закрываем позицию если убыток превысил 20% (для leverage 10x это движение ~2%)
+                MAX_DRAWDOWN_PCT = -20.0  # -20% максимальный допустимый убыток
+                if pnl_pct < MAX_DRAWDOWN_PCT:
+                    logging.error(
+                        f"EMERGENCY | {symbol} | ROI={pnl_pct:.2f}% < {MAX_DRAWDOWN_PCT:.2f}% -> FORCE CLOSING POSITION"
+                    )
+                    try:
+                        cancel_all_child_orders(symbol)
+                        order = market_close(symbol)
+                        ctx = open_trade_ctx.get(symbol, {})
+                        ctx["exit_type_hint"] = "EMERGENCY_STOP"
+                        handled = log_exit_from_order(
+                            sym, order, commission, trade_log_path
+                        )
+                        if handled:
+                            _processed_order_ids.add(str(order.get("id") or ""))
+                            rebuild_reports_on_exit()
+                            try:
+                                save_risk_state(risk_state, limiter, cool, stats)
+                            except Exception as e:
+                                logging.exception("save_risk_state failed: %s", e)
+                        pair_state.pop(symbol, None)
+                        closed_this_cycle = True
+                        break
+                    except Exception as e:
+                        logging.exception(f"EMERGENCY | {symbol} | Failed to close position: {e}")
 
                 # [ANCHOR:CLOSE_ORDERING]
                 if ENABLE_CLOSE_ORDERING and roi_reached(pnl_pct, ROI_TARGET_PCT):
@@ -6224,9 +6314,13 @@ def run_bot():
                     )
 
                     # Не расширяем риск: обновляем только если стоп становится "жёстче"
+                    # ИСПРАВЛЕНО 2025-12-28: Проверяем что new_sl < last_price для LONG
                     if side == "LONG":
+                        # LONG: SL должен быть НИЖЕ текущей цены и ВЫШЕ (или равен) entry для breakeven
                         if (current_sl is None) or (
-                            float(new_sl) > float(current_sl) and float(new_sl) >= entry_price
+                            float(new_sl) > float(current_sl)
+                            and float(new_sl) >= entry_price
+                            and float(new_sl) < last_price  # CRITICAL: SL must be BELOW current price!
                         ):
                             update_stop_loss(symbol, float(new_sl))
                             state["breakeven_done"] = be_flag or breakeven_done
@@ -6237,8 +6331,11 @@ def run_bot():
                                 f"trailing_update be={state.get('breakeven_done', False)} new_sl={new_sl:@TICK}",
                             )
                     else:
+                        # SHORT: SL должен быть ВЫШЕ текущей цены и НИЖЕ (или равен) entry для breakeven
                         if (current_sl is None) or (
-                            float(new_sl) < float(current_sl) and float(new_sl) <= entry_price
+                            float(new_sl) < float(current_sl)
+                            and float(new_sl) <= entry_price
+                            and float(new_sl) > last_price  # CRITICAL: SL must be ABOVE current price!
                         ):
                             update_stop_loss(symbol, float(new_sl))
                             state["breakeven_done"] = be_flag or breakeven_done
@@ -6261,7 +6358,7 @@ def run_bot():
                     open_idx, current_bar_index, time_stop_bars
                 ):
                     logging.info(
-                        f"time_stop | {symbol} | Time stop hit → closing position"
+                        f"time_stop | {symbol} | Time stop hit -> closing position"
                     )
                     cancel_all_child_orders(symbol)
                     order = market_close(symbol)
@@ -6363,8 +6460,17 @@ def run_bot():
             "futures",
         }
         is_derivative_market = market_category in derivative_categories
+        # ИСПРАВЛЕНО 2025-12-29: Проверяем реальную категорию + fallback на linear для /USDT
         if market_category == "spot":
-            mode_lev = 1
+            # Если символ заканчивается на /USDT - это futures, не spot!
+            if sym.endswith("/USDT"):
+                logging.info(f"market | {sym} | Overriding spot->linear for /USDT symbol")
+                market_category = "linear"
+                is_derivative_market = True  # Обновляем флаг
+                # НЕ меняем mode_lev - используем из params_map!
+            else:
+                # Реально spot (например BTC/USD без margin)
+                mode_lev = 1
 
         # --- Prepare dataframes for trend confirmation ---
         trend_dfs: dict[str, pd.DataFrame] = {}
@@ -6547,7 +6653,7 @@ def run_bot():
         if pattern_dir and pattern_conf >= 0.7:
             if model_signal != pattern_dir:
                 logging.info(
-                    "signal | %s | Pattern override %s → %s (conf=%.2f)",
+                    "signal | %s | Pattern override %s -> %s (conf=%.2f)",
                     sym,
                     model_signal,
                     pattern_dir,
@@ -6566,7 +6672,7 @@ def run_bot():
         ):
             pattern_conflict = True
             logging.info(
-                "signal | %s | Aligning with pattern trend %s → %s", 
+                "signal | %s | Aligning with pattern trend %s -> %s", 
                 sym,
                 model_signal,
                 pattern_side.lower(),
@@ -6680,6 +6786,7 @@ def run_bot():
                                 available_margin,
                                 risk_factor=1.0,
                             )
+                            logging.info(f"DEBUG pattern | {symbol} | qty_target={qty_target:.6f}")
                             if qty_target <= 0:
                                 log_decision(symbol, "qty_insufficient")
                             else:
@@ -6688,6 +6795,7 @@ def run_bot():
                                 except Exception:
                                     leverage_val = int(LEVERAGE)
                                 leverage_val = max(leverage_val, 1)
+                                logging.info(f"DEBUG pattern | {symbol} | leverage={leverage_val}, current_price={current_price}")
                                 affordable_qty = _max_affordable_amount(
                                     exchange,
                                     sym,
@@ -6696,6 +6804,7 @@ def run_bot():
                                     current_price,
                                     MIN_NOTIONAL,
                                 )
+                                logging.info(f"DEBUG pattern | {symbol} | affordable_qty={affordable_qty:.6f}")
                                 if affordable_qty <= 0:
                                     log_decision(symbol, "insufficient_balance")
                                 else:
@@ -6740,6 +6849,8 @@ def run_bot():
                                                     pattern_mode_params,
                                                     "long" if model_signal == "long" else "short",
                                                     tick_size=tick_size,
+                                                    symbol=symbol,             # ADDED 2025-12-28: For leverage-aware SL
+                                                    leverage=leverage_val,     # ADDED 2025-12-28: For safe margin calculation
                                                 )
                                                 # ЗАЩИТА: проверяем на None перед преобразованием
                                                 try:
@@ -6761,8 +6872,8 @@ def run_bot():
                                                     bybit_params = {
                                                         "stopLoss": float(sl_price),
                                                         "takeProfit": float(tp_price),
-                                                        "slTriggerBy": "LastPrice",
-                                                        "tpTriggerBy": "LastPrice"
+                                                        "slTriggerBy": "MarkPrice",  # ИСПРАВЛЕНО 2025-12-29: MarkPrice для защиты от манипуляций
+                                                        "tpTriggerBy": "MarkPrice"   # ИСПРАВЛЕНО 2025-12-29: MarkPrice для защиты от манипуляций
                                                     }
 
                                                     try:
@@ -6776,7 +6887,7 @@ def run_bot():
                                                             params=bybit_params  # <--- Передаем стопы
                                                         )
                                                         if filled_qty > 0:
-                                                            logging.info(f"✅ Вход выполнен: {sym} {side} по цене {current_price}. SL: {sl_price}, TP: {tp_price}")
+                                                            logging.info(f"Вход выполнен: {sym} {side} по цене {current_price}. SL: {sl_price}, TP: {tp_price}")
 
 
                                                     except Exception as exc:
@@ -6790,90 +6901,91 @@ def run_bot():
 
                                                     if (filled_qty or 0.0) <= 0:
                                                         log_decision(symbol, "order_failed")
-                                                        return False
+                                                    else:
+                                                        # Успешный вход - отмечаем что паттерн-торговля выполнена
+                                                        pattern_trade_executed = True
+                                                        # entry guard (анти-дубль входа в одном 5-мин баре)
+                                                        _entry_guard[symbol] = {"bar": now_bar5, "side": side}
 
-                                                    # entry guard (анти-дубль входа в одном 5-мин баре)
-                                                    _entry_guard[symbol] = {"bar": now_bar5, "side": side}
-
-                                                # Ждём появления позиции
-                                                detected_qty = wait_position_after_entry(
-                                                    ADAPTER.x, sym, category=cat, timeout_sec=3.0
-                                                )
-
-                                                _pos_signed_after, pos_abs_after = has_open_position(exchange, sym, cat)
-                                                entry_price = get_position_entry_price(exchange, sym, cat) or current_price
-
-                                                # Получаем last price для триггеров
-                                                ticker = exchange.fetch_ticker(symbol, params={"category": cat})
-                                                last_price = float(
-                                                    ticker.get("last") or ticker.get("lastPrice") or current_price
-                                                )
-
-                                                want_long = (side == "buy")
-
-                                                # Рассчитываем эффективные проценты
-                                                try:
-                                                    sl_pct_eff = abs((sl_price / entry_price) - 1) if entry_price else SL_PCT
-                                                except Exception:
-                                                    sl_pct_eff = SL_PCT
-                                                if not sl_pct_eff or not math.isfinite(sl_pct_eff):
-                                                    sl_pct_eff = SL_PCT
-
-                                                try:
-                                                    tp_pct_eff = abs((tp_price / entry_price) - 1) if entry_price else TP_PCT
-                                                except Exception:
-                                                    tp_pct_eff = TP_PCT
-                                                if not tp_pct_eff or not math.isfinite(tp_pct_eff):
-                                                    tp_pct_eff = TP_PCT
-
-                                                # КРИТИЧНО: Устанавливаем SL как отдельный conditional order
-                                                if pos_abs_after > 0:
-                                                    time.sleep(1.0)  # Даём бирже обработать позицию
-
-                                                    try:
-                                                        sl_order_id, sl_err = place_conditional_exit(
-                                                            ADAPTER.x,
-                                                            sym,
-                                                            "buy" if want_long else "sell",
-                                                            entry_price,
-                                                            last_price,
-                                                            sl_pct_eff,
-                                                            cat,
-                                                            is_tp=False,
+                                                        # Ждём появления позиции
+                                                        detected_qty = wait_position_after_entry(
+                                                            ADAPTER.x, sym, category=cat, timeout_sec=3.0
                                                         )
-                                                        if sl_err:
-                                                            log_once("warning", f"exit | {symbol} | SL setup failed: {sl_err}")
-                                                        elif sl_order_id:
-                                                            logging.info(
-                                                                "exit | %s | Stop-loss placed (order_id=%s)",
-                                                                sym,
-                                                                sl_order_id,
-                                                            )
-                                                    except Exception as exc:
-                                                        log_once("warning", f"exit | {symbol} | SL exception: {exc}")
 
-                                                    # Устанавливаем TP как отдельный conditional order
-                                                    try:
-                                                        tp_order_id, tp_err = place_conditional_exit(
-                                                            ADAPTER.x,
-                                                            sym,
-                                                            "buy" if want_long else "sell",
-                                                            entry_price,
-                                                            last_price,
-                                                            tp_pct_eff,
-                                                            cat,
-                                                            is_tp=True,
+                                                        _pos_signed_after, pos_abs_after = has_open_position(exchange, sym, cat)
+                                                        entry_price = get_position_entry_price(exchange, sym, cat) or current_price
+
+                                                        # Получаем last price для триггеров
+                                                        ticker = exchange.fetch_ticker(symbol, params={"category": cat})
+                                                        last_price = float(
+                                                            ticker.get("last") or ticker.get("lastPrice") or current_price
                                                         )
-                                                        if tp_err:
-                                                            log_once("warning", f"exit | {symbol} | TP setup failed: {tp_err}")
-                                                        elif tp_order_id:
-                                                            logging.info(
-                                                                "exit | %s | Take-profit placed (order_id=%s)",
-                                                                sym,
-                                                                tp_order_id,
-                                                            )
-                                                    except Exception as exc:
-                                                        log_once("warning", f"exit | {symbol} | TP exception: {exc}")
+
+                                                        want_long = (side == "buy")
+
+                                                        # Рассчитываем эффективные проценты
+                                                        try:
+                                                            sl_pct_eff = abs((sl_price / entry_price) - 1) if entry_price else SL_PCT
+                                                        except Exception:
+                                                            sl_pct_eff = SL_PCT
+                                                        if not sl_pct_eff or not math.isfinite(sl_pct_eff):
+                                                            sl_pct_eff = SL_PCT
+
+                                                        try:
+                                                            tp_pct_eff = abs((tp_price / entry_price) - 1) if entry_price else TP_PCT
+                                                        except Exception:
+                                                            tp_pct_eff = TP_PCT
+                                                        if not tp_pct_eff or not math.isfinite(tp_pct_eff):
+                                                            tp_pct_eff = TP_PCT
+
+                                                        # КРИТИЧНО: Устанавливаем SL как отдельный conditional order
+                                                        if pos_abs_after > 0:
+                                                            time.sleep(1.0)  # Даём бирже обработать позицию
+
+                                                            try:
+                                                                sl_order_id, sl_err = place_conditional_exit(
+                                                                    ADAPTER.x,
+                                                                    sym,
+                                                                    "buy" if want_long else "sell",
+                                                                    entry_price,
+                                                                    last_price,
+                                                                    sl_pct_eff,
+                                                                    cat,
+                                                                    is_tp=False,
+                                                                )
+                                                                if sl_err:
+                                                                    log_once("warning", f"exit | {symbol} | SL setup failed: {sl_err}")
+                                                                elif sl_order_id:
+                                                                    logging.info(
+                                                                        "exit | %s | Stop-loss placed (order_id=%s)",
+                                                                        sym,
+                                                                        sl_order_id,
+                                                                    )
+                                                            except Exception as exc:
+                                                                log_once("warning", f"exit | {symbol} | SL exception: {exc}")
+
+                                                            # Устанавливаем TP как отдельный conditional order
+                                                            try:
+                                                                tp_order_id, tp_err = place_conditional_exit(
+                                                                    ADAPTER.x,
+                                                                    sym,
+                                                                    "buy" if want_long else "sell",
+                                                                    entry_price,
+                                                                    last_price,
+                                                                    tp_pct_eff,
+                                                                    cat,
+                                                                    is_tp=True,
+                                                                )
+                                                                if tp_err:
+                                                                    log_once("warning", f"exit | {symbol} | TP setup failed: {tp_err}")
+                                                                elif tp_order_id:
+                                                                    logging.info(
+                                                                        "exit | %s | Take-profit placed (order_id=%s)",
+                                                                        sym,
+                                                                        tp_order_id,
+                                                                    )
+                                                            except Exception as exc:
+                                                                log_once("warning", f"exit | {symbol} | TP exception: {exc}")
 
 
 
@@ -6945,8 +7057,16 @@ def run_bot():
                 logging.exception("confirm_trend failed safely: %s", e)
                 trend_ok = False
             if not (lower_ok and global_ok):
-                # Allow confident patterns with confirmed trend to override timeframe disagreements
-                if pconf > 0.65 and trend_ok:
+                # ИСПРАВЛЕНО 2025-12-29 (v2): Ослабляем фильтр timeframe ещё сильнее
+                # Было: pconf > 0.55 AND trend_ok
+                # Стало: pconf > 0.45 (убрали требование trend_ok - слишком строгое)
+                if pconf > 0.45:
+                    logging.info(f"signal | {symbol} | TF override: pconf={pconf:.2f} > 0.45")
+                    lower_ok = True
+                    global_ok = True
+                # Также разрешаем если confidence модели высокая
+                elif confidence >= 0.60:
+                    logging.info(f"signal | {symbol} | TF override: high model confidence {confidence:.2f}")
                     lower_ok = True
                     global_ok = True
                 else:
@@ -6977,10 +7097,13 @@ def run_bot():
         trend_ok = confirm_trend(trend_dfs, signal_to_use.upper()) if trend_dfs is not None else False
         if signal_to_use == "hold":
             reason = "hold_no_position" if no_position else "hold_position_exists"
-        # Fallback для низкого ADX при высокой уверенности модели
+        # ИСПРАВЛЕНО 2025-12-29 (v2): Ослабляем ADX фильтр
+        # Разрешаем если: model confidence >= 0.60 ИЛИ pattern confidence (pconf) > 0.45
         if adx_val < adj_adx:
-            if confidence >= 0.70:  # Очень высокая уверенность - разрешаем
-                logging.info(f"⚠️ {symbol} | ADX low ({adx_val:.1f}) but confidence high ({confidence:.2f})")
+            if confidence >= 0.60:
+                logging.info(f"WARNING: {symbol} | ADX low ({adx_val:.1f}) but model confidence OK ({confidence:.2f})")
+            elif pconf > 0.45:
+                logging.info(f"WARNING: {symbol} | ADX low ({adx_val:.1f}) but pattern confidence OK (pconf={pconf:.2f})")
             else:
                 _inc_event("trend_no_confirm")
                 log_decision(symbol, "trend_no_confirm")
@@ -7039,10 +7162,15 @@ def run_bot():
         if is_derivative_market:
             leverage_category = detect_market_category(exchange, sym)
             cat_normalized = str(leverage_category or "").lower()
-            
+
+            # ИСПРАВЛЕНО 2025-12-29: Override spot->linear для /USDT символов
+            # Bybit testnet часто определяет /USDT как "spot", хотя это futures
             if cat_normalized in ("", "swap"):
                 cat_normalized = "linear"
-            
+            elif cat_normalized == "spot" and sym.endswith("/USDT"):
+                logging.info(f"leverage | {sym} | Overriding spot->linear for /USDT symbol")
+                cat_normalized = "linear"
+
             if cat_normalized in ("linear", "inverse"):
                 try:
                     leverage_result = safe_set_leverage(exchange, sym, mode_lev)
@@ -7086,6 +7214,9 @@ def run_bot():
                 sym,
                 market_category or "unknown",
             )
+        # ИСПРАВЛЕНО 2025-12-29: Ослабляем RSI фильтр
+        # Убираем жесткий фильтр rsi_low/rsi_high (RSI <=30 / >=70)
+        # Оставляем только overbought/oversold с adjusted thresholds
         if not use_fallback:
             if signal_to_use == "long" and rsi_val > adj_rsi_overbought:
                 log_decision(symbol, "rsi_overbought")
@@ -7093,12 +7224,13 @@ def run_bot():
             if signal_to_use == "short" and rsi_val < adj_rsi_oversold:
                 log_decision(symbol, "rsi_oversold")
                 continue
-            if signal_to_use == "long" and rsi_val <= 30:
-                log_decision(symbol, "rsi_low")
-                continue
-            if signal_to_use == "short" and rsi_val >= 70:
-                log_decision(symbol, "rsi_high")
-                continue
+            # УДАЛЕНО: rsi_low и rsi_high фильтры - слишком строгие
+            # if signal_to_use == "long" and rsi_val <= 30:
+            #     log_decision(symbol, "rsi_low")
+            #     continue
+            # if signal_to_use == "short" and rsi_val >= 70:
+            #     log_decision(symbol, "rsi_high")
+            #     continue
 
         # [ANCHOR:PATTERN_TREND_APPLY]
         orig = signal_to_use
@@ -7143,15 +7275,27 @@ def run_bot():
             continue
 
         # [ANCHOR:TREND_SAFE_CALLER]
+        # ИСПРАВЛЕНО 2025-12-29 (v2): Ослаблен фильтр для высокого confidence
+        # Разрешаем если: model confidence >= 0.60 ИЛИ pattern confidence (pconf) > 0.45
         try:
             trend_ok = confirm_trend(trend_dfs, signal_to_use.upper())
         except Exception as e:
             logging.exception("confirm_trend failed safely: %s", e)
             trend_ok = False
         if not trend_ok:
-            _inc_event("trend_no_confirm")
-            log_decision(symbol, "trend_no_confirm")
-            continue
+            # Высокая уверенность модели ИЛИ pattern confidence позволяет игнорировать слабый тренд
+            if confidence >= 0.60:
+                logging.info(
+                    f"WARNING: {symbol} | Trend not confirmed but model confidence OK ({confidence:.2f})"
+                )
+            elif pconf > 0.45:
+                logging.info(
+                    f"WARNING: {symbol} | Trend not confirmed but pattern confidence OK (pconf={pconf:.2f})"
+                )
+            else:
+                _inc_event("trend_no_confirm")
+                log_decision(symbol, "trend_no_confirm")
+                continue
 
         # === TRAILING STOP + ДИНАМИЧЕСКИЙ SL/TP (NEW) ===
         entry_reason = "fallback_confirmed" if use_fallback else "model_confirmed"
@@ -7203,7 +7347,9 @@ def run_bot():
                 save_risk_state(risk_state, limiter, cool, stats)
             except Exception as e:
                 logging.exception("save_risk_state failed: %s", e)
-        if not best_entry_moment(
+        # ИСПРАВЛЕНО 2025-12-29: Ослабляем entry_timing для pattern confidence
+        # Если pconf > 0.45, разрешаем вход даже если timing не идеальный
+        timing_ok = best_entry_moment(
             sym,
             signal_to_use,
             source="fallback" if use_fallback else "model",
@@ -7211,8 +7357,11 @@ def run_bot():
             confidence=confidence,
             adx=adx_val,
             trend_ok=trend_ok,
-        ):
-            if use_fallback and ALLOW_FALLBACK_ENTRY:
+        )
+        if not timing_ok:
+            if pconf > 0.45:
+                logging.info(f"entry | {symbol} | timing override: pattern confidence OK (pconf={pconf:.2f})")
+            elif use_fallback and ALLOW_FALLBACK_ENTRY:
                 logging.info(
                     f"entry | {symbol} | fallback override - entering despite timing"
                 )
@@ -7427,7 +7576,16 @@ def run_bot():
             fallback_leverage = LEVERAGE if is_derivative_market else 1
             if is_derivative_market:
                 leverage_category = detect_market_category(exchange, symbol)
-                if str(leverage_category).lower() == "linear":
+                cat_fallback = str(leverage_category or "").lower()
+
+                # ИСПРАВЛЕНО 2025-12-29: Override spot->linear для /USDT символов (fallback path)
+                if cat_fallback in ("", "swap"):
+                    cat_fallback = "linear"
+                elif cat_fallback == "spot" and symbol.endswith("/USDT"):
+                    logging.info(f"leverage | {symbol} | Overriding spot->linear for /USDT symbol (fallback)")
+                    cat_fallback = "linear"
+
+                if cat_fallback == "linear":
                     leverage_success = safe_set_leverage(
                         exchange, symbol, fallback_leverage
                     )
@@ -7634,8 +7792,15 @@ def run_bot_loop():
             logging.error(f"retrain failed: {e}")
     last_analysis = time.time()
     analysis_interval = 60 * 60 * 3  # 3 hours
+
+    # ADDED 2025-12-28: Initialize Trailing Stop Manager
+    # Note: dry_run=False for production, set to True for testing
+    trailing_manager = TrailingStopManager(ADAPTER, dry_run=False)
+    last_trailing_update = time.time()
+    trailing_update_interval = 5 * 60  # 5 minutes
+
     try:
-        
+
         while True:
             ensure_model_loaded(ADAPTER, symbols)
             try:
@@ -7672,6 +7837,15 @@ def run_bot_loop():
                 except Exception as e:
                     logging.error(f"Trade analysis error: {e}", exc_info=True)
                 last_analysis = time.time()
+
+            # ADDED 2025-12-28: Update Trailing Stop every 5 minutes
+            if time.time() - last_trailing_update >= trailing_update_interval:
+                logging.info("[TRAILING] Updating trailing stops...")
+                try:
+                    trailing_manager.update_all_positions()
+                except Exception as e:
+                    logging.error(f"Trailing stop update error: {e}", exc_info=True)
+                last_trailing_update = time.time()
 
             logging.info("[LOOP] Sleeping 5 minutes...")
             time.sleep(60 * 5)

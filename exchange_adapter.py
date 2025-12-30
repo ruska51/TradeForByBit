@@ -1124,6 +1124,19 @@ class ExchangeAdapter:
                 no_data.pop(symbol, None)
                 return data
             except Exception as exc:  # pragma: no cover - logging only
+                # Handle network errors with special logging
+                if self._is_network_error(exc):
+                    logging.error(
+                        "adapter | NETWORK ERROR - Cannot reach exchange API for %s %s: %s",
+                        symbol, timeframe, exc
+                    )
+                    logging.error("adapter | Check your internet connection or try again later")
+                    data = self._fetch_ohlcv_from_csv(symbol, timeframe, limit)
+                    if data:
+                        logging.info("adapter | Using cached CSV data for %s %s", symbol, timeframe)
+                        return data
+                    return None
+
                 if self._is_empty_result_exception(exc):
                     log_once(
                         "warning",
@@ -1141,6 +1154,20 @@ class ExchangeAdapter:
                     request_symbol=ccxt_symbol,
                 )
         except Exception as exc:  # pragma: no cover - logging only
+            # Handle network errors with special logging
+            if self._is_network_error(exc):
+                logging.error(
+                    "adapter | NETWORK ERROR - Cannot reach exchange API for %s %s: %s",
+                    symbol, timeframe, exc
+                )
+                logging.error("adapter | Check your internet connection or try again later")
+                # Try CSV fallback without marking as no_data
+                data = self._fetch_ohlcv_from_csv(symbol, timeframe, limit)
+                if data:
+                    logging.info("adapter | Using cached CSV data for %s %s", symbol, timeframe)
+                    return data
+                return None
+
             if self._is_empty_result_exception(exc):
                 log_once(
                     "warning",
@@ -1155,6 +1182,18 @@ class ExchangeAdapter:
                         ccxt_symbol, timeframe, limit, request_params
                     )
                 except Exception as retry_exc:  # pragma: no cover - logging only
+                    # Handle network errors in retry
+                    if self._is_network_error(retry_exc):
+                        logging.error(
+                            "adapter | NETWORK ERROR on retry for %s %s: %s",
+                            symbol, timeframe, retry_exc
+                        )
+                        data = self._fetch_ohlcv_from_csv(symbol, timeframe, limit)
+                        if data:
+                            logging.info("adapter | Using cached CSV data for %s %s", symbol, timeframe)
+                            return data
+                        return None
+
                     if self._is_empty_result_exception(retry_exc):
                         log_once(
                             "warning",
@@ -1365,10 +1404,35 @@ class ExchangeAdapter:
         )
 
     @staticmethod
+    def _is_network_error(exc: Exception) -> bool:
+        """Check if exception is a network connectivity issue."""
+        msg = str(exc).lower()
+        error_type = type(exc).__name__.lower()
+
+        # Check for common network error patterns
+        network_patterns = [
+            'networkerror',
+            'connectionerror',
+            'getaddrinfo failed',
+            'failed to resolve',
+            'name resolution',
+            'connection refused',
+            'connection reset',
+            'timed out',
+            'timeout',
+            'dns',
+        ]
+
+        return any(pattern in msg or pattern in error_type for pattern in network_patterns)
+
+    @staticmethod
     def _is_empty_result_exception(exc: Exception) -> bool:
         msg = str(exc).lower()
         if "empty result" in msg:
             return True
+        # Don't treat network errors as empty results
+        if ExchangeAdapter._is_network_error(exc):
+            return False
         if "unknown" in msg and "status" in msg:
             return True
         if "unknown status" in msg:
@@ -1418,6 +1482,25 @@ class ExchangeAdapter:
     ) -> list[list] | None:
         url = getattr(self.x, "last_request_url", "unknown")
         status = getattr(self.x, "last_http_status_code", "unknown")
+
+        # Check if this is a network connectivity error
+        if self._is_network_error(exc):
+            logging.error(
+                "adapter | NETWORK ERROR - Cannot reach exchange! url=%s params=%s error=%s",
+                url,
+                params | ({"request_params": request_params} if request_params else {}),
+                exc,
+            )
+            logging.error(
+                "adapter | Please check your internet connection or firewall settings"
+            )
+            # Don't mark symbol as no_data for network errors - it's not a data issue
+            data = self._fetch_ohlcv_from_csv(symbol, timeframe, limit)
+            if data:
+                logging.info("adapter | Using cached CSV data for %s %s", symbol, timeframe)
+                return data
+            return None
+
         logging.warning(
             "adapter | fetch_ohlcv failed url=%s params=%s status=%s error=%s",
             url,
@@ -1741,12 +1824,16 @@ class ExchangeAdapter:
         return (0, [])
 
     # ------------------------------------------------------------------
-    def cancel_open_orders(self, symbol: str | None = None) -> tuple[int, list]:
+    def cancel_open_orders(self, symbol: str | None = None, exclude_sl_tp: bool = True) -> tuple[int, list]:
 
-        """Cancel open orders and return ``(count, ids)``."""
+        """Cancel open orders and return ``(count, ids)``.
+
+        Args:
+            symbol: Symbol to cancel orders for
+            exclude_sl_tp: If True, skip cancelling conditional SL/TP orders (default: True)
+        """
         if symbol and 'bybit' in self.x.id.lower():
             symbol = normalize_symbol_for_exchange(self.x, symbol, _markets_cache)
-        count, ids = self.fetch_open_orders(symbol=symbol)
 
         cancelled_ids: list = []
         try:
@@ -1758,44 +1845,90 @@ class ExchangeAdapter:
                 if is_bybit:
                     symbol = normalize_symbol_for_exchange(self.x, symbol, _markets_cache)
 
+            # Получаем полную информацию об ордерах вместо только ID
+            params = self._default_params(symbol=symbol)
+
+            def _call_fetch(ex, sym, params):
+                if not ex or not hasattr(ex, "fetch_open_orders"):
+                    return []
+                if params:
+                    attempts = []
+                    if sym is not None:
+                        attempts = [
+                            lambda: ex.fetch_open_orders(sym, None, None, params),
+                            lambda: ex.fetch_open_orders(sym, None, params),
+                            lambda: ex.fetch_open_orders(sym, params),
+                        ]
+                    else:
+                        attempts = [
+                            lambda: ex.fetch_open_orders(None, None, None, params),
+                            lambda: ex.fetch_open_orders(None, None, params),
+                            lambda: ex.fetch_open_orders(None, params),
+                            lambda: ex.fetch_open_orders(params),
+                        ]
+                    for attempt in attempts:
+                        try:
+                            result = attempt()
+                            if result is not None:
+                                return result
+                        except TypeError:
+                            continue
+                if sym is not None:
+                    return ex.fetch_open_orders(sym)
+                return ex.fetch_open_orders()
 
             try:
-                count, ids = self.fetch_open_orders(symbol)
+                normalized_symbol = self._ccxt_symbol(symbol) if symbol else None
+                orders = _call_fetch(self.x, normalized_symbol, params) or []
             except Exception as exc:
-                # логируем исключение, но возвращаем нули, чтобы не было unpack error
-                self.logger.warning(f"cancel_open_orders failed to fetch open orders: {exc}")
+                logging.warning(f"cancel_open_orders failed to fetch open orders: {exc}")
                 return 0, []
 
-            if count == 0:
+            if len(orders) == 0:
                 return 0, []
 
-            params = self._default_params(symbol=symbol)
-            if hasattr(self.x, "cancel_all_orders"):
-                try:
-                    if params:
-                        if symbol:
-                            self.x.cancel_all_orders(symbol, params)
-                        else:
-                            self.x.cancel_all_orders(params)
-                    else:
-                        self.x.cancel_all_orders(symbol) if symbol else self.x.cancel_all_orders()
-                except TypeError:
-                    try:
-                        self.x.cancel_all_orders(symbol) if symbol else self.x.cancel_all_orders()
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-                cancelled_ids = ids
-                return (len(cancelled_ids), cancelled_ids)
+            # Фильтруем ордера: исключаем SL/TP если exclude_sl_tp=True
+            orders_to_cancel = []
+            for order in orders:
+                if not isinstance(order, dict):
+                    continue
 
+                order_type = order.get('type', '').upper()
+                order_info = order.get('info', {})
+                order_kind = order_info.get('orderType', '').upper() if isinstance(order_info, dict) else ''
+
+                # Проверяем, является ли это условным SL/TP ордером
+                is_sl_tp = (
+                    'STOP' in order_type or
+                    'TAKE_PROFIT' in order_type or
+                    'STOP' in order_kind or
+                    'TAKE_PROFIT' in order_kind
+                )
+
+                if exclude_sl_tp and is_sl_tp:
+                    # Пропускаем SL/TP ордера
+                    order_id = order.get('id') or order.get('orderId')
+                    logging.debug(f"cancel_open_orders | Skipping SL/TP order {order_id} (type={order_type})")
+                    continue
+
+                orders_to_cancel.append(order)
+
+            # Отменяем только отфильтрованные ордера
             cancelled_ids = []
-            for oid in ids:
+            for order in orders_to_cancel:
                 try:
-                    self.x.cancel_order(oid, symbol)
-                    cancelled_ids.append(oid)
+                    order_id = order.get('id') or order.get('orderId')
+                    if order_id:
+                        self.x.cancel_order(order_id, symbol)
+                        cancelled_ids.append(order_id)
                 except Exception as exc:
-                    self.logger.warning(f"cancel_open_orders failed to cancel {oid}: {exc}")
+                    # ИСПРАВЛЕНО 2025-12-28: Не логируем как WARNING если ордер уже не существует
+                    error_str = str(exc)
+                    if "170213" in error_str or "does not exist" in error_str.lower():
+                        logging.debug(f"cancel_open_orders: order {order_id} already cancelled or filled")
+                    else:
+                        logging.warning(f"cancel_open_orders failed to cancel {order_id}: {exc}")
+
             return len(cancelled_ids), cancelled_ids
 
         except Exception as exc:  # pragma: no cover - logging only

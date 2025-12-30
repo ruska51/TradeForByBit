@@ -216,8 +216,25 @@ def calc_sl_tp(
     side: str,
     *,
     tick_size: float | None = None,
+    symbol: str | None = None,
+    leverage: float | None = None,
 ) -> tuple[float, float, float]:
-    """Return take-profit, stop-loss and stop percentage based on ATR."""
+    """Return take-profit, stop-loss and stop percentage based on ATR and leverage.
+
+    UPDATED 2025-12-28: Now uses leverage-aware safe SL calculation to prevent liquidation.
+
+    Args:
+        price: Entry price
+        atr_val: ATR value for volatility-based sizing
+        mode_params: Dict with sl_mult and tp_mult
+        side: 'long' or 'short'
+        tick_size: Minimum price increment (optional)
+        symbol: Trading pair symbol (e.g., 'BTC/USDT') - REQUIRED for safe SL
+        leverage: Position leverage (e.g., 10.0) - REQUIRED for safe SL
+
+    Returns:
+        Tuple of (tp_price, sl_price, sl_pct)
+    """
 
     if price <= 0:
         return price, price, 0.0
@@ -234,8 +251,82 @@ def calc_sl_tp(
 
     atr_pct = atr_val / price if price else 0.0
 
-    sl_pct = max(sl_mult * atr_pct, 0.005)
+    # UPDATED 2025-12-28: Combine ATR-based and leverage-aware SL calculation
+    # If symbol and leverage are provided, use safe SL calculation
+    # Otherwise, fall back to old ATR-based calculation for backward compatibility
+
+    if symbol and leverage and leverage > 0:
+        try:
+            from safe_stop_loss import calculate_safe_sl, validate_sl_safety, log_safe_sl_info
+
+            # Calculate safe SL based on leverage
+            safe_sl_price, safe_sl_pct, margin_loss = calculate_safe_sl(
+                symbol=symbol,
+                entry_price=price,
+                leverage=leverage,
+                side=side
+            )
+
+            # Also calculate ATR-based SL with mode's sl_mult
+            atr_sl_pct = max(sl_mult * atr_pct, 0.005)
+
+            # ИСПРАВЛЕНО 2025-12-29 (v2): ПРАВИЛЬНАЯ логика для leverage
+            # При LEVERAGE (>1): берем МИНИМУМ чтобы не рисковать ликвидацией
+            #   - safe_sl = 2.5% (защита от ликвидации при 10x)
+            #   - atr_sl = 7.5% (ATR-based)
+            #   - Результат: 2.5% (минимум) - защита от ликвидации важнее!
+            # При SPOT (leverage=1): берем МАКСИМУМ чтобы не выбить на шуме
+            #   - safe_sl = 25% (нет риска ликвидации)
+            #   - atr_sl = 7.5%
+            #   - Результат: 25% (максимум) - можно позволить широкий стоп
+            if leverage and leverage > 1:
+                sl_pct = min(safe_sl_pct, atr_sl_pct)  # Leverage: минимум = защита от ликвидации
+            else:
+                sl_pct = max(safe_sl_pct, atr_sl_pct)  # Spot: максимум = защита от шума
+
+            # Логируем результат
+            if safe_sl_pct != atr_sl_pct:
+                logging.info(
+                    f"safe_sl | {symbol} | Leverage-aware SL: {sl_pct:.2%} "
+                    f"(ATR would be: {atr_sl_pct:.2%}, leverage: {leverage:.0f}x, margin_loss: {margin_loss:.1%})"
+                )
+            else:
+                logging.debug(
+                    f"safe_sl | {symbol} | Safe SL matches ATR: {sl_pct:.2%}"
+                )
+
+        except Exception as e:
+            # If safe_stop_loss module fails, fall back to ATR-based calculation
+            logging.warning(f"safe_sl | {symbol if symbol else 'unknown'} | Failed to calculate safe SL: {e}, using ATR-based")
+            sl_pct = max(sl_mult * atr_pct, 0.005)
+    else:
+        # Backward compatibility: use ATR-based SL if leverage/symbol not provided
+        sl_pct = max(sl_mult * atr_pct, 0.005)
+        if symbol or leverage:
+            logging.debug(
+                f"safe_sl | {symbol if symbol else 'unknown'} | Missing leverage/symbol "
+                f"(symbol={symbol}, leverage={leverage}), using ATR-based SL"
+            )
+
     tp_pct = max(tp_mult * atr_pct, 0.01)
+
+    # DEBUG 2025-12-29: log all values before TP limiting
+    logging.info(f"DEBUG calc_sl_tp | {symbol if symbol else 'unknown'} | BEFORE TP limit: leverage={leverage}, tp_pct={tp_pct:.4%}, sl_pct={sl_pct:.4%}, tp_mult={tp_mult:.2f}, atr_pct={atr_pct:.4%}")
+
+    # ИСПРАВЛЕНО 2025-12-30: Оптимизируем TP для лучшего risk/reward
+    # При узком SL=1.0-1.2% нужен адекватный TP для прибыльности
+    # Множитель 2.5x дает хорошее соотношение risk/reward
+    if leverage and leverage > 1:
+        # Для leverage позиций максимальный TP = 2.5x от SL
+        # Например: SL=1.2%, TP max=3.0% (оптимальное соотношение 2.5:1)
+        max_tp_for_leverage = sl_pct * 2.5
+        if tp_pct > max_tp_for_leverage:
+            logging.info(
+                f"safe_tp | {symbol if symbol else 'unknown'} | TP limited from {tp_pct:.2%} to {max_tp_for_leverage:.2%} (leverage={leverage:.0f}x)"
+            )
+            tp_pct = max_tp_for_leverage
+    else:
+        logging.info(f"DEBUG calc_sl_tp | {symbol if symbol else 'unknown'} | TP limiting SKIPPED: leverage={leverage} (not > 1)")
 
     side_lower = str(side).lower()
     if side_lower == "short" and tp_pct >= 1.0:

@@ -1,57 +1,78 @@
-#!/usr/bin/env python3
-"""Закрыть все позиции для тестирования."""
+"""
+Закрытие всех открытых позиций на Bybit testnet.
+"""
 
-import sys
-sys.path.insert(0, 'C:/Users/fishf/Documents/GitHub/TradeForByBit')
-
-from credentials import API_KEY, API_SECRET
 import ccxt
+import time
+import os
+
+API_KEY = os.getenv("BYBIT_API_KEY")
+API_SECRET = os.getenv("BYBIT_API_SECRET")
+
+if not API_KEY or not API_SECRET:
+    print("ERROR: BYBIT_API_KEY or BYBIT_API_SECRET not set!")
+    print("Please set environment variables first.")
+    exit(1)
 
 exchange = ccxt.bybit({
     'apiKey': API_KEY,
     'secret': API_SECRET,
-    'options': {'defaultType': 'swap'},
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'swap',  # futures
+        'sandboxMode': True,
+    }
 })
 
 exchange.set_sandbox_mode(True)
 
-print("="*80)
-print("ЗАКРЫТИЕ ВСЕХ ПОЗИЦИЙ")
-print("="*80)
+def close_all_positions():
+    print("=== CLOSING ALL POSITIONS ===\n")
 
-# Get all positions
-positions = exchange.fetch_positions(params={"category": "linear"})
+    try:
+        positions = exchange.fetch_positions()
+        print(f"Total positions: {len(positions)}")
 
-for pos in positions:
-    if pos.get('contracts', 0) > 0 or pos.get('contractSize', 0) > 0:
-        symbol = pos.get('symbol')
-        side = pos.get('side')
-        size = pos.get('contracts')
+        open_positions = [p for p in positions if abs(float(p.get('contracts', 0))) > 0]
+        print(f"Open positions: {len(open_positions)}\n")
 
-        print(f"\nЗакрываю {symbol}: side={side}, size={size}")
+        if not open_positions:
+            print("✅ No open positions")
+            return
 
-        try:
-            # Close position by placing opposite market order
-            close_side = 'sell' if side == 'long' else 'buy'
+        for i, pos in enumerate(open_positions, 1):
+            symbol = pos['symbol']
+            qty = float(pos['contracts'])
+            side = pos['side']
+            entry = pos.get('entryPrice', 0)
+            pnl = pos.get('unrealizedPnl', 0)
 
-            order = exchange.create_order(
-                symbol,
-                'market',
-                close_side,
-                size,
-                None,
-                {
-                    'category': 'linear',
-                    'positionIdx': 0,  # ONE-WAY mode
-                    'reduceOnly': True,
-                }
-            )
+            print(f"[{i}/{len(open_positions)}] {symbol}: {side} {qty} @ {entry}, P&L: {pnl}")
 
-            print(f"  [OK] Закрыто! Order ID: {order.get('id')}")
+            try:
+                close_side = 'sell' if qty > 0 else 'buy'
+                close_qty = abs(qty)
 
-        except Exception as e:
-            print(f"  [ERROR] {e}")
+                order = exchange.create_order(
+                    symbol=symbol,
+                    type='market',
+                    side=close_side,
+                    amount=close_qty,
+                    params={'category': 'linear', 'reduceOnly': True}
+                )
 
-print("\n" + "="*80)
-print("Готово! Все позиции закрыты.")
-print("="*80)
+                print(f"  ✅ Closed!\n")
+                time.sleep(1)
+
+            except Exception as e:
+                print(f"  ❌ Error: {e}\n")
+
+        print("=== DONE ===")
+
+    except Exception as e:
+        print(f"FATAL: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    close_all_positions()

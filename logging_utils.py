@@ -3408,11 +3408,12 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
         upper_type = str(order_type or "").upper()
         is_exit_order = any(tok in upper_type for tok in ("STOP", "TAKE_PROFIT"))
 
-        # Убираем TP/SL параметры из ENTRY ордеров - они должны ставиться отдельными conditional orders
+        # ИСПРАВЛЕНО 2025-12-29: НЕ удаляем TP/SL параметры!
+        # Проблема: после удаления TP/SL пересчитываются заново используя глобальные TP_PCT/SL_PCT
+        # вместо результатов calc_sl_tp с leverage-aware логикой!
+        # Оставляем stopLoss/takeProfit которые пришли из bybit_params
         if not is_exit_order:
-            # Для entry ордеров НИКОГДА не включаем TP/SL параметры
-            params_dict.pop("stopLoss", None)
-            params_dict.pop("takeProfit", None)
+            # Удаляем только служебные параметры, но оставляем stopLoss/takeProfit
             params_dict.pop("slOrderType", None)
             params_dict.pop("tpOrderType", None)
             params_dict.pop("tpSlMode", None)
@@ -3614,7 +3615,7 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                     _order_status[status_key].append(msg)
                 return order_id, None
             else:
-                msg = f"⚠️ Order {status}: {filled:g}/{original:g} filled"
+                msg = f"WARNING: Order {status}: {filled:g}/{original:g} filled"
                 if msg not in _order_status[status_key]:
                     _order_status[status_key].append(msg)
                 return order_id, None
@@ -3650,13 +3651,13 @@ def safe_create_order(exchange, symbol: str, order_type: str, side: str,
                 return None, "insufficient_balance"
             specific = None
             if "-2019" in err_str and "Margin is insufficient" in err_str:
-                specific = "❌ Недостаточно маржи, позиция не может быть открыта."
+                specific = "ERROR: Недостаточно маржи, позиция не может быть открыта."
             elif "-2027" in err_str:
-                specific = "❌ Превышена максимальная позиция при текущем плече."
+                specific = "ERROR: Превышена максимальная позиция при текущем плече."
             elif "-4005" in err_str:
-                specific = "❌ Объем ордера превышает допустимый максимум."
+                specific = "ERROR: Объем ордера превышает допустимый максимум."
             elif "-4164" in err_str:
-                specific = "❌ Минимальный объем ордера 10 USDT."
+                specific = "ERROR: Минимальный объем ордера 10 USDT."
             msg = f"Order failed: {specific or err_str}"
             if msg not in _order_status[status_key]:
                 _order_status[status_key].append(msg)
@@ -3800,7 +3801,8 @@ def place_conditional_exit(
     if amount_val <= 0:
         return None, "exit skipped: qty too small"
 
-    # Удаляем старые conditional orders
+    # КРИТИЧНО: Удаляем старые conditional orders ДО создания нового
+    # Это предотвращает race condition когда на бирже временно существует 3+ ордера
     try:
         stops = exchange.fetch_open_orders(norm_symbol, params={"category": cat, "orderFilter": "StopOrder"})
     except Exception:
@@ -3837,20 +3839,49 @@ def place_conditional_exit(
                 break
         stop_orders.append((stop, ts_val, str(order_id)))
 
-    if len(stop_orders) > 2:
+    # ИСПРАВЛЕНО 2025-12-29: Отменяем лишние ордера СРАЗУ, а не после создания нового
+    # Теперь отменяем если больше 1 ордера (оставляем только самый свежий)
+    # Это предотвращает появление 3+ ордеров одновременно
+    if len(stop_orders) > 1:
         stop_orders.sort(key=lambda item: item[1], reverse=True)
-        for _stop, _ts, order_id in stop_orders[2:]:
+        # Отменяем ВСЕ существующие ордера, кроме самого свежего
+        # Новый ордер будет создан ниже
+        for _stop, _ts, order_id in stop_orders[1:]:
             try:
                 exchange.cancel_order(order_id, norm_symbol, {"category": cat})
-                logging.info(f"exit | {symbol} | cancelled old order {order_id}")
-            except Exception:
+                logging.info(f"exit | {symbol} | cancelled old order {order_id} (timestamp={_ts})")
+            except Exception as e:
+                logging.warning(f"exit | {symbol} | failed to cancel order {order_id}: {e}")
                 continue
+
+        # КРИТИЧНО: Добавляем небольшую задержку после отмены ордеров
+        # чтобы биржа успела обработать запрос перед созданием нового
+        import time
+        time.sleep(0.1)
+    elif len(stop_orders) == 1:
+        # Если уже есть 1 ордер, проверяем нужно ли его обновлять
+        existing_stop = stop_orders[0][0]
+        existing_trigger = existing_stop.get("triggerPrice") or existing_stop.get("stopPrice")
+
+        if existing_trigger:
+            try:
+                existing_trigger_val = float(existing_trigger)
+                # Если разница меньше 0.1%, не создаём новый ордер
+                diff_pct = abs(existing_trigger_val - trig_val) / existing_trigger_val * 100 if existing_trigger_val != 0 else 100
+                if diff_pct < 0.1:
+                    logging.info(
+                        f"exit | {symbol} | {'TP' if is_tp else 'SL'} order already exists at {existing_trigger_val:.2f}, "
+                        f"new trigger {trig_val:.2f} is too close (diff={diff_pct:.2f}%), skipping"
+                    )
+                    return existing_stop.get("id") or existing_stop.get("orderId"), None
+            except (ValueError, TypeError):
+                pass
 
     # КРИТИЧНО: создаем conditional order с правильными параметрами для hedge mode
     params = {
         "category": cat,
         "triggerPrice": float(trig_val),
-        "triggerBy": "LastPrice",
+        "triggerBy": "MarkPrice",  # ИСПРАВЛЕНО 2025-12-29: MarkPrice вместо LastPrice для защиты от манипуляций
         "reduceOnly": True,
         "closeOnTrigger": True,
     }
@@ -3909,6 +3940,8 @@ def set_position_tp_sl(
     sl_price: float | None = None,
     category: str = "linear",
     side_open: str | None = None,
+    trailing_stop: float | None = None,
+    active_price: float | None = None,
 ) -> tuple[bool, str | None]:
     """
     Устанавливает SL/TP на СУЩЕСТВУЮЩУЮ позицию через set_trading_stop API.
@@ -3920,6 +3953,8 @@ def set_position_tp_sl(
         sl_price: Цена stop-loss (опционально)
         category: Категория рынка ("linear", "inverse", "spot")
         side_open: Направление открытой позиции ("buy"/"long" или "sell"/"short")
+        trailing_stop: Дистанция trailing stop в долларах (опционально)
+        active_price: Цена активации trailing stop (опционально)
 
     Returns:
         Tuple[bool, str | None]: (success, error_message)
@@ -4002,17 +4037,115 @@ def set_position_tp_sl(
     tp_final = None
     sl_final = None
 
+    # КРИТИЧНО 2025-12-29: Если tp_price=None передан явно (например, от TrailingStop),
+    # сохраняем текущий TP с биржи, чтобы не перезаписать его
     if tp_price is not None:
         try:
             tp_final = float(exchange.price_to_precision(norm_symbol, tp_price))
         except Exception:
             tp_final = float(tp_price)
+    elif current_tp is not None:
+        # tp_price=None, но на бирже есть TP - сохраняем его
+        tp_final = current_tp
+        logging.debug(f"set_position_tp_sl | {symbol} | Preserving existing TP={current_tp} (tp_price=None)")
 
     if sl_price is not None:
         try:
             sl_final = float(exchange.price_to_precision(norm_symbol, sl_price))
         except Exception:
             sl_final = float(sl_price)
+    elif current_sl is not None:
+        # sl_price=None, но на бирже есть SL - сохраняем его
+        sl_final = current_sl
+        logging.debug(f"set_position_tp_sl | {symbol} | Preserving existing SL={current_sl} (sl_price=None)")
+
+    # КРИТИЧЕСКАЯ ВАЛИДАЦИЯ 2025-12-29: Проверяем что SL на правильной стороне от текущей цены
+    # Если цена успела измениться после входа, SL может оказаться на неправильной стороне
+    if sl_final is not None and qty_signed != 0:
+        try:
+            # Получаем текущую рыночную цену
+            current_mark_price = None
+            for pos in (positions if 'positions' in locals() else []):
+                if isinstance(pos, dict):
+                    size = float(pos.get("contracts", 0) or pos.get("size", 0))
+                    if size > 0:
+                        current_mark_price = float(pos.get("markPrice", 0))
+                        break
+
+            if current_mark_price and current_mark_price > 0:
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ 2025-12-30: Определяем направление позиции максимально надежно
+                # Используем ВСЕ доступные источники информации:
+                # 1. side_open (если передан явно)
+                # 2. position.side из fetch_positions (Buy/Sell)
+                # 3. qty_signed (> 0 = LONG, < 0 = SHORT)
+                is_long = None
+
+                # Приоритет 1: side_open (самый надежный, передается явно)
+                if side_open:
+                    is_long = side_open.lower() in ("buy", "long")
+                    logging.debug(f"set_position_tp_sl | {symbol} | Direction from side_open: {'LONG' if is_long else 'SHORT'}")
+
+                # Приоритет 2: position.side из API (Buy/Sell)
+                if is_long is None and 'positions' in locals():
+                    for pos in positions:
+                        if isinstance(pos, dict):
+                            size = float(pos.get("contracts", 0) or pos.get("size", 0))
+                            if size > 0:
+                                pos_side = str(pos.get("side", "")).upper()
+                                if pos_side in ("BUY", "LONG"):
+                                    is_long = True
+                                elif pos_side in ("SELL", "SHORT"):
+                                    is_long = False
+                                logging.debug(f"set_position_tp_sl | {symbol} | Direction from position.side: {pos_side} -> {'LONG' if is_long else 'SHORT'}")
+                                break
+
+                # Приоритет 3: qty_signed (fallback)
+                if is_long is None:
+                    is_long = qty_signed > 0
+                    logging.debug(f"set_position_tp_sl | {symbol} | Direction from qty_signed: {qty_signed} -> {'LONG' if is_long else 'SHORT'}")
+
+                if is_long:
+                    # LONG: SL должен быть НИЖЕ текущей цены, TP должен быть ВЫШЕ
+                    if sl_final >= current_mark_price:
+                        logging.warning(
+                            f"set_position_tp_sl | {symbol} | SL validation failed for LONG: "
+                            f"sl={sl_final:.2f} >= current={current_mark_price:.2f}. "
+                            f"Adjusting SL to {current_mark_price * 0.999:.2f}"
+                        )
+                        # Устанавливаем SL на 0.1% ниже текущей цены
+                        sl_final = float(exchange.price_to_precision(norm_symbol, current_mark_price * 0.999))
+
+                    # НОВОЕ 2025-12-30: Валидация TP для LONG
+                    if tp_final is not None and tp_final <= current_mark_price:
+                        logging.warning(
+                            f"set_position_tp_sl | {symbol} | TP validation failed for LONG: "
+                            f"tp={tp_final:.2f} <= current={current_mark_price:.2f}. "
+                            f"Adjusting TP to {current_mark_price * 1.001:.2f}"
+                        )
+                        # TP должен быть ВЫШЕ текущей цены для LONG
+                        tp_final = float(exchange.price_to_precision(norm_symbol, current_mark_price * 1.001))
+                else:
+                    # SHORT: SL должен быть ВЫШЕ текущей цены, TP должен быть НИЖЕ
+                    if sl_final <= current_mark_price:
+                        logging.warning(
+                            f"set_position_tp_sl | {symbol} | SL validation failed for SHORT: "
+                            f"sl={sl_final:.2f} <= current={current_mark_price:.2f}. "
+                            f"Adjusting SL to {current_mark_price * 1.001:.2f}"
+                        )
+                        # Устанавливаем SL на 0.1% выше текущей цены
+                        sl_final = float(exchange.price_to_precision(norm_symbol, current_mark_price * 1.001))
+
+                    # НОВОЕ 2025-12-30: Валидация TP для SHORT
+                    if tp_final is not None and tp_final >= current_mark_price:
+                        logging.warning(
+                            f"set_position_tp_sl | {symbol} | TP validation failed for SHORT: "
+                            f"tp={tp_final:.2f} >= current={current_mark_price:.2f}. "
+                            f"Adjusting TP to {current_mark_price * 0.999:.2f}"
+                        )
+                        # TP должен быть НИЖЕ текущей цены для SHORT
+                        tp_final = float(exchange.price_to_precision(norm_symbol, current_mark_price * 0.999))
+        except Exception as e:
+            logging.debug(f"set_position_tp_sl | {symbol} | SL validation check failed: {e}")
 
     # Проверяем, нужно ли обновлять (сравниваем с допуском 0.01%)
     tp_needs_update = False
@@ -4048,6 +4181,29 @@ def set_position_tp_sl(
         "tpSlMode": "Full",  # Full = весь размер позиции
     }
 
+    # НОВОЕ 2025-12-29: Добавляем параметры trailing stop если заданы
+    if trailing_stop is not None:
+        try:
+            trailing_stop_str = str(exchange.price_to_precision(norm_symbol, trailing_stop))
+            params["trailingStop"] = trailing_stop_str
+            logging.debug(f"set_position_tp_sl | {symbol} | Adding trailingStop={trailing_stop_str}")
+        except Exception:
+            params["trailingStop"] = str(trailing_stop)
+
+    if active_price is not None:
+        try:
+            active_price_str = str(exchange.price_to_precision(norm_symbol, active_price))
+            params["activePrice"] = active_price_str
+            logging.debug(f"set_position_tp_sl | {symbol} | Adding activePrice={active_price_str}")
+        except Exception:
+            params["activePrice"] = str(active_price)
+
+    # DEBUG: Логируем параметры перед отправкой
+    logging.info(
+        f"set_position_tp_sl | {symbol} | Calling set_trading_stop: "
+        f"symbol={norm_symbol}, TP={tp_final}, SL={sl_final}, params={params}"
+    )
+
     try:
         # Вызываем set_trading_stop
         response = set_trading_stop_fn(
@@ -4057,19 +4213,53 @@ def set_position_tp_sl(
             params=params,
         )
 
-        logging.info(
-            f"set_position_tp_sl | {symbol} | ✅ Success: TP={tp_final}, SL={sl_final}, positionIdx={position_idx}"
-        )
+        # ИСПРАВЛЕНО 2025-12-30: Проверяем ответ от биржи
+        logging.info(f"set_position_tp_sl | {symbol} | Response: {response}")
+
+        # Проверяем успешность через response
+        if isinstance(response, dict):
+            ret_code = response.get("retCode") or response.get("code")
+            ret_msg = response.get("retMsg") or response.get("msg")
+
+            # Bybit V5 возвращает retCode=0 при успехе
+            if ret_code and str(ret_code) != "0":
+                logging.error(f"set_position_tp_sl | {symbol} | Failed with code {ret_code}: {ret_msg}")
+                return False, f"retCode={ret_code}: {ret_msg}"
+
+        log_msg = f"set_position_tp_sl | {symbol} | Success: TP={tp_final}, SL={sl_final}, positionIdx={position_idx}"
+        if trailing_stop is not None:
+            log_msg += f", TrailingStop=${trailing_stop:.2f}"
+        if active_price is not None:
+            log_msg += f", ActivePrice=${active_price:.2f}"
+        logging.info(log_msg)
+
+        # ИСПРАВЛЕНО 2025-12-30: Проверяем, что SL/TP действительно установились на бирже
+        import time
+        time.sleep(0.5)  # Даём бирже время обновить данные
+        verify_sl, verify_tp = check_position_has_sltp(exchange, symbol, cat)
+        if not verify_sl or not verify_tp:
+            logging.warning(
+                f"set_position_tp_sl | {symbol} | VERIFICATION FAILED: "
+                f"Expected SL/TP but got has_sl={verify_sl}, has_tp={verify_tp}"
+            )
+            # Не возвращаем ошибку, т.к. возможна задержка на бирже
+        else:
+            logging.info(f"set_position_tp_sl | {symbol} | VERIFIED: SL/TP confirmed on exchange")
+
         return True, None
 
     except Exception as exc:
         error_msg = str(exc)
-        # ИСПРАВЛЕНО 2025-12-28: Не логируем как ERROR если это "not modified"
+        # ИСПРАВЛЕНО 2025-12-28: Не логируем как ERROR если это "not modified" или "zero position"
         if "34040" in error_msg or "not modified" in error_msg.lower():
             logging.info(f"set_position_tp_sl | {symbol} | Already set (retCode=34040): TP={tp_final}, SL={sl_final}")
             return True, None  # Считаем успехом, т.к. значения уже установлены
+        elif "10001" in error_msg and "zero position" in error_msg.lower():
+            # Позиция уже закрыта - это НЕ ошибка, просто пропускаем
+            logging.debug(f"set_position_tp_sl | {symbol} | Position already closed (retCode=10001)")
+            return False, "Position closed"
         else:
-            logging.error(f"set_position_tp_sl | {symbol} | ❌ Failed: {error_msg}")
+            logging.error(f"set_position_tp_sl | {symbol} | Failed: {error_msg}")
             return False, error_msg
 
 
@@ -4112,8 +4302,23 @@ def check_position_has_sltp(
                     tp_price = info.get("takeProfit") or info.get("tpPrice")
                     sl_price = info.get("stopLoss") or info.get("slPrice")
 
-                    has_tp = tp_price is not None and str(tp_price) != "" and str(tp_price) != "0"
-                    has_sl = sl_price is not None and str(sl_price) != "" and str(sl_price) != "0"
+                    # Улучшенная валидация: проверяем что значение существует И не является нулём
+                    has_tp = False
+                    has_sl = False
+
+                    if tp_price is not None and tp_price != "":
+                        try:
+                            tp_val = float(tp_price)
+                            has_tp = tp_val > 0  # Проверяем что TP действительно больше нуля
+                        except (ValueError, TypeError):
+                            has_tp = False
+
+                    if sl_price is not None and sl_price != "":
+                        try:
+                            sl_val = float(sl_price)
+                            has_sl = sl_val > 0  # Проверяем что SL действительно больше нуля
+                        except (ValueError, TypeError):
+                            has_sl = False
 
                     logging.debug(
                         f"check_position_has_sltp | {symbol} | "
@@ -4325,9 +4530,9 @@ def flush_symbol_logs(symbol: str) -> None:
     for msg in orders:
         level = logging.INFO
         lower = msg.lower()
-        if msg.startswith("❌"):
+        if msg.startswith("ERROR:"):
             level = logging.ERROR
-        elif lower.startswith("order failed") or msg.startswith("⚠️"):
+        elif lower.startswith("order failed") or msg.startswith("WARNING:"):
             level = logging.WARNING
         log(level, "order", symbol, msg)
     for err in errors:
